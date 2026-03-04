@@ -55,7 +55,7 @@ static void Renderer_drawSprite(Renderer* renderer, int32_t spriteIndex, int32_t
     if (0 > tpagIndex) return;
 
     Sprite* sprite = &dw->sprt.sprites[spriteIndex];
-    renderer->vtable->drawSprite(renderer, tpagIndex, x, y, (float) sprite->originX, (float) sprite->originY, 1.0f, 1.0f, 0.0f, renderer->drawColor, renderer->drawAlpha);
+    renderer->vtable->drawSprite(renderer, tpagIndex, x, y, (float) sprite->originX, (float) sprite->originY, 1.0f, 1.0f, 0.0f, 0xFFFFFF, renderer->drawAlpha);
 }
 
 // Full version: draw_sprite_ext(sprite, subimg, x, y, xscale, yscale, rot, color, alpha)
