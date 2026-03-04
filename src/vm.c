@@ -289,6 +289,16 @@ static ArrayAccess popArrayAccess(VMContext* ctx, uint32_t varRef) {
 }
 
 // ===[ Variable Resolution ]===
+static const char* instanceTypeName(int16_t instanceType) {
+    switch (instanceType) {
+        case INSTANCE_SELF: return "self";
+        case INSTANCE_OTHER: return "other";
+        case INSTANCE_GLOBAL: return "global";
+        case INSTANCE_LOCAL: return "local";
+        default: return "instance";
+    }
+}
+
 static Variable* resolveVarDef(VMContext* ctx, uint32_t varRef) {
     uint32_t varIndex = varRef & 0x07FFFFFF;
     require(ctx->dataWin->vari.variableCount > varIndex);
@@ -302,6 +312,7 @@ static RValue resolveVariableRead(VMContext* ctx, int16_t instanceType, uint32_t
     ArrayAccess access = popArrayAccess(ctx, varRef);
 
     // Use instance type from stack when available (VARTYPE_ARRAY pushes it)
+    int16_t originalInstanceType = instanceType;
     if (access.hasInstanceType) {
         instanceType = access.instanceType;
     }
@@ -320,7 +331,11 @@ static RValue resolveVariableRead(VMContext* ctx, int16_t instanceType, uint32_t
                 RValue result = arrayMapGet(ctx->globalArrayMap, varDef->varID, access.arrayIndex);
                 if (shouldTraceVariable(ctx->varReadsToBeTraced, "global", nullptr, varDef->name)) {
                     char* rvalueAsString = RValue_toString(result);
-                    printf("VM: [%s] READ global.%s[%d] -> %s\n", ctx->currentCodeName, varDef->name, access.arrayIndex, rvalueAsString);
+                    if (access.hasInstanceType && originalInstanceType != instanceType) {
+                        printf("VM: [%s] READ global.%s[%d] -> %s (resolved from stack, instruction said: %s)\n", ctx->currentCodeName, varDef->name, access.arrayIndex, rvalueAsString, instanceTypeName(originalInstanceType));
+                    } else {
+                        printf("VM: [%s] READ global.%s[%d] -> %s\n", ctx->currentCodeName, varDef->name, access.arrayIndex, rvalueAsString);
+                    }
                     free(rvalueAsString);
                 }
                 return result;
@@ -333,7 +348,11 @@ static RValue resolveVariableRead(VMContext* ctx, int16_t instanceType, uint32_t
                     RValue result = arrayMapGet(inst->selfArrayMap, varDef->varID, access.arrayIndex);
                     if (shouldTraceVariable(ctx->varReadsToBeTraced, ctx->dataWin->objt.objects[inst->objectIndex].name, "self", varDef->name)) {
                         char* rvalueAsString = RValue_toString(result);
-                        printf("VM: [%s] READ %s.%s[%d] -> %s (instanceId=%d)\n", ctx->currentCodeName, ctx->dataWin->objt.objects[inst->objectIndex].name, varDef->name, access.arrayIndex, rvalueAsString, inst->instanceId);
+                        if (access.hasInstanceType && originalInstanceType != instanceType) {
+                            printf("VM: [%s] READ %s.%s[%d] -> %s (instanceId=%d) (resolved from stack, instruction said: %s)\n", ctx->currentCodeName, ctx->dataWin->objt.objects[inst->objectIndex].name, varDef->name, access.arrayIndex, rvalueAsString, inst->instanceId, instanceTypeName(originalInstanceType));
+                        } else {
+                            printf("VM: [%s] READ %s.%s[%d] -> %s (instanceId=%d)\n", ctx->currentCodeName, ctx->dataWin->objt.objects[inst->objectIndex].name, varDef->name, access.arrayIndex, rvalueAsString, inst->instanceId);
+                        }
                         free(rvalueAsString);
                     }
                     return result;
@@ -388,6 +407,7 @@ static void resolveVariableWrite(VMContext* ctx, int16_t instanceType, uint32_t 
     ArrayAccess access = popArrayAccess(ctx, varRef);
 
     // Use instance type from stack when available (VARTYPE_ARRAY pushes it)
+    int16_t originalInstanceType = instanceType;
     if (access.hasInstanceType) {
         instanceType = access.instanceType;
     }
@@ -408,7 +428,11 @@ static void resolveVariableWrite(VMContext* ctx, int16_t instanceType, uint32_t 
                 arrayMapSet(&ctx->globalArrayMap, varDef->varID, access.arrayIndex, val);
                 if (shouldTraceVariable(ctx->varWritesToBeTraced, "global", nullptr, varDef->name)) {
                     char* rvalueAsString = RValue_toString(val);
-                    printf("VM: [%s] WRITE global.%s[%d] = %s\n", ctx->currentCodeName, varDef->name, access.arrayIndex, rvalueAsString);
+                    if (access.hasInstanceType && originalInstanceType != instanceType) {
+                        printf("VM: [%s] WRITE global.%s[%d] = %s (resolved from stack, instruction said: %s)\n", ctx->currentCodeName, varDef->name, access.arrayIndex, rvalueAsString, instanceTypeName(originalInstanceType));
+                    } else {
+                        printf("VM: [%s] WRITE global.%s[%d] = %s\n", ctx->currentCodeName, varDef->name, access.arrayIndex, rvalueAsString);
+                    }
                     free(rvalueAsString);
                 }
                 return;
@@ -420,7 +444,11 @@ static void resolveVariableWrite(VMContext* ctx, int16_t instanceType, uint32_t 
                     arrayMapSet(&inst->selfArrayMap, varDef->varID, access.arrayIndex, val);
                     if (shouldTraceVariable(ctx->varWritesToBeTraced, ctx->dataWin->objt.objects[inst->objectIndex].name, "self", varDef->name)) {
                         char* rvalueAsString = RValue_toString(val);
-                        printf("VM: [%s] WRITE %s.%s[%d] = %s (instanceId=%d)\n", ctx->currentCodeName, ctx->dataWin->objt.objects[inst->objectIndex].name, varDef->name, access.arrayIndex, rvalueAsString, inst->instanceId);
+                        if (access.hasInstanceType && originalInstanceType != instanceType) {
+                            printf("VM: [%s] WRITE %s.%s[%d] = %s (instanceId=%d) (resolved from stack, instruction said: %s)\n", ctx->currentCodeName, ctx->dataWin->objt.objects[inst->objectIndex].name, varDef->name, access.arrayIndex, rvalueAsString, inst->instanceId, instanceTypeName(originalInstanceType));
+                        } else {
+                            printf("VM: [%s] WRITE %s.%s[%d] = %s (instanceId=%d)\n", ctx->currentCodeName, ctx->dataWin->objt.objects[inst->objectIndex].name, varDef->name, access.arrayIndex, rvalueAsString, inst->instanceId);
+                        }
                         free(rvalueAsString);
                     }
                     return;
@@ -619,6 +647,7 @@ static void handlePop(VMContext* ctx, uint32_t instr, const uint8_t* extraData) 
     RValue val;
     int32_t arrayIndex = -1;
 
+    int16_t originalInstanceType = instanceType;
     if (varType == VARTYPE_ARRAY) {
         // For array writes, GMS pushes: value, instanceType, arrayIndex (arrayIndex on top)
         RValue arrayIdxVal = stackPop(ctx);
@@ -654,7 +683,11 @@ static void handlePop(VMContext* ctx, uint32_t instr, const uint8_t* extraData) 
                     arrayMapSet(&ctx->globalArrayMap, varDef->varID, arrayIndex, val);
                     if (shouldTraceVariable(ctx->varWritesToBeTraced, "global", nullptr, varDef->name)) {
                         char* rvalueAsString = RValue_toString(val);
-                        printf("VM: [%s] WRITE global.%s[%d] = %s\n", ctx->currentCodeName, varDef->name, arrayIndex, rvalueAsString);
+                        if (originalInstanceType != instanceType) {
+                            printf("VM: [%s] WRITE global.%s[%d] = %s (resolved from stack, instruction said: %s)\n", ctx->currentCodeName, varDef->name, arrayIndex, rvalueAsString, instanceTypeName(originalInstanceType));
+                        } else {
+                            printf("VM: [%s] WRITE global.%s[%d] = %s\n", ctx->currentCodeName, varDef->name, arrayIndex, rvalueAsString);
+                        }
                         free(rvalueAsString);
                     }
                     break;
@@ -665,7 +698,11 @@ static void handlePop(VMContext* ctx, uint32_t instr, const uint8_t* extraData) 
                         arrayMapSet(&inst->selfArrayMap, varDef->varID, arrayIndex, val);
                         if (shouldTraceVariable(ctx->varWritesToBeTraced, ctx->dataWin->objt.objects[inst->objectIndex].name, "self", varDef->name)) {
                             char* rvalueAsString = RValue_toString(val);
-                            printf("VM: [%s] WRITE %s.%s[%d] = %s (instanceId=%d)\n", ctx->currentCodeName, ctx->dataWin->objt.objects[inst->objectIndex].name, varDef->name, arrayIndex, rvalueAsString, inst->instanceId);
+                            if (originalInstanceType != instanceType) {
+                                printf("VM: [%s] WRITE %s.%s[%d] = %s (instanceId=%d) (resolved from stack, instruction said: %s)\n", ctx->currentCodeName, ctx->dataWin->objt.objects[inst->objectIndex].name, varDef->name, arrayIndex, rvalueAsString, inst->instanceId, instanceTypeName(originalInstanceType));
+                            } else {
+                                printf("VM: [%s] WRITE %s.%s[%d] = %s (instanceId=%d)\n", ctx->currentCodeName, ctx->dataWin->objt.objects[inst->objectIndex].name, varDef->name, arrayIndex, rvalueAsString, inst->instanceId);
+                            }
                             free(rvalueAsString);
                         }
                     }
