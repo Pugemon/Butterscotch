@@ -340,7 +340,7 @@ void Runner_step(Runner* runner) {
         repeat(GML_ALARM_COUNT, alarmIdx) {
             if (inst->alarm[alarmIdx] > 0) {
                 if (shgeti(runner->vmContext->alarmsToBeTraced, "*") != -1 || shgeti(runner->vmContext->alarmsToBeTraced, object->name) != -1) {
-                    printf("VM: Ticking down Alarm[%d] for %s (%d), current tick is %d\n", alarmIdx, object->name, inst->instanceId, inst->alarm[alarmIdx]);
+                    printf("VM: [%s] Ticking down Alarm[%d] (instanceId=%d), current tick is %d\n", object->name, alarmIdx, inst->instanceId, inst->alarm[alarmIdx]);
                 }
 
                 inst->alarm[alarmIdx]--;
@@ -348,7 +348,7 @@ void Runner_step(Runner* runner) {
                     inst->alarm[alarmIdx] = -1;
 
                     if (shgeti(runner->vmContext->alarmsToBeTraced, "*") != -1 || shgeti(runner->vmContext->alarmsToBeTraced, object->name) != -1) {
-                        printf("VM: Firing Alarm[%d] for %s (%d)\n", alarmIdx, object->name, inst->instanceId);
+                        printf("VM: [%s] Firing Alarm[%d] (instanceId=%d)\n", object->name, alarmIdx, inst->instanceId);
                     }
 
                     Runner_executeEvent(runner, inst, EVENT_ALARM, alarmIdx);
