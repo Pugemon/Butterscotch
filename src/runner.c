@@ -134,6 +134,10 @@ static Instance* createAndInitInstance(Runner* runner, int32_t instanceId, int32
 
     arrput(runner->instances, inst);
 
+    if (shgeti(runner->vmContext->instanceLifecyclesToBeTraced, "*") != 1 || shgeti(runner->vmContext->instanceLifecyclesToBeTraced, objDef->name) != 1) {
+        printf("VM: Instance %s (%d) created at (%f, %f)\n", objDef->name, instanceId, x, y);
+    }
+
     return inst;
 }
 
@@ -232,8 +236,13 @@ Instance* Runner_createInstance(Runner* runner, double x, double y, int32_t obje
 
 void Runner_destroyInstance(Runner* runner, Instance* inst) {
     (void) runner;
+    GameObject* gameObject = &runner->dataWin->objt.objects[inst->objectIndex];
     Runner_executeEvent(runner, inst, EVENT_DESTROY, 0);
     inst->active = false;
+
+    if (shgeti(runner->vmContext->instanceLifecyclesToBeTraced, "*") != -1 || shgeti(runner->vmContext->instanceLifecyclesToBeTraced, gameObject->name) != -1) {
+        printf("VM: Instance %s (%d) destroyed\n", gameObject->name, inst->instanceId);
+    }
 }
 
 void Runner_cleanupDestroyedInstances(Runner* runner) {
