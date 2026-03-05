@@ -781,16 +781,29 @@ static void handlePop(VMContext* ctx, uint32_t instr, const uint8_t* extraData) 
 
     int32_t originalInstanceType = instanceType;
     if (varType == VARTYPE_ARRAY) {
-        // For array writes, GMS pushes: value, instanceType, arrayIndex (arrayIndex on top)
-        RValue arrayIdxVal = stackPop(ctx);
-        arrayIndex = RValue_toInt32(arrayIdxVal);
-        RValue_free(&arrayIdxVal);
+        if (type1 == GML_TYPE_VARIABLE) {
+            // Simple assignment (Pop.v.v): stack bottom-to-top = [value, instanceType, arrayIndex]
+            RValue arrayIdxVal = stackPop(ctx);
+            arrayIndex = RValue_toInt32(arrayIdxVal);
+            RValue_free(&arrayIdxVal);
 
-        RValue instTypeVal = stackPop(ctx);
-        instanceType = RValue_toInt32(instTypeVal);
-        RValue_free(&instTypeVal);
+            RValue instTypeVal = stackPop(ctx);
+            instanceType = RValue_toInt32(instTypeVal);
+            RValue_free(&instTypeVal);
 
-        val = stackPop(ctx);
+            val = stackPop(ctx);
+        } else {
+            // Compound assignment (Pop.i.v, etc.): stack bottom-to-top = [instanceType, arrayIndex, value]
+            val = stackPop(ctx);
+
+            RValue arrayIdxVal = stackPop(ctx);
+            arrayIndex = RValue_toInt32(arrayIdxVal);
+            RValue_free(&arrayIdxVal);
+
+            RValue instTypeVal = stackPop(ctx);
+            instanceType = RValue_toInt32(instTypeVal);
+            RValue_free(&instTypeVal);
+        }
     } else {
         val = stackPop(ctx);
     }
