@@ -2118,6 +2118,36 @@ static RValue builtinMakeColour(VMContext* ctx, RValue* args, int32_t argCount) 
     return builtinMakeColor(ctx, args, argCount);
 }
 
+static RValue builtinMakeColorHsv([[maybe_unused]] VMContext* ctx, RValue* args, int32_t argCount) {
+    if (3 > argCount) return RValue_makeReal(0.0);
+    // GML uses 0-255 range for H, S, V
+    double h = RValue_toReal(args[0]) / 255.0 * 360.0;
+    double s = RValue_toReal(args[1]) / 255.0;
+    double v = RValue_toReal(args[2]) / 255.0;
+
+    double c = v * s;
+    double x = c * (1.0 - fabs(fmod(h / 60.0, 2.0) - 1.0));
+    double m = v - c;
+
+    double r1, g1, b1;
+    if (360.0 > h && h >= 300.0)      { r1 = c; g1 = 0; b1 = x; }
+    else if (300.0 > h && h >= 240.0) { r1 = x; g1 = 0; b1 = c; }
+    else if (240.0 > h && h >= 180.0) { r1 = 0; g1 = x; b1 = c; }
+    else if (180.0 > h && h >= 120.0) { r1 = 0; g1 = c; b1 = x; }
+    else if (120.0 > h && h >= 60.0)  { r1 = x; g1 = c; b1 = 0; }
+    else                               { r1 = c; g1 = x; b1 = 0; }
+
+    int32_t r = (int32_t) round((r1 + m) * 255.0);
+    int32_t g = (int32_t) round((g1 + m) * 255.0);
+    int32_t b = (int32_t) round((b1 + m) * 255.0);
+
+    return RValue_makeReal((double) (r | (g << 8) | (b << 16)));
+}
+
+static RValue builtinMakeColourHsv(VMContext* ctx, RValue* args, int32_t argCount) {
+    return builtinMakeColorHsv(ctx, args, argCount);
+}
+
 // Display stubs
 STUB_RETURN_ZERO(display_get_width)
 STUB_RETURN_ZERO(display_get_height)
@@ -2786,6 +2816,8 @@ void VMBuiltins_registerAll(void) {
     // Color
     registerBuiltin("make_color_rgb", builtinMakeColor);
     registerBuiltin("make_colour_rgb", builtinMakeColour);
+    registerBuiltin("make_color_hsv", builtinMakeColorHsv);
+    registerBuiltin("make_colour_hsv", builtinMakeColourHsv);
 
     // Display
     registerBuiltin("display_get_width", builtin_display_get_width);
