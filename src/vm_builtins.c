@@ -1841,6 +1841,53 @@ static RValue builtinActionSetFriction(VMContext* ctx, [[maybe_unused]] RValue* 
     return RValue_makeUndefined();
 }
 
+static RValue builtinActionSetGravity(VMContext* ctx, [[maybe_unused]] RValue* args, [[maybe_unused]] int32_t argCount) {
+    double dir = RValue_toReal(args[0]);
+    double grav = RValue_toReal(args[1]);
+
+    if (ctx->currentInstance != nullptr) {
+        Instance* inst = (Instance*) ctx->currentInstance;
+        if (ctx->actionRelativeFlag) {
+            inst->gravityDirection += dir;
+            inst->gravity += grav;
+        } else {
+            inst->gravityDirection = dir;
+            inst->gravity = grav;
+        }
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtinActionSetHspeed(VMContext* ctx, [[maybe_unused]] RValue* args, [[maybe_unused]] int32_t argCount) {
+    double val = RValue_toReal(args[0]);
+
+    if (ctx->currentInstance != nullptr) {
+        Instance* inst = (Instance*) ctx->currentInstance;
+        if (ctx->actionRelativeFlag) {
+            inst->hspeed += val;
+        } else {
+            inst->hspeed = val;
+        }
+        Instance_computeSpeedFromComponents(inst);
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtinActionSetVspeed(VMContext* ctx, [[maybe_unused]] RValue* args, [[maybe_unused]] int32_t argCount) {
+    double val = RValue_toReal(args[0]);
+
+    if (ctx->currentInstance != nullptr) {
+        Instance* inst = (Instance*) ctx->currentInstance;
+        if (ctx->actionRelativeFlag) {
+            inst->vspeed += val;
+        } else {
+            inst->vspeed = val;
+        }
+        Instance_computeSpeedFromComponents(inst);
+    }
+    return RValue_makeUndefined();
+}
+
 // Buffer stubs
 STUB_RETURN_ZERO(buffer_create)
 STUB_RETURN_UNDEFINED(buffer_delete)
@@ -3028,6 +3075,9 @@ void VMBuiltins_registerAll(void) {
     registerBuiltin("action_move", builtinActionMove);
     registerBuiltin("action_move_to", builtinActionMoveTo);
     registerBuiltin("action_set_friction", builtinActionSetFriction);
+    registerBuiltin("action_set_gravity", builtinActionSetGravity);
+    registerBuiltin("action_set_hspeed", builtinActionSetHspeed);
+    registerBuiltin("action_set_vspeed", builtinActionSetVspeed);
     registerBuiltin("event_inherited", builtinEventInherited);
     registerBuiltin("event_user", builtinEventUser);
     registerBuiltin("event_perform", builtinEventPerform);
