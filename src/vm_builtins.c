@@ -513,6 +513,10 @@ void VMBuiltins_setVariable(VMContext* ctx, const char* name, RValue val, int32_
     }
 
     // Room properties
+    if (strcmp(name, "room") == 0) {
+        runner->pendingRoom = RValue_toInt32(val);
+        return;
+    }
     if (strcmp(name, "room_persistent") == 0) {
         runner->currentRoom->persistent = RValue_toBool(val);
         return;
@@ -522,7 +526,7 @@ void VMBuiltins_setVariable(VMContext* ctx, const char* name, RValue val, int32_
     if (strcmp(name, "os_type") == 0 || strcmp(name, "os_windows") == 0 ||
         strcmp(name, "os_ps4") == 0 || strcmp(name, "os_psvita") == 0 ||
         strcmp(name, "id") == 0 || strcmp(name, "object_index") == 0 ||
-        strcmp(name, "current_time") == 0 || strcmp(name, "room") == 0 ||
+        strcmp(name, "current_time") == 0 ||
         strcmp(name, "view_current") == 0 || strcmp(name, "path_index") == 0) {
         fprintf(stderr, "VM: Warning - attempted write to read-only built-in '%s'\n", name);
         return;
