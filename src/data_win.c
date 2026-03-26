@@ -1050,7 +1050,11 @@ static void parseROOM(BinaryReader* reader, DataWin* dw) {
                     go->scaleY = BinaryReader_readFloat32(reader);
                     go->color = BinaryReader_readUint32(reader);
                     go->rotation = BinaryReader_readFloat32(reader);
-                    go->preCreateCode = BinaryReader_readInt32(reader); // bytecodeVersion >= 16
+                    if (dw->gen8.bytecodeVersion >= 16) {
+                        go->preCreateCode = BinaryReader_readInt32(reader);
+                    } else {
+                        go->preCreateCode = -1;
+                    }
                 }
             } else {
                 room->gameObjects = nullptr;
