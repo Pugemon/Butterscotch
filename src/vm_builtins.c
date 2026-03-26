@@ -1555,6 +1555,18 @@ static RValue builtinArrayLength1d(VMContext* ctx, RValue* args, int32_t argCoun
         }
     }
 
+    // Also search localArrayMap
+    repeat(hmlen(ctx->localArrayMap), idx) {
+        int64_t key = ctx->localArrayMap[idx].key;
+        int32_t keyVarID = (int32_t)(key >> 32);
+        if (keyVarID == varID) {
+            int32_t keyArrayIndex = (int32_t)(key & 0xFFFFFFFF);
+            if (keyArrayIndex > maxIndex) {
+                maxIndex = keyArrayIndex;
+            }
+        }
+    }
+
     return RValue_makeReal((GMLReal)(maxIndex + 1));
 }
 
