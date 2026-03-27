@@ -1,0 +1,23 @@
+﻿#pragma once
+
+#include "audio_system.h"
+#include <SDL_mixer.h>
+#include <stdio.h>
+
+#define SOUND_INSTANCE_ID_BASE 100000
+
+typedef struct {
+    AudioSystem base;
+    FileSystem* fileSystem;
+    
+    FILE* dataWinFile;
+    Mix_Chunk** chunks;
+    Mix_Music** music;
+    uint8_t** compressedMusicBuf;
+
+    int32_t* channelToSoundIndex;
+    int32_t currentMusicSoundIndex;
+
+} SdlMixerAudioSystem;
+
+AudioSystem* SdlMixerAudioSystem_create(void);
