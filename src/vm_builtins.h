@@ -10,7 +10,7 @@ BuiltinFunc VMBuiltins_find(const char *name);
 
 RValue VMBuiltins_getVariable(VMContext *ctx, Variable* varDef, int32_t arrayIndex);
 
-void VMBuiltins_setVariable(VMContext *ctx, const char *name, RValue val, int32_t arrayIndex);
+void VMBuiltins_setVariable(VMContext *ctx, Variable *varDef, RValue val, int32_t arrayIndex);
 
 
 typedef enum {

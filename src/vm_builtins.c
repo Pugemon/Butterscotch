@@ -358,309 +358,107 @@ RValue VMBuiltins_getVariable(VMContext *ctx, Variable* varDef, int32_t arrayInd
     return RValue_makeReal(0.0);
 }
 
-    void VMBuiltins_setVariable(VMContext *ctx, const char *name, RValue val, int32_t arrayIndex) {
-        Instance *inst = (Instance *) ctx->currentInstance;
-        Runner *runner = (Runner *) requireNotNullMessage(ctx->runner, "VM: setVariable called but no runner!");
+    void VMBuiltins_setVariable(VMContext *ctx, Variable* varDef, RValue val, int32_t arrayIndex) {
+    Instance* inst = (Instance*) ctx->currentInstance;
+    Runner* runner = (Runner*) ctx->runner;
 
-        // Per-instance properties
-        if (inst != nullptr) {
-            if (strcmp(name, "image_speed") == 0) {
-                inst->imageSpeed = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "image_index") == 0) {
-                inst->imageIndex = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "image_xscale") == 0) {
-                inst->imageXscale = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "image_yscale") == 0) {
-                inst->imageYscale = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "image_angle") == 0) {
-                inst->imageAngle = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "image_alpha") == 0) {
-                inst->imageAlpha = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "image_blend") == 0) {
-                inst->imageBlend = (uint32_t) RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "sprite_index") == 0) {
-                inst->spriteIndex = RValue_toInt32(val);
-                return;
-            }
-            if (strcmp(name, "visible") == 0) {
-                inst->visible = RValue_toBool(val);
-                return;
-            }
-            if (strcmp(name, "depth") == 0) {
-                inst->depth = RValue_toInt32(val);
-                return;
-            }
-            if (strcmp(name, "x") == 0) {
-                inst->x = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "y") == 0) {
-                inst->y = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "persistent") == 0) {
-                inst->persistent = RValue_toBool(val);
-                return;
-            }
-            if (strcmp(name, "solid") == 0) {
-                inst->solid = RValue_toBool(val);
-                return;
-            }
-            if (strcmp(name, "xprevious") == 0) {
-                inst->xprevious = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "yprevious") == 0) {
-                inst->yprevious = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "xstart") == 0) {
-                inst->xstart = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "ystart") == 0) {
-                inst->ystart = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "mask_index") == 0) {
-                inst->maskIndex = RValue_toInt32(val);
-                return;
-            }
-            if (strcmp(name, "speed") == 0) {
-                inst->speed = RValue_toReal(val);
-                Instance_computeComponentsFromSpeed(inst);
-                return;
-            }
-            if (strcmp(name, "direction") == 0) {
-                GMLReal d = GMLReal_fmod(RValue_toReal(val), 360.0);
-                if (d < 0.0) d += 360.0;
-                inst->direction = d;
-                Instance_computeComponentsFromSpeed(inst);
-                return;
-            }
-            if (strcmp(name, "hspeed") == 0) {
-                inst->hspeed = RValue_toReal(val);
-                Instance_computeSpeedFromComponents(inst);
-                return;
-            }
-            if (strcmp(name, "vspeed") == 0) {
-                inst->vspeed = RValue_toReal(val);
-                Instance_computeSpeedFromComponents(inst);
-                return;
-            }
-            if (strcmp(name, "friction") == 0) {
-                inst->friction = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "gravity") == 0) {
-                inst->gravity = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "gravity_direction") == 0) {
-                inst->gravityDirection = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "alarm") == 0) {
-                if (isValidAlarmIndex(arrayIndex)) {
-                    int32_t newValue = RValue_toInt32(val);
-                    if (shgeti(ctx->alarmsToBeTraced, "*") != -1 || shgeti(ctx->alarmsToBeTraced,
-                                                                           runner->dataWin->objt.objects[inst->
-                                                                               objectIndex].
-                                                                           name) != -1) {
-                        fprintf(stderr, "VM: [%s] Setting Alarm[%d] = %d (instanceId=%d)\n",
-                                runner->dataWin->objt.objects[inst->objectIndex].name, arrayIndex, newValue,
-                                inst->instanceId);
-                    }
-                    inst->alarm[arrayIndex] = newValue;
-                }
-                return;
-            }
+    if (!inst && varDef->builtinId < B_ROOM) return; // Нужен инстанс для свойств
 
-            // Path instance variables (writable)
-            if (strcmp(name, "path_position") == 0) {
-                inst->pathPosition = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "path_speed") == 0) {
-                inst->pathSpeed = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "path_scale") == 0) {
-                inst->pathScale = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "path_orientation") == 0) {
-                inst->pathOrientation = RValue_toReal(val);
-                return;
-            }
-            if (strcmp(name, "path_endaction") == 0) {
-                inst->pathEndAction = RValue_toInt32(val);
-                return;
-            }
-        }
+    switch (varDef->builtinId) {
+        // Координаты и движение
+        case B_X: inst->x = RValue_toReal(val); break;
+        case B_Y: inst->y = RValue_toReal(val); break;
+        case B_XPREVIOUS: inst->xprevious = RValue_toReal(val); break;
+        case B_YPREVIOUS: inst->yprevious = RValue_toReal(val); break;
+        case B_XSTART: inst->xstart = RValue_toReal(val); break;
+        case B_YSTART: inst->ystart = RValue_toReal(val); break;
 
-        // Keyboard variables
-        if (strcmp(name, "keyboard_key") == 0) {
-            runner->keyboard->lastKey = RValue_toInt32(val);
-            return;
-        }
-        if (strcmp(name, "keyboard_lastkey") == 0) {
-            runner->keyboard->lastKey = RValue_toInt32(val);
-            return;
-        }
+        case B_SPEED:
+            inst->speed = RValue_toReal(val);
+            Instance_computeComponentsFromSpeed(inst);
+            break;
+        case B_DIRECTION:
+            inst->direction = GMLReal_fmod(RValue_toReal(val), 360.0);
+            if (inst->direction < 0) inst->direction += 360.0;
+            Instance_computeComponentsFromSpeed(inst);
+            break;
+        case B_HSPEED:
+            inst->hspeed = RValue_toReal(val);
+            Instance_computeSpeedFromComponents(inst);
+            break;
+        case B_VSPEED:
+            inst->vspeed = RValue_toReal(val);
+            Instance_computeSpeedFromComponents(inst);
+            break;
+        case B_FRICTION: inst->friction = RValue_toReal(val); break;
+        case B_GRAVITY: inst->gravity = RValue_toReal(val); break;
+        case B_GRAVITY_DIRECTION: inst->gravityDirection = RValue_toReal(val); break;
 
-        // View properties
-        if (strcmp(name, "view_xview") == 0) {
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) {
-                runner->currentRoom->views[arrayIndex].viewX = RValue_toInt32(val);
-            }
-            return;
-        }
-        if (strcmp(name, "view_yview") == 0) {
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) {
-                runner->currentRoom->views[arrayIndex].viewY = RValue_toInt32(val);
-            }
-            return;
-        }
-        if (strcmp(name, "view_wview") == 0) {
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) {
-                runner->currentRoom->views[arrayIndex].viewWidth = RValue_toInt32(val);
-            }
-            return;
-        }
-        if (strcmp(name, "view_hview") == 0) {
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) {
-                runner->currentRoom->views[arrayIndex].viewHeight = RValue_toInt32(val);
-            }
-            return;
-        }
-        if (strcmp(name, "view_visible") == 0) {
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) {
-                runner->currentRoom->views[arrayIndex].enabled = RValue_toBool(val);
-            }
-            return;
-        }
-        if (strcmp(name, "view_angle") == 0) {
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) {
-                runner->viewAngles[arrayIndex] = (float) RValue_toReal(val);
-            }
-            return;
-        }
-        if (strcmp(name, "view_hborder") == 0) {
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) {
-                runner->currentRoom->views[arrayIndex].borderX = RValue_toInt32(val);
-            }
-            return;
-        }
-        if (strcmp(name, "view_vborder") == 0) {
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) {
-                runner->currentRoom->views[arrayIndex].borderY = RValue_toInt32(val);
-            }
-            return;
-        }
-        if (strcmp(name, "view_object") == 0) {
-            if (arrayIndex >= 0 && MAX_VIEWS > arrayIndex) {
-                runner->currentRoom->views[arrayIndex].objectId = RValue_toInt32(val);
-            }
-            return;
-        }
+        // Визуальная часть
+        case B_SPRITE_INDEX: inst->spriteIndex = RValue_toInt32(val); break;
+        case B_IMAGE_INDEX: inst->imageIndex = RValue_toReal(val); break;
+        case B_IMAGE_SPEED: inst->imageSpeed = RValue_toReal(val); break;
+        case B_IMAGE_XSCALE: inst->imageXscale = RValue_toReal(val); break;
+        case B_IMAGE_YSCALE: inst->imageYscale = RValue_toReal(val); break;
+        case B_IMAGE_ANGLE: inst->imageAngle = RValue_toReal(val); break;
+        case B_IMAGE_ALPHA: inst->imageAlpha = RValue_toReal(val); break;
+        case B_IMAGE_BLEND: inst->imageBlend = (uint32_t)RValue_toInt64(val); break;
+        case B_VISIBLE: inst->visible = RValue_toBool(val); break;
+        case B_DEPTH: inst->depth = RValue_toInt32(val); break;
+        case B_PERSISTENT: inst->persistent = RValue_toBool(val); break;
+        case B_SOLID: inst->solid = RValue_toBool(val); break;
+        case B_MASK_INDEX: inst->maskIndex = RValue_toInt32(val); break;
 
-        // Background properties
-        if (strcmp(name, "background_visible") == 0) {
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
-                runner->backgrounds[arrayIndex].visible = RValue_toBool(val);
-            return;
-        }
-        if (strcmp(name, "background_index") == 0) {
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
-                runner->backgrounds[arrayIndex].backgroundIndex = RValue_toInt32(val);
-            return;
-        }
-        if (strcmp(name, "background_x") == 0) {
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
-                runner->backgrounds[arrayIndex].x = (float) RValue_toReal(val);
-            return;
-        }
-        if (strcmp(name, "background_y") == 0) {
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
-                runner->backgrounds[arrayIndex].y = (float) RValue_toReal(val);
-            return;
-        }
-        if (strcmp(name, "background_hspeed") == 0) {
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
-                runner->backgrounds[arrayIndex].speedX = (float) RValue_toReal(val);
-            return;
-        }
-        if (strcmp(name, "background_vspeed") == 0) {
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
-                runner->backgrounds[arrayIndex].speedY = (float) RValue_toReal(val);
-            return;
-        }
-        if (strcmp(name, "background_alpha") == 0) {
-            if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex)
-                runner->backgrounds[arrayIndex].alpha = (float) RValue_toReal(val);
-            return;
-        }
-        if (strcmp(name, "background_color") == 0 || strcmp(name, "background_colour") == 0) {
-            runner->backgroundColor = (uint32_t) RValue_toInt32(val);
-            return;
-        }
+        case B_ALARM:
+            if (arrayIndex >= 0 && arrayIndex < GML_ALARM_COUNT) {
+                inst->alarm[arrayIndex] = RValue_toInt32(val);
+            }
+            break;
 
-        // Room properties
-        if (strcmp(name, "room") == 0) {
-            runner->pendingRoom = RValue_toInt32(val);
-            return;
-        }
-        if (strcmp(name, "room_persistent") == 0) {
-            runner->currentRoom->persistent = RValue_toBool(val);
-            return;
-        }
+        // Пути
+        case B_PATH_POSITION: inst->pathPosition = RValue_toReal(val); break;
+        case B_PATH_SPEED: inst->pathSpeed = RValue_toReal(val); break;
+        case B_PATH_SCALE: inst->pathScale = RValue_toReal(val); break;
+        case B_PATH_ORIENTATION: inst->pathOrientation = RValue_toReal(val); break;
+        case B_PATH_ENDACTION: inst->pathEndAction = RValue_toInt32(val); break;
 
-        // Read-only variables (silently ignore)
-        if (strcmp(name, "os_type") == 0 || strcmp(name, "os_windows") == 0 ||
-            strcmp(name, "os_ps4") == 0 || strcmp(name, "os_psvita") == 0 ||
-            strcmp(name, "id") == 0 || strcmp(name, "object_index") == 0 ||
-            strcmp(name, "current_time") == 0 ||
-            strcmp(name, "view_current") == 0 || strcmp(name, "path_index") == 0) {
-            fprintf(stderr, "VM: Warning - attempted write to read-only built-in '%s'\n", name);
-            return;
-        }
+        // Глобальные настройки
+        case B_ROOM: runner->pendingRoom = RValue_toInt32(val); break;
+        case B_ROOM_PERSISTENT: runner->currentRoom->persistent = RValue_toBool(val); break;
 
-        // argument[N] - array-style write to script arguments
-        if (strcmp(name, "argument") == 0) {
-            if (ctx->scriptArgs != nullptr && ctx->scriptArgCount > arrayIndex && arrayIndex >= 0) {
+        case B_BG_COLOR: runner->backgroundColor = (uint32_t)RValue_toInt64(val); break;
+
+        // Вьюхи
+        case B_VIEW_XVIEW: if(arrayIndex >= 0 && arrayIndex < 8) runner->currentRoom->views[arrayIndex].viewX = RValue_toInt32(val); break;
+        case B_VIEW_YVIEW: if(arrayIndex >= 0 && arrayIndex < 8) runner->currentRoom->views[arrayIndex].viewY = RValue_toInt32(val); break;
+        case B_VIEW_VISIBLE: if(arrayIndex >= 0 && arrayIndex < 8) runner->currentRoom->views[arrayIndex].enabled = RValue_toBool(val); break;
+        case B_VIEW_ANGLE: if(arrayIndex >= 0 && arrayIndex < 8) runner->viewAngles[arrayIndex] = (float)RValue_toReal(val); break;
+
+        // Аргументы (если скрипт меняет свои аргументы)
+        case B_ARGUMENT:
+            if (ctx->scriptArgs && arrayIndex >= 0 && arrayIndex < ctx->scriptArgCount) {
                 RValue_free(&ctx->scriptArgs[arrayIndex]);
                 ctx->scriptArgs[arrayIndex] = val;
+                return; // Не освобождаем val, так как мы ее сохранили
             }
-            return;
-        }
+            break;
 
-        // Argument variables
-        const int argNumber = extractArgumentNumber(name);
-        if (argNumber != -1) {
-            if (ctx->scriptArgs != nullptr && ctx->scriptArgCount > argNumber) {
-                RValue_free(&ctx->scriptArgs[argNumber]);
-                ctx->scriptArgs[argNumber] = val;
+        default:
+            // Обработка argument0...15
+            if (varDef->builtinId >= B_ARGUMENT0 && varDef->builtinId <= B_ARGUMENT15) {
+                int argIdx = varDef->builtinId - B_ARGUMENT0;
+                if (ctx->scriptArgs && argIdx < ctx->scriptArgCount) {
+                    RValue_free(&ctx->scriptArgs[argIdx]);
+                    ctx->scriptArgs[argIdx] = val;
+                    return;
+                }
             }
-            return;
-        }
-
-        fprintf(stderr, "VM: Unhandled built-in variable write '%s' (arrayIndex=%d)\n", name, arrayIndex);
+            fprintf(stderr, "VM: Unhandled built-in write '%s'\n", varDef->name);
+            break;
     }
+
+    RValue_free(&val); // Освобождаем RValue после записи (если не сохранили в аргументах)
+}
 
     // ===[ BUILTIN FUNCTION IMPLEMENTATIONS ]===
 
