@@ -1149,7 +1149,7 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
         }
     }
 }
-#ifdef __3DS__
+#if defined(__3DS__) || defined(BUTTERSCOTCH_PLATFORM_SDL1)
 static void parseAUDO(BinaryReader* reader, DataWin* dw) {
     Audo* a = &dw->audo;
     uint32_t count;
