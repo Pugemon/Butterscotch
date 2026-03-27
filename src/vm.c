@@ -1554,7 +1554,7 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
     EnvFrame* frame = &ctx->envStack[ctx->envDepth++];
     frame->savedInstance = (Instance*) ctx->currentInstance;
     frame->savedOtherInstance = (Instance*) ctx->otherInstance;
-    frame->instanceList = nullptr; // stb_ds array
+    frame->instanceList = nullptr;
     frame->currentIndex = 0;
 
     Instance* trueOther = (Instance*) ctx->otherInstance;
@@ -1562,9 +1562,7 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
 
     Runner* runner = (Runner*) ctx->runner;
 
-    if (target == INSTANCE_SELF) {
-        return;
-    }
+    if (target == INSTANCE_SELF) return;
 
     if (target == INSTANCE_OTHER) {
         // parent frame is at ctx->envDepth - 2 (since we just incremented it)
@@ -1583,11 +1581,9 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
 
     if (target == INSTANCE_ALL) {
         int32_t instanceCount = (int32_t) arrlen(runner->instances);
-        for (int32_t i = 0; instanceCount > i; i++) {
+        for (int32_t i = instanceCount - 1; i >= 0; i--) {
             Instance* inst = runner->instances[i];
-            if (inst->active) {
-                arrput(frame->instanceList, inst);
-            }
+            if (inst->active) arrput(frame->instanceList, inst);
         }
 
         if (arrlen(frame->instanceList) == 0) {
@@ -1602,7 +1598,7 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
 
     if (target >= 0 && 100000 > target) {
         int32_t instanceCount = (int32_t) arrlen(runner->instances);
-        for (int32_t i = 0; instanceCount > i; i++) {
+        for (int32_t i = instanceCount - 1; i >= 0; i--) {
             Instance* inst = runner->instances[i];
             if (inst->active && VM_isObjectOrDescendant(ctx->dataWin, inst->objectIndex, target)) {
                 arrput(frame->instanceList, inst);

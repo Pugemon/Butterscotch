@@ -219,6 +219,7 @@ static ObjectEvent* findEventAndOwner(DataWin* dataWin, int32_t objectIndex, int
     while (currentObj >= 0 && (uint32_t) currentObj < dataWin->objt.count && 32 > depth) {
         GameObject* obj = &dataWin->objt.objects[currentObj];
 
+        // Загружаем события по требованию
         Runner_loadObjectEvents(runner, obj);
 
         if (OBJT_EVENT_TYPE_COUNT > eventType) {
@@ -227,7 +228,7 @@ static ObjectEvent* findEventAndOwner(DataWin* dataWin, int32_t objectIndex, int
                 ObjectEvent* evt = &eventList->events[i];
                 if ((int32_t) evt->eventSubtype == eventSubtype) {
                     if (outOwnerObjectIndex != nullptr) *outOwnerObjectIndex = currentObj;
-                    return evt;
+                    return evt; // Возвращаем ВСЁ событие целиком (все D&D блоки)
                 }
             }
         }
@@ -381,9 +382,7 @@ void Runner_executeEventFromObject(Runner* runner, Instance* instance, int32_t s
     if (shlen(vm->eventsToBeTraced) != -1) {
         const char* eventName = Runner_getEventName(eventType, eventSubtype);
         const char* objectName = runner->dataWin->objt.objects[instance->objectIndex].name;
-
         bool shouldTrace = shgeti(vm->eventsToBeTraced, "*") != -1 || shgeti(vm->eventsToBeTraced, eventName) != -1 || shgeti(vm->eventsToBeTraced, objectName) != -1;
-
         if (shouldTrace) {
             if (eventType == EVENT_ALARM) {
                 fprintf(stderr, "Runner: [%s] %s %d (instanceId=%d)\n", objectName, eventName, eventSubtype, instance->instanceId);
@@ -393,13 +392,12 @@ void Runner_executeEventFromObject(Runner* runner, Instance* instance, int32_t s
         }
     }
 
-    // Выполняем ВСЕ действия (actions) по порядку
+    // ИСПОЛНЯЕМ ВСЕ ЭКШЕНЫ СОБЫТИЯ ПО ПОРЯДКУ
     repeat(evt->actionCount, i) {
         int32_t codeId = evt->actions[i].codeId;
         if (codeId >= 0) {
             executeCode(runner, instance, codeId);
-            // Если во время исполнения скрипта инстанс был уничтожен (например D&D блоком Destroy Instance), прерываем оставшиеся действия
-            if (!instance->active) break;
+            if (!instance->active) break; // Прервать, если объект уничтожил себя
         }
     }
 
@@ -415,7 +413,8 @@ void Runner_executeEvent(Runner* runner, Instance* instance, int32_t eventType, 
 void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype) {
     // Iterate over a snapshot of the current instance count to avoid issues if instances are added
     int32_t count = (int32_t) arrlen(runner->instances);
-    repeat(count, i) {
+    // GMS1.4 исполняет события инстансов в ОБРАТНОМ порядке (от новых к старым)
+    for (int32_t i = count - 1; i >= 0; i--) {
         Instance* inst = runner->instances[i];
         if (inst->active) {
             Runner_executeEvent(runner, inst, eventType, eventSubtype);
@@ -967,7 +966,7 @@ static void dispatchCollisionEvents(Runner* runner) {
         }
     }
 
-    repeat(count, i) {
+    for (int32_t i = count - 1; i >= 0; i--) {
         Instance* self = runner->instances[i];
         if (!self->active) continue;
 
@@ -989,7 +988,7 @@ static void dispatchCollisionEvents(Runner* runner) {
                     if (evt->actionCount == 0 || 0 > evt->actions[0].codeId) continue;
 
                     // Check all instances of the target object
-                    repeat(count, j) {
+                    for (int32_t j = count - 1; j >= 0; j--) {
                         Instance* other = runner->instances[j];
                         if (!other->active || other == self) continue;
                         if (!Collision_matchesTarget(dataWin, other, targetObjIndex)) continue;
@@ -1093,7 +1092,8 @@ static void dispatchOutsideRoomEvents(Runner* runner) {
     int32_t roomHeight = (int32_t) runner->currentRoom->height;
     int32_t count = (int32_t) arrlen(runner->instances);
 
-    repeat(count, i) {
+    // Обратный проход
+    for (int32_t i = count - 1; i >= 0; i--) {
         Instance* inst = runner->instances[i];
         if (!inst->active) continue;
 
@@ -1268,7 +1268,7 @@ void Runner_step(Runner* runner) {
 
     // Process alarms for all instances
     int32_t alarmCount = (int32_t) arrlen(runner->instances);
-    repeat(alarmCount, i) {
+    for (int32_t i = alarmCount - 1; i >= 0; i--) {
         Instance* inst = runner->instances[i];
         if (!inst->active) continue;
 
@@ -1303,7 +1303,7 @@ void Runner_step(Runner* runner) {
 
     // Apply motion: friction, gravity, then x += hspeed, y += vspeed
     int32_t motionCount = (int32_t) arrlen(runner->instances);
-    repeat(motionCount, mi) {
+    for (int32_t mi = motionCount - 1; mi >= 0; mi--) {
         Instance* inst = runner->instances[mi];
         if (!inst->active) continue;
 
