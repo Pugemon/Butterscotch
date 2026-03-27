@@ -29,8 +29,8 @@
 #define FORCE_INTERNAL_3DS_W 400
 #define FORCE_INTERNAL_3DS_H 240
 
-#define MAX_CACHED_TEXTURES 4 // В стандартном паке Undertale 26 текстур
-#define MAX_TEXTURE_PAGES 4
+#define MAX_CACHED_TEXTURES 26 // В стандартном паке Undertale 26 текстур
+#define MAX_TEXTURE_PAGES 8
 
 // Макрос для помощи компилятору в векторизации циклов (SIMD)
 #if defined(__GNUC__) || defined(__clang__)
@@ -42,13 +42,13 @@
 #endif
 
 static int g_renderParity = -1;
-static SDL_Surface* g_presentBuf = NULL;
+static SDL_Surface* g_presentBuf = nullptr;
 static int g_presentW = 0;
 static int g_presentH = 0;
 static int g_interlaceParity = 0;
 
 static uint32_t g_currentFrame = 0;
-static uint32_t* g_texLastUsed = NULL;
+static uint32_t* g_texLastUsed = nullptr;
 static int g_loadedTexCount = 0;
 
 static void fastDraw_Sprite(SDL_Surface* src, SDL_Rect* sr, SDL_Surface* dst,
