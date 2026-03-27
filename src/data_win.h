@@ -637,6 +637,7 @@ typedef struct {
     int32_t varID;
     uint32_t occurrences;
     uint32_t firstAddress;
+    int16_t builtinId;
 } Variable;
 
 typedef struct {

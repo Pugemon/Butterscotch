@@ -1065,6 +1065,7 @@ static void parseVARI(BinaryReader* reader, DataWin* dw, uint32_t chunkLength) {
             var->varID = BinaryReader_readInt32(reader);
             var->occurrences = BinaryReader_readUint32(reader);
             var->firstAddress = BinaryReader_readUint32(reader);
+            var->builtinId = -1;
         }
     } else {
         v->variables = nullptr;

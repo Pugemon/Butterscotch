@@ -664,6 +664,9 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     runner->currentRoom = room;
     runner->currentRoomIndex = roomIndex;
 
+    // Загружаем данные для новой комнаты
+    Runner_loadRoomData(runner, room);
+
     // Find position in room order
     runner->currentRoomOrderPosition = -1;
     repeat(dataWin->gen8.roomOrderCount, i) {
@@ -715,9 +718,6 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     }
 
     // === Normal room initialization (first visit, or non-persistent room) ===
-
-    // Загружаем данные для новой комнаты
-    Runner_loadRoomData(runner, room);
 
     // Reset tile layer state for the new room
     hmfree(runner->tileLayerMap);

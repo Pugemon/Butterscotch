@@ -388,7 +388,7 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
         Instance* savedInstance = (Instance*) ctx->currentInstance;
         bool needsInstanceSwap = (instanceType >= 0) || (instanceType == INSTANCE_OTHER);
         if (needsInstanceSwap) ctx->currentInstance = targetInstance;
-        RValue result = VMBuiltins_getVariable(ctx, varDef->name, access.arrayIndex);
+        RValue result = VMBuiltins_getVariable(ctx, varDef, access.arrayIndex);
         if (needsInstanceSwap) ctx->currentInstance = savedInstance;
 
         // Trace built-in variable reads
@@ -853,7 +853,7 @@ static void handlePushBltn(VMContext* ctx, uint32_t instr, const uint8_t* extraD
 
     ArrayAccess access = popArrayAccess(ctx, varRef);
 
-    RValue val = VMBuiltins_getVariable(ctx, varDef->name, access.arrayIndex);
+    RValue val = VMBuiltins_getVariable(ctx, varDef, access.arrayIndex);
     stackPush(ctx,val);
 }
 
@@ -1851,7 +1851,6 @@ VMContext* VM_create(DataWin* dataWin) {
     ctx->envDepth = 0;
     ctx->selfId = -1;
     ctx->otherId = -1;
-    ctx->callDepth = 0;
     ctx->currentEventType = -1;
     ctx->currentEventSubtype = -1;
     ctx->currentEventObjectIndex = -1;
@@ -1859,8 +1858,21 @@ VMContext* VM_create(DataWin* dataWin) {
     // Build reference lookup maps (file buffer stays read-only)
     patchReferenceOperands(ctx);
 
+    // Map Builtin Variable IDs
+    for (uint32_t i = 0; i < dataWin->vari.variableCount; i++) {
+        Variable* v = &dataWin->vari.variables[i];
+        v->builtinId = B_UNKNOWN;
+
+        for (uint32_t j = 0; j < sizeof(builtin_lookup_table) / sizeof(builtin_lookup_table[0]); j++) {
+            if (strcmp(v->name, builtin_lookup_table[j].name) == 0) {
+                v->builtinId = builtin_lookup_table[j].id;
+                break;
+            }
+        }
+    }
+    // ================================================
+
     // Scan VARI entries to find max varID for global scope
-    // Built-in variables have varID == -6 (sentinel), skip those
     uint32_t maxGlobalVarID = 0;
     forEach(Variable, v, dataWin->vari.variables, dataWin->vari.variableCount) {
         if (0 > v->varID) continue;
@@ -1905,16 +1917,13 @@ VMContext* VM_create(DataWin* dataWin) {
         if (s->name != nullptr && s->codeId >= 0) {
             if (dataWin->code.count > (uint32_t) s->codeId) {
                 const char* codeName = dataWin->code.entries[s->codeId].name;
-                // Map the full code entry name (e.g. "gml_Script_SCR_GAMESTART")
                 shput(ctx->funcMap, (char*) codeName, s->codeId);
-                // Also map the bare script name (e.g. "SCR_GAMESTART")
-                // since the FUNC chunk references use bare names in CALL instructions
                 shput(ctx->funcMap, (char*) s->name, s->codeId);
             }
         }
     }
 
-    // Also map code entry names directly for non-script code (object events, room creation codes, etc.)
+    // Also map code entry names directly
     repeat(dataWin->code.count, i) {
         const char* codeName = dataWin->code.entries[i].name;
         ptrdiff_t existing = shgeti(ctx->funcMap, (char*) codeName);
@@ -1926,7 +1935,7 @@ VMContext* VM_create(DataWin* dataWin) {
     // Register built-in functions
     VMBuiltins_registerAll();
 
-    fprintf(stderr, "VM: Initialized with %u global vars, sparse self vars (hashmap), %u functions mapped\n", ctx->globalVarCount, (uint32_t) shlen(ctx->funcMap));
+    fprintf(stderr, "VM: Initialized with %u global vars, %u functions mapped\n", ctx->globalVarCount, (uint32_t) shlen(ctx->funcMap));
 
     return ctx;
 }
