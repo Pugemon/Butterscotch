@@ -12,6 +12,10 @@
 #ifdef BUTTERSCOTCH_PLATFORM_SDL2
 #include <SDL2/SDL.h>
 #endif
+#ifdef BUTTERSCOTCH_PLATFORM_SDL1
+#include <SDL.h>
+#endif
+
 
 #include "rvalue.h"
 #include "stb_ds.h"
@@ -364,7 +368,7 @@ RValue VMBuiltins_getVariable(VMContext* ctx, const char* name, int32_t arrayInd
         }
         return RValue_makeUndefined();
     }
-#ifdef BUTTERSCOTCH_PLATFORM_SDL2
+#if defined(BUTTERSCOTCH_PLATFORM_SDL2) || defined(BUTTERSCOTCH_PLATFORM_SDL1)
     if (strcmp(name, "mouse_x") == 0) return RValue_makeReal((GMLReal) runner->keyboard->mouseX);
     if (strcmp(name, "mouse_y") == 0) return RValue_makeReal((GMLReal) runner->keyboard->mouseY);
 #endif
@@ -3361,7 +3365,7 @@ static RValue builtinCollisionLine(VMContext* ctx, RValue* args, int32_t argCoun
             int32_t endY   = (int32_t) GMLReal_fmin(bbox.bottom, yb);
             for (int32_t py = startY; endY >= py && !found; py++) {
                 GMLReal px = (GMLReal_fabs(vdy) > 0.0001) ? xt + ((GMLReal) py - yt) * vdx / vdy : xt;
-                if (Collision_pointInMask(spr, inst, px + 0.5, (GMLReal) py + 0.5)) {
+                if (Collision_pointInMask(ctx->dataWin, spr, inst, px + 0.5, (GMLReal) py + 0.5)) {
                     found = true;
                 }
             }
@@ -3371,7 +3375,7 @@ static RValue builtinCollisionLine(VMContext* ctx, RValue* args, int32_t argCoun
             int32_t endX   = (int32_t) GMLReal_fmin(bbox.right, xr);
             for (int32_t px = startX; endX >= px && !found; px++) {
                 GMLReal py = (GMLReal_fabs(cdx) > 0.0001) ? yl + ((GMLReal) px - xl) * cdy / cdx : yl;
-                if (Collision_pointInMask(spr, inst, (GMLReal) px + 0.5, py + 0.5)) {
+                if (Collision_pointInMask(ctx->dataWin, spr, inst, (GMLReal) px + 0.5, py + 0.5)) {
                     found = true;
                 }
             }
@@ -3437,7 +3441,7 @@ static RValue builtinCollisionRectangle(VMContext* ctx, RValue* args, int32_t ar
 
                 for (int32_t py = startY; endY > py && !found; py++) {
                     for (int32_t px = startX; endX > px && !found; px++) {
-                        if (Collision_pointInMask(spr, inst, (GMLReal) px + 0.5, (GMLReal) py + 0.5)) {
+                        if (Collision_pointInMask(ctx->dataWin, spr, inst, (GMLReal) px + 0.5, (GMLReal) py + 0.5)) {
                             found = true;
                         }
                     }
@@ -3485,7 +3489,7 @@ static RValue builtinCollisionPoint(VMContext* ctx, RValue* args, int32_t argCou
         if (prec != 0) {
             Sprite* spr = Collision_getSprite(ctx->dataWin, inst);
             if (spr != nullptr && spr->sepMasks == 1 && spr->masks != nullptr && spr->maskCount > 0) {
-                if (!Collision_pointInMask(spr, inst, px, py)) continue;
+                if (!Collision_pointInMask(ctx->dataWin, spr, inst, px, py)) continue;
             }
         }
 
@@ -3672,29 +3676,58 @@ static RValue builtinStringHashToNewline([[maybe_unused]] VMContext* ctx, RValue
 // json_decode
 // TODO: This is hardcoded for deltarune, for some reason the args string isn't working properly
 static RValue builtinJsonDecode(VMContext* ctx, [[maybe_unused]] RValue* args, int32_t argCount) {
-    if (1 > argCount) {
-        fprintf(stderr, "[json_decode] Expected at least 1 argument\n");
-        return RValue_makeUndefined();
-    }
+    if (1 > argCount) return RValue_makeUndefined();
 
     int32_t mapIndex = dsMapCreate();
     DsMapEntry **mapPtr = dsMapGet(mapIndex);
     Runner* runner = (Runner*) ctx->runner;
     FileSystem* fs = runner->fileSystem;
-    char* content = fs->vtable->readFileText(fs, "lang/lang_en.json");
-    const JsonValue* json = JsonReader_parse(content);
 
-    for(int i = 0; i < JsonReader_objectLength(json); i++)
-    {
-        const char *key = JsonReader_getObjectKey(json, i);
-        RValue val = RValue_makeOwnedString(
-            (char*)JsonReader_getString(
-                JsonReader_getObjectValue(json, i)
-            )
-        );
-        shput(*mapPtr, key, val);
+    char* content = fs->vtable->readFileText(fs, "lang/lang_en.json");
+    if (!content) return RValue_makeReal((double) mapIndex);
+
+    // === СУПЕР ЛЕГКОВЕСНЫЙ ПАРСЕР ===
+    // Не строит DOM-дерево, экономит ~15 МБ RAM
+    char* p = content;
+    char* keyStart = nullptr;
+    char* valStart = nullptr;
+    bool inString = false;
+    bool isKey = true;
+
+    while (*p) {
+        if (*p == '"' && *(p - 1) != '\\') {
+            inString = !inString;
+            if (inString) {
+                if (isKey) keyStart = p + 1;
+                else valStart = p + 1;
+            } else {
+                *p = '\0';
+                if (!isKey && keyStart && valStart) {
+                    // Парсим эскейпы in-place
+                    char* src = valStart; char* dst = valStart;
+                    while (*src) {
+                        if (*src == '\\' && *(src+1) == 'n') { *dst++ = '\n'; src += 2; }
+                        else if (*src == '\\' && *(src+1) == '"') { *dst++ = '"'; src += 2; }
+                        else { *dst++ = *src++; }
+                    }
+                    *dst = '\0';
+
+                    RValue val = RValue_makeOwnedString(safeStrdup(valStart));
+                    shput(*mapPtr, keyStart, val);
+
+                    keyStart = nullptr; valStart = nullptr;
+                    isKey = true;
+                }
+            }
+        } else if (!inString && *p == ':') {
+            isKey = false;
+        } else if (!inString && (*p == '{' || *p == '}')) {
+            isKey = true;
+        }
+        p++;
     }
 
+    free(content);
     return RValue_makeReal((double) mapIndex);
 }
 

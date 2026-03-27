@@ -89,12 +89,26 @@ static inline InstanceBBox Collision_computeBBox(DataWin* dataWin, Instance* ins
     return (InstanceBBox){left, right, top, bottom, true};
 }
 
+static inline void Collision_ensureMaskLoaded(DataWin* dataWin, Sprite* spr, uint32_t frameIdx) {
+    if (frameIdx >= spr->maskCount || spr->masks[frameIdx] != nullptr) return;
+
+    uint32_t bytesPerRow = (spr->width + 7) / 8;
+    uint32_t bytesPerMask = bytesPerRow * spr->height;
+
+    spr->masks[frameIdx] = safeMalloc(bytesPerMask);
+
+    // Читаем напрямую из файла data.win по сохраненному смещению
+    fseek(dataWin->file, (long)spr->maskDataOffsets[frameIdx], SEEK_SET);
+    fread(spr->masks[frameIdx], 1, bytesPerMask, dataWin->file);
+}
+
 // Tests if point (px, py) hits the instance's precise collision mask
-static inline bool Collision_pointInMask(Sprite* spr, Instance* inst, GMLReal px, GMLReal py) {
+static inline bool Collision_pointInMask(DataWin* dataWin, Sprite* spr, Instance* inst, GMLReal px, GMLReal py) {
     if (spr->masks == nullptr || spr->maskCount == 0) return true; // no mask = all solid
 
     // Pick mask for current frame
     uint32_t frameIdx = ((uint32_t) inst->imageIndex) % spr->maskCount;
+    Collision_ensureMaskLoaded(dataWin, spr, frameIdx);
     uint8_t* mask = spr->masks[frameIdx];
 
     // Transform world coords to sprite-local coords
@@ -157,12 +171,12 @@ static inline bool Collision_instancesOverlapPrecise(DataWin* dataWin, Instance*
 
             bool hitA = true;
             if (preciseA) {
-                hitA = Collision_pointInMask(sprA, a, wpx, wpy);
+                hitA = Collision_pointInMask(dataWin, sprA, a, wpx, wpy);
             }
 
             bool hitB = true;
             if (preciseB) {
-                hitB = Collision_pointInMask(sprB, b, wpx, wpy);
+                hitB = Collision_pointInMask(dataWin, sprB, b, wpx, wpy);
             }
 
             if (hitA && hitB) return true;

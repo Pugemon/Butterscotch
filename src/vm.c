@@ -12,7 +12,6 @@
 
 #include "stb_ds.h"
 
-#define VM_ENABLE_TRACING
 #ifdef VM_ENABLE_TRACING
 // Используем ... и __VA_ARGS__, чтобы препроцессор игнорировал запятые внутри
 #define DO_TRACE(...) do { __VA_ARGS__ } while(0)
@@ -1542,55 +1541,47 @@ static void restoreEnvContext(VMContext* ctx, EnvFrame* frame) {
 static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
     int32_t jumpOffset = instrJumpOffset(instr);
 
-    // Pop target from stack
     RValue targetVal = stackPop(ctx);
     int32_t target = RValue_toInt32(targetVal);
     RValue_free(&targetVal);
 
-    // Create env frame, save current context
-    EnvFrame* frame = safeMalloc(sizeof(EnvFrame));
+    // ОПТИМИЗАЦИЯ: Используем преаллоцированный фрейм
+    if (ctx->envDepth >= VM_MAX_ENV_DEPTH) {
+        fprintf(stderr, "FATAL: VM Environment stack overflow! Max depth is %d.\n", VM_MAX_ENV_DEPTH);
+        abort();
+    }
+
+    EnvFrame* frame = &ctx->envStack[ctx->envDepth++];
     frame->savedInstance = (Instance*) ctx->currentInstance;
     frame->savedOtherInstance = (Instance*) ctx->otherInstance;
-    frame->instanceList = nullptr;
+    frame->instanceList = nullptr; // stb_ds array
     frame->currentIndex = 0;
-    frame->parent = ctx->envStack;
-    ctx->envStack = frame;
 
-    // Save the true "other" BEFORE overwriting ctx->otherInstance below.
-    // with(other) needs to resolve against the pre-with "other", not the new one.
     Instance* trueOther = (Instance*) ctx->otherInstance;
-
-    // Inside a with-block, "other" refers to the instance that executed the with-statement
     ctx->otherInstance = (Instance*) ctx->currentInstance;
 
     Runner* runner = (Runner*) ctx->runner;
 
     if (target == INSTANCE_SELF) {
-        // with(self) - no-op, keep current instance
         return;
     }
 
     if (target == INSTANCE_OTHER) {
-        // with(other) - switch to whatever "other" was before this with-statement.
-        // Priority: the saved other from the parent env frame (nested with), then
-        // the true other captured above (collision context), then keep self (no-op).
-        if (frame->parent != nullptr && frame->parent->savedInstance != nullptr) {
-            switchToInstance(ctx, frame->parent->savedInstance);
+        // parent frame is at ctx->envDepth - 2 (since we just incremented it)
+        if (ctx->envDepth > 1 && ctx->envStack[ctx->envDepth - 2].savedInstance != nullptr) {
+            switchToInstance(ctx, ctx->envStack[ctx->envDepth - 2].savedInstance);
         } else if (trueOther != nullptr) {
             switchToInstance(ctx, trueOther);
         }
-        // If neither exists, keep current instance (self) as fallback
         return;
     }
 
     if (target == INSTANCE_NOONE) {
-        // with(noone) - skip the block entirely
         ctx->ip = instrAddr + jumpOffset;
         return;
     }
 
     if (target == INSTANCE_ALL) {
-        // with(all) - iterate over all active instances
         int32_t instanceCount = (int32_t) arrlen(runner->instances);
         for (int32_t i = 0; instanceCount > i; i++) {
             Instance* inst = runner->instances[i];
@@ -1600,7 +1591,6 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
         }
 
         if (arrlen(frame->instanceList) == 0) {
-            // No active instances, skip the block
             ctx->ip = instrAddr + jumpOffset;
             return;
         }
@@ -1611,7 +1601,6 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
     }
 
     if (target >= 0 && 100000 > target) {
-        // Object index - iterate over active instances of this object (or its descendants)
         int32_t instanceCount = (int32_t) arrlen(runner->instances);
         for (int32_t i = 0; instanceCount > i; i++) {
             Instance* inst = runner->instances[i];
@@ -1621,7 +1610,6 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
         }
 
         if (arrlen(frame->instanceList) == 0) {
-            // No matching instances, skip the block
             ctx->ip = instrAddr + jumpOffset;
             return;
         }
@@ -1632,7 +1620,6 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
     }
 
     if (target >= 100000) {
-        // Instance ID - find the specific instance
         int32_t instanceCount = (int32_t) arrlen(runner->instances);
         for (int32_t i = 0; instanceCount > i; i++) {
             Instance* inst = runner->instances[i];
@@ -1641,8 +1628,6 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
                 return;
             }
         }
-
-        // Instance not found, skip the block
         ctx->ip = instrAddr + jumpOffset;
         return;
     }
@@ -1652,42 +1637,38 @@ static void handlePushEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
 }
 
 static void handlePopEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
-    EnvFrame* frame = ctx->envStack;
-    require(frame != nullptr);
+    require(ctx->envDepth > 0);
+    EnvFrame* frame = &ctx->envStack[ctx->envDepth - 1]; // Берем верхний фрейм
 
     // Check for exit magic: PopEnv with 0xF00000 operand means "unwind env stack and exit/return"
     if ((instr & 0x00FFFFFF) == 0xF00000) {
-        // Restore context and pop frame
         restoreEnvContext(ctx, frame);
-        ctx->envStack = frame->parent;
+        frame->instanceList = nullptr;
+        ctx->envDepth--; // "Удаляем" фрейм
         arrfree(frame->instanceList);
-        free(frame);
         return;
     }
 
-    // Check if there are more instances to iterate
     if (frame->instanceList != nullptr && arrlen(frame->instanceList) > frame->currentIndex + 1) {
         frame->currentIndex++;
         Instance* nextInst = frame->instanceList[frame->currentIndex];
-        // Skip destroyed instances
+
         while (!nextInst->active && arrlen(frame->instanceList) > frame->currentIndex + 1) {
             frame->currentIndex++;
             nextInst = frame->instanceList[frame->currentIndex];
         }
+
         if (nextInst->active) {
             switchToInstance(ctx, nextInst);
-            // Jump back to the start of the with-block body
             int32_t jumpOffset = instrJumpOffset(instr);
             ctx->ip = instrAddr + jumpOffset;
             return;
         }
     }
 
-    // Done iterating - restore context and pop frame
     restoreEnvContext(ctx, frame);
-    ctx->envStack = frame->parent;
-    arrfree(frame->instanceList);
-    free(frame);
+    frame->instanceList = nullptr;
+    ctx->envDepth--; // "Удаляем" фрейм
 }
 
 // ===[ Execution Loop ]===
@@ -1866,6 +1847,8 @@ VMContext* VM_create(DataWin* dataWin) {
     VMContext* ctx = safeCalloc(1, sizeof(VMContext));
     ctx->dataWin = dataWin;
     ctx->stack.top = 0;
+    ctx->callDepth = 0;
+    ctx->envDepth = 0;
     ctx->selfId = -1;
     ctx->otherId = -1;
     ctx->callDepth = 0;
@@ -2003,8 +1986,13 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
     require(codeIndex >= 0 && ctx->dataWin->code.count > (uint32_t) codeIndex);
     CodeEntry* code = &ctx->dataWin->code.entries[codeIndex];
 
-    // Save current frame
-    CallFrame* frame = safeMalloc(sizeof(CallFrame));
+    // ОПТИМИЗАЦИЯ: Проверка лимита и использование преаллоцированного фрейма
+    if (ctx->callDepth >= VM_MAX_CALL_DEPTH) {
+        fprintf(stderr, "FATAL: VM Call stack overflow! Max depth is %d.\n", VM_MAX_CALL_DEPTH);
+        abort();
+    }
+
+    CallFrame* frame = &ctx->callStack[ctx->callDepth++];
     frame->savedIP = ctx->ip;
     frame->savedCodeEnd = ctx->codeEnd;
     frame->savedBytecodeBase = ctx->bytecodeBase;
@@ -2014,9 +2002,6 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
     frame->savedLocalArrayMap = ctx->localArrayMap;
     frame->savedScriptArgs = ctx->scriptArgs;
     frame->savedScriptArgCount = ctx->scriptArgCount;
-    frame->parent = ctx->callStack;
-    ctx->callStack = frame;
-    ctx->callDepth++;
 
     // Set up callee
     ctx->bytecodeBase = ctx->dataWin->bytecodeBuffer + (code->bytecodeAbsoluteOffset - ctx->dataWin->bytecodeBufferBase);
@@ -2027,13 +2012,14 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
 
     uint32_t localsCount = code->localsCount;
     if (localsCount == 0) localsCount = 1;
+
+    // В будущем localVars тоже можно перевести на статичный стек, но пока оставим calloc
     ctx->localVars = safeCalloc(localsCount, sizeof(RValue));
     ctx->localVarCount = localsCount;
     repeat(localsCount, i) {
         ctx->localVars[i].type = RVALUE_UNDEFINED;
     }
 
-    // Store arguments in scriptArgs (mirrors GMS 1.4's global argument stack)
     ctx->scriptArgCount = argCount;
     if (argCount > 0 && args != nullptr) {
         ctx->scriptArgs = safeMalloc((uint32_t) argCount * sizeof(RValue));
@@ -2048,34 +2034,28 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
         ctx->scriptArgs = nullptr;
     }
 
-    // Execute the callee
     RValue result = executeLoop(ctx);
 
-    // Make result string owning BEFORE freeing callee locals/arrays to prevent
-    // dangling pointer if the returned string points into a callee local var or array map.
     if (result.type == RVALUE_STRING && !result.ownsString && result.string != nullptr) {
         result = RValue_makeOwnedString(safeStrdup(result.string));
     }
 
     // Restore caller frame
-    CallFrame* saved = ctx->callStack;
+    ctx->callDepth--;
+    CallFrame* saved = &ctx->callStack[ctx->callDepth];
+
     ctx->ip = saved->savedIP;
     ctx->codeEnd = saved->savedCodeEnd;
     ctx->bytecodeBase = saved->savedBytecodeBase;
 
-    // Free callee locals
-    // NOTE: was commented out previously, causing a localVars leak on every function call.
-    // The result string is already made owning above (safeStrdup), so freeing locals here is safe.
     repeat(ctx->localVarCount, i) {
         RValue_free(&ctx->localVars[i]);
     }
     free(ctx->localVars);
 
-    // Free callee local array map
     RValue_freeAllRValuesInMap(ctx->localArrayMap);
     hmfree(ctx->localArrayMap);
 
-    // Free callee script args
     repeat(ctx->scriptArgCount, i) {
         RValue_free(&ctx->scriptArgs[i]);
     }
@@ -2087,9 +2067,6 @@ RValue VM_callCodeIndex(VMContext* ctx, int32_t codeIndex, RValue* args, int32_t
     ctx->scriptArgs = saved->savedScriptArgs;
     ctx->scriptArgCount = saved->savedScriptArgCount;
     ctx->currentCodeName = saved->savedCodeName;
-    ctx->callStack = saved->parent;
-    ctx->callDepth--;
-    free(saved);
 
     return result;
 }
@@ -2651,22 +2628,13 @@ void VM_free(VMContext* ctx) {
         hmfree(ctx->crossRefMap);
     }
 
-    // Free any remaining env frames
-    EnvFrame* envFrame = ctx->envStack;
-    while (envFrame != nullptr) {
-        EnvFrame* parent = envFrame->parent;
-        arrfree(envFrame->instanceList);
-        free(envFrame);
-        envFrame = parent;
+    // Free any remaining env frames (if crashed or exited early)
+    for (int i = 0; i < ctx->envDepth; i++) {
+        arrfree(ctx->envStack[i].instanceList);
     }
 
-    // Free any remaining call frames
-    CallFrame* frame = ctx->callStack;
-    while (frame != nullptr) {
-        CallFrame* parent = frame->parent;
-        free(frame);
-        frame = parent;
-    }
+    // (Call frames no longer have dynamically allocated 'parent' pointers,
+    // so nothing extra to free there, their localVars were freed during stack unwinding)
 
     free(ctx);
 }

@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 // Forward declaration for progress callback
 typedef struct DataWin DataWin;
@@ -200,6 +201,7 @@ typedef struct {
     uint32_t* textureOffsets; // absolute file offsets to TexturePageItems
     uint32_t maskCount;       // number of collision masks (one per frame, or 0)
     uint8_t** masks;          // array of maskCount packed bit arrays (nullptr if none)
+    uint32_t* maskDataOffsets;
 } Sprite;
 
 typedef struct {
@@ -440,6 +442,8 @@ typedef struct {
     bool kinematic;
     PhysicsVertex* physicsVertices;
     ObjectEventList eventLists[OBJT_EVENT_TYPE_COUNT];
+    uint32_t fileOffset;
+    bool eventsLoaded;
 } GameObject;
 
 typedef struct {
@@ -575,13 +579,15 @@ typedef struct {
     float gravityY;
     float metersPerPixel;
     RoomBackground backgrounds[8];
+    uint32_t backgroundsFileOffset;
     RoomView views[8];
+    uint32_t viewsFileOffset;
     uint32_t gameObjectCount;
-    RoomGameObject* gameObjects;
+    uint32_t gameObjectsFileOffset;
     uint32_t tileCount;
-    RoomTile* tiles;
+    uint32_t tilesFileOffset;
     uint32_t layerCount;
-    RoomLayer* layers;
+    uint32_t layersFileOffset;
 } Room;
 
 typedef struct {
@@ -700,6 +706,8 @@ typedef struct {
 
 // ===[ Top-level DataWin container ]===
 typedef struct DataWin {
+    FILE* file;
+    size_t fileSize;
     uint8_t* strgBuffer;        // owned copy of STRG chunk raw data
     // Absolute file offset of strgBuffer[0], we need this because data.win stores absolute offsets (from the beginning of the data.win file) instead of relative offsets
     size_t strgBufferBase;
@@ -743,3 +751,4 @@ void DataWin_printDebugSummary(DataWin* dataWin);
 int32_t DataWin_resolveTPAG(DataWin* dw, uint32_t offset);
 void GamePath_computeInternal(GamePath* path);
 PathPositionResult GamePath_getPosition(GamePath* path, double t);
+void DataWin_ClearAllMasks(DataWin* dw); /// Очистка масок коллизий

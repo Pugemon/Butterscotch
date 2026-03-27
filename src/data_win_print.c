@@ -253,15 +253,15 @@ void DataWin_printDebugSummary(DataWin* dataWin) {
     printf("\n");
 
     printf("-- Room Instances --\n");
-    forEach(Room, room, dataWin->room.rooms, dataWin->room.count) {
-        printf("Room %s\n", room->name);
-
-        forEachIndexed(RoomGameObject, roomGameObject, idx, room->gameObjects, room->gameObjectCount) {
-            int32_t objectDefinitionId = roomGameObject->objectDefinition;
-            GameObject* objectDefinition = &dataWin->objt.objects[objectDefinitionId];
-            printf("  Object %d (%s, x=%d, y=%d)\n", objectDefinitionId, objectDefinition->name, roomGameObject->x, roomGameObject->y);
-        }
-    }
+    // forEach(Room, room, dataWin->room.rooms, dataWin->room.count) {
+    //     printf("Room %s\n", room->name);
+    //
+    //     forEachIndexed(RoomGameObject, roomGameObject, idx, room->gameObjects, room->gameObjectCount) {
+    //         int32_t objectDefinitionId = roomGameObject->objectDefinition;
+    //         GameObject* objectDefinition = &dataWin->objt.objects[objectDefinitionId];
+    //         printf("  Object %d (%s, x=%d, y=%d)\n", objectDefinitionId, objectDefinition->name, roomGameObject->x, roomGameObject->y);
+    //     }
+    // }
 
     // Overall summary
     printf("===== DataWin parse complete =====\n");

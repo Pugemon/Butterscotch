@@ -82,6 +82,10 @@
 #define OP_CALL     0xD9
 #define OP_BREAK    0xFF
 
+// ЛИМИТЫ ДЛЯ ПРЕАЛЛОКАЦИИ (Оптимизация для 3DS/PS2)
+#define VM_MAX_CALL_DEPTH 1024
+#define VM_MAX_ENV_DEPTH 256
+
 // ===[ CallFrame - Saved state for script-to-script calls ]===
 typedef struct CallFrame {
     uint32_t savedIP;
@@ -93,7 +97,6 @@ typedef struct CallFrame {
     ArrayMapEntry* savedLocalArrayMap;
     RValue* savedScriptArgs;
     int32_t savedScriptArgCount;
-    struct CallFrame* parent;
 } CallFrame;
 
 // ===[ EnvFrame - Saved context for with-statement (PushEnv/PopEnv) ]===
@@ -102,7 +105,6 @@ typedef struct EnvFrame {
     struct Instance* savedOtherInstance; // Saved otherInstance to restore on PopEnv
     struct Instance** instanceList; // stb_ds array of matching instances (nullptr for single-instance)
     int32_t currentIndex;           // Current position in instanceList
-    struct EnvFrame* parent;
 } EnvFrame;
 
 // ===[ VMStack - Upward-growing array of RValue slots ]===
@@ -132,9 +134,10 @@ typedef struct VMContext {
     int32_t otherId;
     struct Instance* currentInstance;
     struct Instance* otherInstance; // "other" instance for collision events
-    CallFrame* callStack;
-    int32_t callDepth;
-    EnvFrame* envStack; // Environment stack for with-statements (PushEnv/PopEnv)
+    CallFrame callStack[VM_MAX_CALL_DEPTH];
+    int32_t callDepth; // Индекс текущего фрейма вызова (0 = нет вызовов)
+    EnvFrame envStack[VM_MAX_ENV_DEPTH];; // Environment stack for with-statements (PushEnv/PopEnv)
+    int32_t envDepth;  // Индекс текущего контекста with() (0 = нет with)
     const char* currentCodeName;
     // Array variable maps: key = ((int64_t)varID << 32) | (uint32_t)arrayIndex
     ArrayMapEntry* globalArrayMap;

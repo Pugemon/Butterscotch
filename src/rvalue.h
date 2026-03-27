@@ -9,15 +9,14 @@
 #include "utils.h"
 
 // ===[ RValue - Tagged Union ]===
-typedef enum {
-    RVALUE_REAL = 0,
-    RVALUE_STRING = 1,
-    RVALUE_INT32 = 2,
-    RVALUE_INT64 = 3,
-    RVALUE_BOOL = 4,
-    RVALUE_UNDEFINED = 5,
-    RVALUE_ARRAY_REF = 6,
-} RValueType;
+typedef uint8_t RValueType; // Вместо enum, чтобы занимало 1 байт
+#define RVALUE_REAL 0
+#define RVALUE_STRING 1
+#define RVALUE_INT32 2
+#define RVALUE_INT64 3
+#define RVALUE_BOOL 4
+#define RVALUE_UNDEFINED 5
+#define RVALUE_ARRAY_REF 6
 
 typedef struct {
     union {

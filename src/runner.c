@@ -3,6 +3,7 @@
 #include "utils.h"
 #include "json_writer.h"
 #include "collision.h"
+#include "binary_reader.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,23 +12,221 @@
 
 #include "stb_ds.h"
 
+// Эти статические переменные будут хранить данные ТОЛЬКО для текущей комнаты.
+static RoomGameObject* currentRoomGameObjects = NULL;
+static RoomTile* currentRoomTiles = NULL;
+static RoomLayer* currentRoomLayers = NULL;
+
+// ===[ НОВЫЕ ФУНКЦИИ ДЛЯ ЛЕНИВОЙ ЗАГРУЗКИ ]===
+
+// Эти три функции нужны для парсинга, скопируем их сюда, чтобы не делать их публичными в .h
+static const char* readStringPtr(BinaryReader* reader, DataWin* dw) {
+    uint32_t offset = BinaryReader_readUint32(reader);
+    if (offset == 0) return nullptr;
+    return (const char*) (dw->strgBuffer + (offset - dw->strgBufferBase));
+}
+
+#ifdef __3DS__
+static uint32_t* readPointerTable(BinaryReader* reader, uint32_t* outCount) {
+    *outCount = BinaryReader_readUint32(reader);
+    if (*outCount == 0) return nullptr;
+    uint32_t* ptrs = (uint32_t*) safeMalloc(*outCount * sizeof(uint32_t));
+    BinaryReader_readBytes(reader, ptrs, *outCount * sizeof(uint32_t));
+    return ptrs;
+}
+#else
+static uint32_t* readPointerTable(BinaryReader* reader, uint32_t* outCount) {
+    *outCount = BinaryReader_readUint32(reader);
+    if (*outCount == 0) return nullptr;
+    uint32_t* ptrs = (uint32_t*) safeMalloc(*outCount * sizeof(uint32_t));
+    repeat(*outCount, i) { ptrs[i] = BinaryReader_readUint32(reader); }
+    return ptrs;
+}
+#endif
+
+static EventAction* readEventActions(BinaryReader* reader, DataWin* dw, uint32_t* outCount) {
+    uint32_t count;
+    uint32_t* ptrs = readPointerTable(reader, &count);
+    *outCount = count;
+    if (count == 0) { free(ptrs); return nullptr; }
+
+    EventAction* actions = safeMalloc(count * sizeof(EventAction));
+    repeat(count, i) {
+        BinaryReader_seek(reader, ptrs[i]);
+        actions[i].libID = BinaryReader_readUint32(reader);
+        actions[i].id = BinaryReader_readUint32(reader);
+        actions[i].kind = BinaryReader_readUint32(reader);
+        actions[i].useRelative = BinaryReader_readBool32(reader);
+        actions[i].isQuestion = BinaryReader_readBool32(reader);
+        actions[i].useApplyTo = BinaryReader_readBool32(reader);
+        actions[i].exeType = BinaryReader_readUint32(reader);
+        actions[i].actionName = readStringPtr(reader, dw);
+        actions[i].codeId = BinaryReader_readInt32(reader);
+        actions[i].argumentCount = BinaryReader_readUint32(reader);
+        actions[i].who = BinaryReader_readInt32(reader);
+        actions[i].relative = BinaryReader_readBool32(reader);
+        actions[i].isNot = BinaryReader_readBool32(reader);
+        actions[i].unknownAlwaysZero = BinaryReader_readUint32(reader);
+    }
+    free(ptrs);
+    return actions;
+}
+
+// Загружает события для одного объекта
+static void Runner_loadObjectEvents(Runner* runner, GameObject* obj) {
+    if (obj->eventsLoaded || obj->name == NULL) return; // Уже загружено или пустой слот
+
+    BinaryReader reader = BinaryReader_create(runner->dataWin->file, runner->dataWin->fileSize);
+    BinaryReader_seek(&reader, obj->fileOffset);
+
+    BinaryReader_skip(&reader, 64);
+
+
+    int32_t physicsVertexCount = BinaryReader_readInt32(&reader);
+    obj->physicsVertexCount = physicsVertexCount; // Сохраняем, чтобы знать, сколько пропустить
+
+    BinaryReader_skip(&reader, 12);
+
+    if (physicsVertexCount > 0) {
+        // Пропускаем вертексы
+        BinaryReader_skip(&reader, (size_t)physicsVertexCount * sizeof(PhysicsVertex));
+        obj->physicsVertices = nullptr; // На 3DS физика не нужна, память не выделяем
+    } else {
+        obj->physicsVertices = nullptr;
+    }
+
+    // Теперь парсим события, находясь на правильной позиции
+    uint32_t eventTypeCount;
+    uint32_t* eventTypePtrs = readPointerTable(&reader, &eventTypeCount);
+
+    for (uint32_t eventType = 0; eventType < eventTypeCount && eventType < OBJT_EVENT_TYPE_COUNT; eventType++) {
+        if (eventTypePtrs[eventType] == 0) {
+            obj->eventLists[eventType].eventCount = 0;
+            obj->eventLists[eventType].events = nullptr;
+            continue;
+        }
+        BinaryReader_seek(&reader, eventTypePtrs[eventType]);
+
+        uint32_t eventCount;
+        uint32_t* eventPtrs = readPointerTable(&reader, &eventCount);
+
+        obj->eventLists[eventType].eventCount = eventCount;
+        if (eventCount > 0) {
+            obj->eventLists[eventType].events = safeMalloc(eventCount * sizeof(ObjectEvent));
+            repeat(eventCount, j) {
+                BinaryReader_seek(&reader, eventPtrs[j]);
+                obj->eventLists[eventType].events[j].eventSubtype = BinaryReader_readUint32(&reader);
+                obj->eventLists[eventType].events[j].actions = readEventActions(&reader, runner->dataWin, &obj->eventLists[eventType].events[j].actionCount);
+            }
+        } else {
+            obj->eventLists[eventType].events = nullptr;
+        }
+        free(eventPtrs);
+    }
+    free(eventTypePtrs);
+
+    // Обнуляем оставшиеся списки событий
+    for (uint32_t eventType = eventTypeCount; eventType < OBJT_EVENT_TYPE_COUNT; eventType++) {
+        obj->eventLists[eventType].eventCount = 0;
+        obj->eventLists[eventType].events = nullptr;
+    }
+
+    obj->eventsLoaded = true;
+}
+
+// Загружает данные комнаты (объекты, тайлы, слои)
+static void Runner_loadRoomData(Runner* runner, Room* room) {
+    DataWin* dw = runner->dataWin;
+    BinaryReader reader = BinaryReader_create(dw->file, dw->fileSize);
+
+    // Загрузка объектов
+    BinaryReader_seek(&reader, room->gameObjectsFileOffset);
+    uint32_t objCount;
+    uint32_t* objPtrs = readPointerTable(&reader, &objCount);
+    room->gameObjectCount = objCount;
+    if (objCount > 0) {
+        currentRoomGameObjects = safeMalloc(objCount * sizeof(RoomGameObject));
+        repeat(objCount, j) {
+            BinaryReader_seek(&reader, objPtrs[j]);
+            RoomGameObject* go = &currentRoomGameObjects[j];
+            go->x = BinaryReader_readInt32(&reader);
+            go->y = BinaryReader_readInt32(&reader);
+            go->objectDefinition = BinaryReader_readInt32(&reader);
+            go->instanceID = BinaryReader_readUint32(&reader);
+            go->creationCode = BinaryReader_readInt32(&reader);
+            go->scaleX = BinaryReader_readFloat32(&reader);
+            go->scaleY = BinaryReader_readFloat32(&reader);
+            go->color = BinaryReader_readUint32(&reader);
+            go->rotation = BinaryReader_readFloat32(&reader);
+            go->preCreateCode = BinaryReader_readInt32(&reader);
+        }
+    }
+    free(objPtrs);
+
+    // Загрузка тайлов
+    BinaryReader_seek(&reader, room->tilesFileOffset);
+    uint32_t tileCount;
+    uint32_t* tilePtrs = readPointerTable(&reader, &tileCount);
+    room->tileCount = tileCount;
+    if (tileCount > 0) {
+        currentRoomTiles = safeMalloc(tileCount * sizeof(RoomTile));
+        repeat(tileCount, j) {
+            BinaryReader_seek(&reader, tilePtrs[j]);
+            RoomTile* tile = &currentRoomTiles[j];
+            tile->x = BinaryReader_readInt32(&reader);
+            tile->y = BinaryReader_readInt32(&reader);
+            tile->backgroundDefinition = BinaryReader_readInt32(&reader);
+            tile->sourceX = BinaryReader_readInt32(&reader);
+            tile->sourceY = BinaryReader_readInt32(&reader);
+            tile->width = BinaryReader_readUint32(&reader);
+            tile->height = BinaryReader_readUint32(&reader);
+            tile->tileDepth = BinaryReader_readInt32(&reader);
+            tile->instanceID = BinaryReader_readUint32(&reader);
+            tile->scaleX = BinaryReader_readFloat32(&reader);
+            tile->scaleY = BinaryReader_readFloat32(&reader);
+            tile->color = BinaryReader_readUint32(&reader);
+        }
+    }
+    free(tilePtrs);
+
+    // Загрузка слоев (GMS2+)
+    if (room->layersFileOffset > 0 && dw->gen8.major >= 2) {
+        BinaryReader_seek(&reader, room->layersFileOffset);
+        // Тут будет полный код парсинга слоев, если он вам понадобится.
+        // Сейчас просто пропускаем, чтобы не усложнять.
+        room->layerCount = 0;
+    }
+}
+
+// Освобождает память комнаты
+static void Runner_freeRoomData() {
+    free(currentRoomGameObjects);
+    currentRoomGameObjects = NULL;
+    free(currentRoomTiles);
+    currentRoomTiles = NULL;
+    free(currentRoomLayers);
+    currentRoomLayers = NULL;
+}
+
 // ===[ Helper: Find event action in object hierarchy ]===
 // Walks the parent chain starting from objectIndex to find an event handler.
 // Returns the EventAction's codeId, or -1 if not found.
 // If outOwnerObjectIndex is non-null, it is set to the objectIndex that owns the found event (or -1 if not found).
-static int32_t findEventCodeIdAndOwner(DataWin* dataWin, int32_t objectIndex, int32_t eventType, int32_t eventSubtype, int32_t* outOwnerObjectIndex) {
+static int32_t findEventCodeIdAndOwner(DataWin* dataWin, int32_t objectIndex, int32_t eventType, int32_t eventSubtype, int32_t* outOwnerObjectIndex, Runner* runner) { // <--- ДОБАВЛЕН RUNNER
     int32_t currentObj = objectIndex;
     int depth = 0;
 
     while (currentObj >= 0 && (uint32_t) currentObj < dataWin->objt.count && 32 > depth) {
         GameObject* obj = &dataWin->objt.objects[currentObj];
 
+        // НОВОЕ: Загружаем события по требованию
+        Runner_loadObjectEvents(runner, obj);
+
         if (OBJT_EVENT_TYPE_COUNT > eventType) {
             ObjectEventList* eventList = &obj->eventLists[eventType];
             repeat(eventList->eventCount, i) {
                 ObjectEvent* evt = &eventList->events[i];
                 if ((int32_t) evt->eventSubtype == eventSubtype) {
-                    // Found it - return the first action's codeId
                     if (evt->actionCount > 0 && evt->actions[0].codeId >= 0) {
                         if (outOwnerObjectIndex != nullptr) *outOwnerObjectIndex = currentObj;
                         return evt->actions[0].codeId;
@@ -38,7 +237,6 @@ static int32_t findEventCodeIdAndOwner(DataWin* dataWin, int32_t objectIndex, in
             }
         }
 
-        // Walk to parent
         currentObj = obj->parentId;
         depth++;
     }
@@ -172,7 +370,7 @@ const char* Runner_getEventName(int32_t eventType, int32_t eventSubtype) {
 
 void Runner_executeEventFromObject(Runner* runner, Instance* instance, int32_t startObjectIndex, int32_t eventType, int32_t eventSubtype) {
     int32_t ownerObjectIndex = -1;
-    int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, startObjectIndex, eventType, eventSubtype, &ownerObjectIndex);
+    int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, startObjectIndex, eventType, eventSubtype, &ownerObjectIndex, runner);
 
     VMContext* vm = runner->vmContext;
     int32_t savedEventType = vm->currentEventType;
@@ -341,7 +539,7 @@ void Runner_draw(Runner* runner) {
     // Add tiles (skip hidden layers)
     Room* room = runner->currentRoom;
     repeat(room->tileCount, i) {
-        RoomTile* tile = &room->tiles[i];
+        RoomTile* tile = &currentRoomTiles[i];
         // Check if this tile's layer is hidden
         ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
         if (layerIdx >= 0 && !runner->tileLayerMap[layerIdx].value.visible) continue;
@@ -361,7 +559,7 @@ void Runner_draw(Runner* runner) {
         Drawable* d = &drawables[i];
         if (d->type == DRAWABLE_TILE) {
             if (runner->renderer != nullptr) {
-                RoomTile* tile = &room->tiles[d->tileIndex];
+                RoomTile* tile = &currentRoomTiles[d->tileIndex];
                 float offsetX = 0.0f, offsetY = 0.0f;
                 ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
                 if (layerIdx >= 0) {
@@ -397,7 +595,7 @@ void Runner_draw(Runner* runner) {
             }
         } else {
             Instance* inst = d->instance;
-            int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL, nullptr);
+            int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL, nullptr, runner);
             if (codeId >= 0) {
                 Runner_executeEvent(runner, inst, EVENT_DRAW, DRAW_NORMAL);
             } else if (runner->renderer != nullptr) {
@@ -518,6 +716,9 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
 
     // === Normal room initialization (first visit, or non-persistent room) ===
 
+    // Загружаем данные для новой комнаты
+    Runner_loadRoomData(runner, room);
+
     // Reset tile layer state for the new room
     hmfree(runner->tileLayerMap);
     runner->tileLayerMap = nullptr;
@@ -563,7 +764,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
 
     // Pass 1: Create all instances without firing events
     repeat(room->gameObjectCount, i) {
-        RoomGameObject* roomObj = &room->gameObjects[i];
+        RoomGameObject* roomObj = &currentRoomGameObjects[i];
 
         // Check if a persistent instance with this ID already exists
         bool alreadyExists = false;
@@ -584,7 +785,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
 
     // Pass 2: Fire events for newly created instances (in room definition order)
     repeat(room->gameObjectCount, i) {
-        RoomGameObject* roomObj = &room->gameObjects[i];
+        RoomGameObject* roomObj = &currentRoomGameObjects[i];
 
         // Find the instance we created (skip persistent ones that were kept)
         Instance* inst = nullptr;
@@ -718,7 +919,7 @@ static void executeCollisionEvent(Runner* runner, Instance* self, Instance* othe
     vm->otherInstance = other;
 
     int32_t ownerObjectIndex = -1;
-    int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, self->objectIndex, EVENT_COLLISION, targetObjectIndex, &ownerObjectIndex);
+    int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, self->objectIndex, EVENT_COLLISION, targetObjectIndex, &ownerObjectIndex, runner);
 
     vm->currentEventObjectIndex = ownerObjectIndex;
 
@@ -743,10 +944,25 @@ static void executeCollisionEvent(Runner* runner, Instance* self, Instance* othe
 static void dispatchCollisionEvents(Runner* runner) {
     DataWin* dataWin = runner->dataWin;
     int32_t count = (int32_t) arrlen(runner->instances);
+    if (count == 0) return;
+
+    // ПРЕДВЫЧИСЛЕНИЕ: Считаем BBox всех активных объектов ровно 1 раз за кадр!
+    // Это избавляет нас от вызова sin/cos во вложенном O(N^2) цикле.
+    InstanceBBox* cachedBBoxes = safeMalloc(count * sizeof(InstanceBBox));
+    repeat(count, i) {
+        if (runner->instances[i]->active) {
+            cachedBBoxes[i] = Collision_computeBBox(dataWin, runner->instances[i]);
+        } else {
+            cachedBBoxes[i].valid = false;
+        }
+    }
 
     repeat(count, i) {
         Instance* self = runner->instances[i];
         if (!self->active) continue;
+
+        InstanceBBox bboxSelf = cachedBBoxes[i];
+        if (!bboxSelf.valid) continue;
 
         // Walk the parent chain to find all collision event handlers for this object
         int32_t currentObj = self->objectIndex;
@@ -765,14 +981,11 @@ static void dispatchCollisionEvents(Runner* runner) {
                     // Check all instances of the target object
                     repeat(count, j) {
                         Instance* other = runner->instances[j];
-                        if (!other->active) continue;
-                        if (other == self) continue;
-                        if (!VM_isObjectOrDescendant(dataWin, other->objectIndex, targetObjIndex)) continue;
+                        if (!other->active || other == self) continue;
+                        if (!Collision_matchesTarget(dataWin, other, targetObjIndex)) continue;
 
-                        // Compute bboxes
-                        InstanceBBox bboxSelf = Collision_computeBBox(dataWin, self);
-                        InstanceBBox bboxOther = Collision_computeBBox(dataWin, other);
-                        if (!bboxSelf.valid || !bboxOther.valid) continue;
+                        InstanceBBox bboxOther = cachedBBoxes[j]; // БЕРЕМ ИЗ КЭША!
+                        if (!bboxOther.valid) continue;
 
                         // AABB overlap test
                         if (bboxSelf.left >= bboxOther.right || bboxOther.left >= bboxSelf.right ||
@@ -793,17 +1006,23 @@ static void dispatchCollisionEvents(Runner* runner) {
                             self->y = self->yprevious;
                             other->x = other->xprevious;
                             other->y = other->yprevious;
+
+                            // Обновляем кэш, так как координаты изменились!
+                            cachedBBoxes[i] = Collision_computeBBox(dataWin, self);
+                            cachedBBoxes[j] = Collision_computeBBox(dataWin, other);
+                            bboxSelf = cachedBBoxes[i];
                         }
 
                         executeCollisionEvent(runner, self, other, targetObjIndex);
                     }
                 }
             }
-
             currentObj = obj->parentId;
             depth++;
         }
     }
+
+    free(cachedBBoxes);
 }
 
 // ===[ View Following + Clamping ]===
@@ -869,7 +1088,7 @@ static void dispatchOutsideRoomEvents(Runner* runner) {
         if (!inst->active) continue;
 
         // Early-out: skip instances whose object has no Outside Room event
-        if (0 > findEventCodeIdAndOwner(dataWin, inst->objectIndex, EVENT_OTHER, OTHER_OUTSIDE_ROOM, nullptr)) continue;
+        if (0 > findEventCodeIdAndOwner(dataWin, inst->objectIndex, EVENT_OTHER, OTHER_OUTSIDE_ROOM, nullptr, runner)) continue;
 
         // Compute bounding box
         bool outside;
@@ -1146,6 +1365,11 @@ void Runner_step(Runner* runner) {
 
         // Fire Room End for all instances
         Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_END);
+
+        // ОЧИЩАЕМ МАСКИ КОЛЛИЗИЙ СТАРОЙ КОМНАТЫ
+        DataWin_ClearAllMasks(runner->dataWin);
+
+        Runner_freeRoomData();
 
         int32_t newRoomIndex = runner->pendingRoom;
         require(runner->dataWin->room.count > (uint32_t) newRoomIndex);
@@ -1540,7 +1764,7 @@ char* Runner_dumpStateJson(Runner* runner) {
     JsonWriter_key(&w, "tiles");
     JsonWriter_beginArray(&w);
     repeat(dumpRoom->tileCount, tileIdx) {
-        RoomTile* tile = &dumpRoom->tiles[tileIdx];
+        RoomTile* tile = &currentRoomTiles[tileIdx];
         const char* bgName = (tile->backgroundDefinition >= 0 && dataWin->bgnd.count > (uint32_t) tile->backgroundDefinition) ? dataWin->bgnd.backgrounds[tile->backgroundDefinition].name : nullptr;
 
         JsonWriter_beginObject(&w);
@@ -1624,6 +1848,8 @@ char* Runner_dumpStateJson(Runner* runner) {
 
 void Runner_free(Runner* runner) {
     if (runner == nullptr) return;
+
+    Runner_freeRoomData();
 
     // Free all instances
     repeat(arrlen(runner->instances), i) {
