@@ -2119,12 +2119,22 @@ RValue VMBuiltins_getVariable(VMContext *ctx, Variable* varDef, int32_t arrayInd
     STUB_RETURN_UNDEFINED(game_save)
     STUB_RETURN_UNDEFINED(game_load)
 
-    static RValue builtinInstanceNumber(VMContext *ctx, RValue *args, int32_t argCount) {
+static RValue builtinInstanceNumber(VMContext *ctx, RValue *args, int32_t argCount) {
         if (1 > argCount) return RValue_makeReal(0.0);
         Runner *runner = (Runner *) ctx->runner;
         int32_t objectIndex = RValue_toInt32(args[0]);
         int32_t count = 0;
         int32_t instanceCount = (int32_t) arrlen(runner->instances);
+
+        if (objectIndex == INSTANCE_ALL) {
+            repeat(instanceCount, i) {
+                if (runner->instances[i]->active) count++;
+            }
+            return RValue_makeReal((GMLReal) count);
+        }
+
+        if (objectIndex < 0) return RValue_makeReal(0.0);
+
         repeat(instanceCount, i) {
             Instance *inst = runner->instances[i];
             if (inst->active && VM_isObjectOrDescendant(ctx->dataWin, inst->objectIndex, objectIndex)) {
@@ -2134,13 +2144,26 @@ RValue VMBuiltins_getVariable(VMContext *ctx, Variable* varDef, int32_t arrayInd
         return RValue_makeReal((GMLReal) count);
     }
 
-    static RValue builtinInstanceFind(VMContext *ctx, RValue *args, int32_t argCount) {
-        if (2 > argCount) return RValue_makeReal(-4.0); // noone
+static RValue builtinInstanceFind(VMContext *ctx, RValue *args, int32_t argCount) {
+        if (2 > argCount) return RValue_makeReal(INSTANCE_NOONE); // noone
         Runner *runner = (Runner *) ctx->runner;
         int32_t objectIndex = RValue_toInt32(args[0]);
         int32_t n = RValue_toInt32(args[1]);
         int32_t count = 0;
         int32_t instanceCount = (int32_t) arrlen(runner->instances);
+
+        if (objectIndex == INSTANCE_ALL) {
+            repeat(instanceCount, i) {
+                if (runner->instances[i]->active) {
+                    if (count == n) return RValue_makeReal((GMLReal) runner->instances[i]->instanceId);
+                    count++;
+                }
+            }
+            return RValue_makeReal(INSTANCE_NOONE);
+        }
+
+        if (objectIndex < 0) return RValue_makeReal(INSTANCE_NOONE);
+
         repeat(instanceCount, i) {
             Instance *inst = runner->instances[i];
             if (inst->active && VM_isObjectOrDescendant(ctx->dataWin, inst->objectIndex, objectIndex)) {
@@ -2148,15 +2171,32 @@ RValue VMBuiltins_getVariable(VMContext *ctx, Variable* varDef, int32_t arrayInd
                 count++;
             }
         }
-        return RValue_makeReal(-4.0); // noone
+        return RValue_makeReal(INSTANCE_NOONE); // noone
     }
 
     static RValue builtinInstanceExists(VMContext *ctx, RValue *args, int32_t argCount) {
         if (1 > argCount) return RValue_makeBool(false);
-        Runner *runner = (Runner *) ctx->runner;
+        Runner *runner = ctx->runner;
         int32_t id = RValue_toInt32(args[0]);
-        bool found = false;
+
+        if (id == INSTANCE_SELF) {
+            return RValue_makeBool(ctx->currentInstance != nullptr && ctx->currentInstance->active);
+        }
+        if (id == INSTANCE_OTHER) {
+            return RValue_makeBool(ctx->otherInstance != nullptr && ctx->otherInstance->active);
+        }
+        if (id == INSTANCE_NOONE) return RValue_makeBool(false);
+
         int32_t instanceCount = (int32_t) arrlen(runner->instances);
+
+        if (id == INSTANCE_ALL) {
+            repeat(instanceCount, i) {
+                if (runner->instances[i]->active) return RValue_makeBool(true);
+            }
+            return RValue_makeBool(false);
+        }
+
+        bool found = false;
         if (id >= 0 && runner->dataWin->objt.count > (uint32_t) id) {
             // Object type index: search for any active instance of this object (or descendants)
             repeat(instanceCount, i) {
@@ -2184,13 +2224,37 @@ RValue VMBuiltins_getVariable(VMContext *ctx, Variable* varDef, int32_t arrayInd
         if (1 > argCount) {
             // No args: destroy the current instance
             if (ctx->currentInstance != nullptr) {
-                Runner_destroyInstance(runner, (Instance *) ctx->currentInstance);
+                Runner_destroyInstance(runner, ctx->currentInstance);
             }
             return RValue_makeUndefined();
         }
         // 1 arg: find and destroy matching instances
         int32_t id = RValue_toInt32(args[0]);
         int32_t instanceCount = (int32_t) arrlen(runner->instances);
+
+        if (id == INSTANCE_ALL) {
+            repeat(instanceCount, i) {
+                if (runner->instances[i]->active) {
+                    Runner_destroyInstance(runner, runner->instances[i]);
+                }
+            }
+            return RValue_makeUndefined();
+        }
+
+        if (id == INSTANCE_SELF) {
+            if (ctx->currentInstance != nullptr && (ctx->currentInstance)->active) {
+                Runner_destroyInstance(runner, ctx->currentInstance);
+            }
+            return RValue_makeUndefined();
+        }
+
+        if (id == INSTANCE_OTHER) {
+            if (ctx->otherInstance != nullptr && (ctx->otherInstance)->active) {
+                Runner_destroyInstance(runner, ctx->otherInstance);
+            }
+            return RValue_makeUndefined();
+        }
+
         if (id >= 0 && runner->dataWin->objt.count > (uint32_t) id) {
             // Object type index: destroy all active instances of this object (or descendants)
             repeat(instanceCount, i) {
@@ -2214,7 +2278,7 @@ RValue VMBuiltins_getVariable(VMContext *ctx, Variable* varDef, int32_t arrayInd
 
     static RValue builtinInstanceCreate(VMContext *ctx, RValue *args, int32_t argCount) {
         if (3 > argCount) return RValue_makeReal(0.0);
-        Runner *runner = (Runner *) ctx->runner;
+        Runner *runner = ctx->runner;
         GMLReal x = RValue_toReal(args[0]);
         GMLReal y = RValue_toReal(args[1]);
         int32_t objectIndex = RValue_toInt32(args[2]);
@@ -2224,7 +2288,7 @@ RValue VMBuiltins_getVariable(VMContext *ctx, Variable* varDef, int32_t arrayInd
         }
         Instance *callerInst = (Instance *) ctx->currentInstance;
         Instance *inst = Runner_createInstance(runner, x, y, objectIndex);
-        if (inst == nullptr) return RValue_makeReal(-4.0); // noone
+        if (inst == nullptr) return RValue_makeReal(INSTANCE_NOONE); // noone
         if (callerInst != nullptr && ctx->creatorVarID >= 0) {
             Instance_setSelfVar(inst, ctx->creatorVarID, RValue_makeReal((GMLReal) callerInst->instanceId));
         }
@@ -3526,17 +3590,16 @@ RValue VMBuiltins_getVariable(VMContext *ctx, Variable* varDef, int32_t arrayInd
 
         if (ctx->currentInstance != nullptr) {
             Instance *inst = (Instance *) ctx->currentInstance;
-            Runner *runner = (Runner *) ctx->runner;
-
-            if (shgeti(ctx->alarmsToBeTraced, "*") != -1 || shgeti(ctx->alarmsToBeTraced,
-                                                                   runner->dataWin->objt.objects[inst->objectIndex].
-                                                                   name) !=
-                -1) {
-                fprintf(stderr, "VM: [%s] Setting Alarm[%d] = %d (instanceId=%d)\n",
-                        runner->dataWin->objt.objects[inst->objectIndex].name, alarmIndex, steps, inst->instanceId);
+            if (ctx->actionRelativeFlag) {
+                // В GML, если таймер неактивен (-1 или 0), относительное добавление должно приравниваться к установке
+                if (inst->alarm[alarmIndex] <= 0) {
+                    inst->alarm[alarmIndex] = steps;
+                } else {
+                    inst->alarm[alarmIndex] += steps;
+                }
+            } else {
+                inst->alarm[alarmIndex] = steps;
             }
-
-            inst->alarm[alarmIndex] = steps;
         }
 
         return RValue_makeUndefined();

@@ -212,14 +212,13 @@ static void Runner_freeRoomData() {
 // Walks the parent chain starting from objectIndex to find an event handler.
 // Returns the EventAction's codeId, or -1 if not found.
 // If outOwnerObjectIndex is non-null, it is set to the objectIndex that owns the found event (or -1 if not found).
-static int32_t findEventCodeIdAndOwner(DataWin* dataWin, int32_t objectIndex, int32_t eventType, int32_t eventSubtype, int32_t* outOwnerObjectIndex, Runner* runner) { // <--- ДОБАВЛЕН RUNNER
+static ObjectEvent* findEventAndOwner(DataWin* dataWin, int32_t objectIndex, int32_t eventType, int32_t eventSubtype, int32_t* outOwnerObjectIndex, Runner* runner) {
     int32_t currentObj = objectIndex;
     int depth = 0;
 
     while (currentObj >= 0 && (uint32_t) currentObj < dataWin->objt.count && 32 > depth) {
         GameObject* obj = &dataWin->objt.objects[currentObj];
 
-        // НОВОЕ: Загружаем события по требованию
         Runner_loadObjectEvents(runner, obj);
 
         if (OBJT_EVENT_TYPE_COUNT > eventType) {
@@ -227,12 +226,8 @@ static int32_t findEventCodeIdAndOwner(DataWin* dataWin, int32_t objectIndex, in
             repeat(eventList->eventCount, i) {
                 ObjectEvent* evt = &eventList->events[i];
                 if ((int32_t) evt->eventSubtype == eventSubtype) {
-                    if (evt->actionCount > 0 && evt->actions[0].codeId >= 0) {
-                        if (outOwnerObjectIndex != nullptr) *outOwnerObjectIndex = currentObj;
-                        return evt->actions[0].codeId;
-                    }
-                    if (outOwnerObjectIndex != nullptr) *outOwnerObjectIndex = -1;
-                    return -1;
+                    if (outOwnerObjectIndex != nullptr) *outOwnerObjectIndex = currentObj;
+                    return evt;
                 }
             }
         }
@@ -242,7 +237,7 @@ static int32_t findEventCodeIdAndOwner(DataWin* dataWin, int32_t objectIndex, in
     }
 
     if (outOwnerObjectIndex != nullptr) *outOwnerObjectIndex = -1;
-    return -1;
+    return nullptr;
 }
 
 // ===[ Event Execution ]===
@@ -370,7 +365,9 @@ const char* Runner_getEventName(int32_t eventType, int32_t eventSubtype) {
 
 void Runner_executeEventFromObject(Runner* runner, Instance* instance, int32_t startObjectIndex, int32_t eventType, int32_t eventSubtype) {
     int32_t ownerObjectIndex = -1;
-    int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, startObjectIndex, eventType, eventSubtype, &ownerObjectIndex, runner);
+    ObjectEvent* evt = findEventAndOwner(runner->dataWin, startObjectIndex, eventType, eventSubtype, &ownerObjectIndex, runner);
+
+    if (evt == nullptr || evt->actionCount == 0) return;
 
     VMContext* vm = runner->vmContext;
     int32_t savedEventType = vm->currentEventType;
@@ -381,7 +378,7 @@ void Runner_executeEventFromObject(Runner* runner, Instance* instance, int32_t s
     vm->currentEventSubtype = eventSubtype;
     vm->currentEventObjectIndex = ownerObjectIndex;
 
-    if (codeId >= 0 && shlen(vm->eventsToBeTraced) != -1) {
+    if (shlen(vm->eventsToBeTraced) != -1) {
         const char* eventName = Runner_getEventName(eventType, eventSubtype);
         const char* objectName = runner->dataWin->objt.objects[instance->objectIndex].name;
 
@@ -396,7 +393,15 @@ void Runner_executeEventFromObject(Runner* runner, Instance* instance, int32_t s
         }
     }
 
-    executeCode(runner, instance, codeId);
+    // Выполняем ВСЕ действия (actions) по порядку
+    repeat(evt->actionCount, i) {
+        int32_t codeId = evt->actions[i].codeId;
+        if (codeId >= 0) {
+            executeCode(runner, instance, codeId);
+            // Если во время исполнения скрипта инстанс был уничтожен (например D&D блоком Destroy Instance), прерываем оставшиеся действия
+            if (!instance->active) break;
+        }
+    }
 
     vm->currentEventType = savedEventType;
     vm->currentEventSubtype = savedEventSubtype;
@@ -595,8 +600,8 @@ void Runner_draw(Runner* runner) {
             }
         } else {
             Instance* inst = d->instance;
-            int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL, nullptr, runner);
-            if (codeId >= 0) {
+            ObjectEvent* evt = findEventAndOwner(runner->dataWin, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL, nullptr, runner);
+            if (evt != nullptr && evt->actionCount > 0) {
                 Runner_executeEvent(runner, inst, EVENT_DRAW, DRAW_NORMAL);
             } else if (runner->renderer != nullptr) {
                 Renderer_drawSelf(runner->renderer, inst);
@@ -907,34 +912,39 @@ void Runner_initFirstRoom(Runner* runner) {
 static void executeCollisionEvent(Runner* runner, Instance* self, Instance* other, int32_t targetObjectIndex) {
     VMContext* vm = runner->vmContext;
 
-    // Save event context
     int32_t savedEventType = vm->currentEventType;
     int32_t savedEventSubtype = vm->currentEventSubtype;
     int32_t savedEventObjectIndex = vm->currentEventObjectIndex;
     struct Instance* savedOtherInstance = vm->otherInstance;
 
-    // Set collision event context
     vm->currentEventType = EVENT_COLLISION;
     vm->currentEventSubtype = targetObjectIndex;
     vm->otherInstance = other;
 
     int32_t ownerObjectIndex = -1;
-    int32_t codeId = findEventCodeIdAndOwner(runner->dataWin, self->objectIndex, EVENT_COLLISION, targetObjectIndex, &ownerObjectIndex, runner);
+    ObjectEvent* evt = findEventAndOwner(runner->dataWin, self->objectIndex, EVENT_COLLISION, targetObjectIndex, &ownerObjectIndex, runner);
 
-    vm->currentEventObjectIndex = ownerObjectIndex;
+    if (evt != nullptr && evt->actionCount > 0) {
+        vm->currentEventObjectIndex = ownerObjectIndex;
 
-    if (codeId >= 0 && shlen(vm->eventsToBeTraced) != -1) {
-        const char* selfName = runner->dataWin->objt.objects[self->objectIndex].name;
-        const char* targetName = runner->dataWin->objt.objects[targetObjectIndex].name;
-        bool shouldTrace = shgeti(vm->eventsToBeTraced, "*") != -1 || shgeti(vm->eventsToBeTraced, "Collision") != -1 || shgeti(vm->eventsToBeTraced, selfName) != -1;
-        if (shouldTrace) {
-            fprintf(stderr, "Runner: [%s] Collision with %s (instanceId=%d, otherId=%d)\n", selfName, targetName, self->instanceId, other->instanceId);
+        if (shlen(vm->eventsToBeTraced) != -1) {
+            const char* selfName = runner->dataWin->objt.objects[self->objectIndex].name;
+            const char* targetName = runner->dataWin->objt.objects[targetObjectIndex].name;
+            bool shouldTrace = shgeti(vm->eventsToBeTraced, "*") != -1 || shgeti(vm->eventsToBeTraced, "Collision") != -1 || shgeti(vm->eventsToBeTraced, selfName) != -1;
+            if (shouldTrace) {
+                fprintf(stderr, "Runner: [%s] Collision with %s (instanceId=%d, otherId=%d)\n", selfName, targetName, self->instanceId, other->instanceId);
+            }
+        }
+
+        repeat(evt->actionCount, i) {
+            int32_t codeId = evt->actions[i].codeId;
+            if (codeId >= 0) {
+                executeCode(runner, self, codeId);
+                if (!self->active) break;
+            }
         }
     }
 
-    executeCode(runner, self, codeId);
-
-    // Restore event context
     vm->currentEventType = savedEventType;
     vm->currentEventSubtype = savedEventSubtype;
     vm->currentEventObjectIndex = savedEventObjectIndex;
@@ -1088,7 +1098,7 @@ static void dispatchOutsideRoomEvents(Runner* runner) {
         if (!inst->active) continue;
 
         // Early-out: skip instances whose object has no Outside Room event
-        if (0 > findEventCodeIdAndOwner(dataWin, inst->objectIndex, EVENT_OTHER, OTHER_OUTSIDE_ROOM, nullptr, runner)) continue;
+        if (findEventAndOwner(dataWin, inst->objectIndex, EVENT_OTHER, OTHER_OUTSIDE_ROOM, nullptr, runner) == nullptr) continue;
 
         // Compute bounding box
         bool outside;
@@ -1279,6 +1289,10 @@ void Runner_step(Runner* runner) {
                     }
 
                     Runner_executeEvent(runner, inst, EVENT_ALARM, alarmIdx);
+
+                    // ЕСЛИ аларм уничтожил текущий объект (сделал его inactive),
+                    // мы должны немедленно прервать обработку его остальных алармов!
+                    if (!inst->active) break;
                 }
             }
         }

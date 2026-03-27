@@ -1643,9 +1643,9 @@ static void handlePopEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
     // Check for exit magic: PopEnv with 0xF00000 operand means "unwind env stack and exit/return"
     if ((instr & 0x00FFFFFF) == 0xF00000) {
         restoreEnvContext(ctx, frame);
+        arrfree(frame->instanceList);
         frame->instanceList = nullptr;
         ctx->envDepth--; // "Удаляем" фрейм
-        arrfree(frame->instanceList);
         return;
     }
 
@@ -1667,6 +1667,7 @@ static void handlePopEnv(VMContext* ctx, uint32_t instr, uint32_t instrAddr) {
     }
 
     restoreEnvContext(ctx, frame);
+    arrfree(frame->instanceList);
     frame->instanceList = nullptr;
     ctx->envDepth--; // "Удаляем" фрейм
 }
