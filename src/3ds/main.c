@@ -24,6 +24,7 @@
 #include "stb_image_write.h"
 
 #include "utils.h"
+#include "render_thread.h"
 
 static double get_time_sec(void) {
     return (double)SDL_GetTicks() / 1000.0;
@@ -437,12 +438,27 @@ int main(int argc, char* argv[]) {
     }
 
     Runner_initFirstRoom(runner);
+#ifdef __3DS__
+    RenderThread renderThread;
+    RenderThread_init(&renderThread);
+    if (renderThread.handle == NULL) {
+        fprintf(stderr, "[main] Failed to init render-thread continue\n");
+        // В этом случае RenderThread_waitEndFrame/signalDraw станут no-op — но
+        // функции написаны так, что без треда они повиснут. Для аварийного
+        // fallback нужна отдельная логика; пока просто упадём.
+    }
+#endif
 
     bool debugPaused = false;
     double lastFrameTime = get_time_sec();
 
     // MAIN LOOP
     while (!runner->shouldExit && aptMainLoop()) {
+        // Ждём, пока Core 1 завершит C3D_FrameEnd предыдущего кадра.
+        // При первой итерации рендер-тред сигналит сразу после старта.
+#ifdef __3DS__
+      RenderThread_waitEndFrame(&renderThread);
+#endif
         RunnerKeyboard_beginFrame(runner->keyboard);
 #ifdef __3DS__
          hidScanInput();
@@ -751,6 +767,13 @@ int main(int argc, char* argv[]) {
         runner->viewCurrent = 0;
 
         renderer->vtable->endFrame(renderer);
+        // Сигналим Core 1: command list готов, можно делать C3D_FrameEnd.
+        // Core 0 продолжает выполнение (frame rate limiting), пока Core 1
+        // ждёт GPU/VBlank. Следующая RenderThread_waitEndFrame() в начале
+        // следующей итерации гарантирует, что Core 1 завершил работу.
+        #ifdef __3DS__
+        RenderThread_signalDraw(&renderThread);
+        #endif
 
         bool shouldScreenshot = hmget(args.screenshotFrames, runner->frameCount);
         if (shouldScreenshot) {
@@ -795,6 +818,10 @@ int main(int argc, char* argv[]) {
         runner->audioSystem->vtable->destroy(runner->audioSystem);
         runner->audioSystem = nullptr;
     }
+
+#ifdef __3DS__
+    RenderThread_destroy(&renderThread);
+#endif
 
     renderer->vtable->destroy(renderer);
     SDL_Quit();

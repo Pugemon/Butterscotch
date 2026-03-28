@@ -5,6 +5,7 @@
 #ifdef __3DS__
 #include <c3d/renderqueue.h>
 #include <citro3d.h>
+#include "decode_thread.h"
 
 #include "c3d/c3d_constants.h"
 
@@ -67,6 +68,7 @@ typedef struct Citro3dRenderer {
     int         vertexCount;   ///< Количество записанных вершин (хвост буфера)
     int         batchStart;    ///< Начало текущего незакоммиченного батча
     int         currentTexIndex; ///< Текстура текущего батча (-1 = не задана)
+    DecodeThread *decodeThread; ///< NULL если не инициализирован
 } Citro3dRenderer;
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,9 +1,14 @@
 #ifdef __3DS__
 
+// ─────────────────────────────────────────────────────────────────────────────
+// c3d_texture.c — управление текстурами с асинхронным декодом на Core 1
+// ─────────────────────────────────────────────────────────────────────────────
+
 #include "c3d_texture.h"
 #include "c3d_utils.h"
 #include "c3d_constants.h"
 #include "citro3d_renderer.h"
+#include "decode_thread.h"    // <-- НОВЫЙ INCLUDE
 
 #include "stb_image.h"
 #include "binary_reader.h"
@@ -15,7 +20,7 @@
 #include <stdlib.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Внутренние хелперы
+// Внутренние хелперы (не изменились)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -132,51 +137,145 @@ bool createWhiteTexture(C3D_Tex *tex) {
     return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Вспомогательный: синхронная загрузка из уже-прочитанных байт
+// Используется как fallback когда очередь декода полна.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static bool loadTextureSync(Citro3dRenderer *c3d, int pageId,
+                             uint8_t *raw, uint32_t rawSize) {
+    int w, h, ch;
+    uint8_t *px = stbi_load_from_memory(raw, (int)rawSize, &w, &h, &ch, 4);
+    free(raw);
+
+    if (!px) {
+        fprintf(stderr, "[C3D] Texture %d: stbi_load_from_memory failed.\n", pageId);
+        return false;
+    }
+
+    bool ok = uploadTexture(&c3d->textures[pageId],
+                             &c3d->texRealW[pageId],
+                             &c3d->texRealH[pageId],
+                             px, w, h);
+    stbi_image_free(px);
+
+    if (ok) {
+        fprintf(stderr, "[C3D] Texture %d: sync upload done (%d×%d).\n", pageId, w, h);
+    }
+    return ok;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Вспомогательный: вытеснение LRU-текстуры
+// Вынесен отдельно, чтобы ensureTextureLoaded читался линейно.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void evictLRU(Citro3dRenderer *c3d) {
+    int      oldestId   = -1;
+    uint32_t oldestTime = UINT32_MAX;
+
+    for (uint32_t i = 0; i < c3d->texCount; i++) {
+        if (c3d->textures[i].data != NULL && c3d->texLastUsed[i] < oldestTime) {
+            oldestTime = c3d->texLastUsed[i];
+            oldestId   = (int)i;
+        }
+    }
+
+    if (oldestId < 0) return;
+
+    fprintf(stderr, "[C3D] Evicting texture %d (last used frame %u).\n",
+            oldestId, oldestTime);
+
+    // Сбросить батч ДО удаления текстуры — в нём могут быть ссылки на неё
+    extern void flushBatch(Citro3dRenderer *c3d);
+    flushBatch(c3d);
+
+    C3D_TexDelete(&c3d->textures[oldestId]);
+    c3d->textures[oldestId].data = NULL;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ensureTextureLoaded — основная функция, вызывается из prepareQuad (Core 0)
+//
+// Конвейер:
+//
+//   Кадр N:   обнаружили нужную текстуру → читаем PNG bytes → dispatch Core 1
+//             рисуем белой заглушкой
+//
+//   Кадр N+1: Core 1 всё ещё декодирует → рисуем заглушкой
+//
+//   Кадр N+2: tryCollect → C3D_TexInit + memcpy → текстура готова
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
 void ensureTextureLoaded(Citro3dRenderer *c3d, int pageId) {
     if (pageId < 0 || pageId >= (int)c3d->texCount) return;
 
-    // Всегда обновляем время использования — даже если текстура уже загружена
+    // Всегда обновляем LRU-метку, даже если текстура ещё не загружена.
+    // Иначе только-что-запрошенная текстура может быть сразу вытеснена.
     c3d->texLastUsed[pageId] = c3d->currentFrame;
 
-    if (c3d->textures[pageId].data != NULL) return;  // уже в VRAM
+    // ── Шаг 0: забираем результат, если Core 1 уже всё сделал ───────────────
+    //
+    // Проверяем ДО c3d->textures[pageId].data, потому что в момент между
+    // dispatch и collect data == NULL, и без этой проверки мы отправим
+    // второй dispatch на ту же текстуру.
+    if (c3d->decodeThread != NULL) {
+        u16     *swizzled;
+        uint32_t potW, potH;
+        int      realW, realH;
 
-    fprintf(stderr, "==> Frame %u: Loading texture %d...\n", c3d->currentFrame, pageId);
+        if (DecodeThread_tryCollect(c3d->decodeThread, pageId,
+                                    &swizzled, &potW, &potH, &realW, &realH))
+        {
+            // Core 1 вернул Morton-swizzled буфер. Финализируем здесь:
+            //   C3D_TexInit — вызывает linearAlloc → только Core 0
+            //   memcpy      → пишем в linear heap → только Core 0
+            //   FlushDataCache → GPU/GSP → только Core 0
+            C3D_Tex *tex = &c3d->textures[pageId];
+            if (C3D_TexInit(tex, (u16)potW, (u16)potH, GPU_RGBA4)) {
+                C3D_TexSetFilter(tex, GPU_LINEAR, GPU_NEAREST);
+                C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-    // ── Шаг 1: проверяем лимит кэша ──────────────────────────────────────────
+                // Swizzled данные уже в правильном формате — просто копируем.
+                // memcpy здесь быстрый (~0.5ms для 512KB), не stbi.
+                memcpy(tex->data, swizzled, potW * potH * sizeof(u16));
+                GSPGPU_FlushDataCache(tex->data, tex->size);
+
+                c3d->texRealW[pageId] = realW;
+                c3d->texRealH[pageId] = realH;
+
+                fprintf(stderr, "[C3D] Texture %d: async collect done (%d×%d).\n",
+                        pageId, realW, realH);
+            } else {
+                fprintf(stderr, "[C3D] Texture %d: C3D_TexInit failed after async decode.\n",
+                        pageId);
+            }
+            free(swizzled);
+            return;
+        }
+    }
+
+    // ── Шаг 1: текстура уже в VRAM — ничего делать не нужно ─────────────────
+    if (c3d->textures[pageId].data != NULL) return;
+
+    // ── Шаг 2: уже в очереди декода — ждём, рисуем белой заглушкой ──────────
+    if (c3d->decodeThread != NULL &&
+        DecodeThread_isInFlight(c3d->decodeThread, pageId))
+    {
+        return; // Core 1 работает, придём снова в следующем кадре
+    }
+
+    // ── Шаг 3: новая загрузка — сначала вытесняем LRU если нужно ─────────────
     int loadedCount = 0;
     for (uint32_t i = 0; i < c3d->texCount; i++) {
         if (c3d->textures[i].data != NULL) loadedCount++;
     }
-
-    // ── Шаг 2: вытесняем LRU-текстуру при переполнении ───────────────────────
     if (loadedCount >= MAX_CACHED_TEXTURES) {
-        int      oldestId   = -1;
-        uint32_t oldestTime = UINT32_MAX;
-
-        for (uint32_t i = 0; i < c3d->texCount; i++) {
-            if (c3d->textures[i].data != NULL && c3d->texLastUsed[i] < oldestTime) {
-                oldestTime = c3d->texLastUsed[i];
-                oldestId   = (int)i;
-            }
-        }
-
-        if (oldestId >= 0) {
-            fprintf(stderr, "[C3D] Cache full (%d/%d). Evicting texture %d (frame %u).\n",
-                    loadedCount, MAX_CACHED_TEXTURES, oldestId, oldestTime);
-
-            // ВАЖНО: сбросить батч ДО удаления текстуры.
-            // Батч может содержать вершины, ссылающиеся на эту текстуру.
-            // Если удалить текстуру без сброса, GPU нарисует мусор.
-            // flushBatch объявлен в c3d_batch.h, включаем через citro3d_renderer.h
-            extern void flushBatch(Citro3dRenderer *c3d);
-            flushBatch(c3d);
-
-            C3D_TexDelete(&c3d->textures[oldestId]);
-            c3d->textures[oldestId].data = NULL;
-        }
+        evictLRU(c3d);
     }
 
-    // ── Шаг 3: загружаем текстуру из DataWin ─────────────────────────────────
+    // ── Шаг 4: читаем PNG-blob на Core 0 (FILE* не thread-safe) ─────────────
     DataWin *dw   = c3d->base.dataWin;
     Texture *txtr = &dw->txtr.textures[pageId];
 
@@ -192,26 +291,22 @@ void ensureTextureLoaded(Citro3dRenderer *c3d, int pageId) {
         return;
     }
 
-    int w, h, ch;
-    uint8_t *px = stbi_load_from_memory(raw, (int)txtr->blobSize, &w, &h, &ch, 4);
-    free(raw);
+    fprintf(stderr, "[C3D] Texture %d: dispatching async decode (%u bytes PNG)...\n",
+            pageId, txtr->blobSize);
 
-    if (!px) {
-        fprintf(stderr, "[C3D] Texture %d: stbi_load_from_memory failed.\n", pageId);
+    // ── Шаг 5: отправляем на Core 1 ─────────────────────────────────────────
+    // Передаём владение raw — Core 1 освободит его после stbi.
+    if (c3d->decodeThread != NULL &&
+        DecodeThread_dispatch(c3d->decodeThread, pageId, raw, txtr->blobSize))
+    {
+        // Текстура будет белой 1–2 кадра. Core 0 продолжает без фриза.
         return;
     }
 
-    bool ok = uploadTexture(&c3d->textures[pageId],
-                             &c3d->texRealW[pageId],
-                             &c3d->texRealH[pageId],
-                             px, w, h);
-    stbi_image_free(px);
-
-    if (ok) {
-        fprintf(stderr, "[C3D] Texture %d: uploaded (%d×%d).\n", pageId, w, h);
-    } else {
-        fprintf(stderr, "[C3D] Texture %d: uploadTexture failed.\n", pageId);
-    }
+    // ── Fallback: очередь полна или нет треда — грузим синхронно ─────────────
+    // raw передаётся в loadTextureSync и освобождается там
+    fprintf(stderr, "[C3D] Texture %d: queue full, loading synchronously.\n", pageId);
+    loadTextureSync(c3d, pageId, raw, txtr->blobSize);
 }
 
 #endif // __3DS__

@@ -154,6 +154,11 @@ void C3DRenderer_initTextures(Citro3dRenderer *c3d, DataWin *dataWin) {
     c3d->currentTexIndex = -1;
 
     fprintf(stderr, "[C3D] Init done: %u game textures + 1 white stub.\n", texCount);
+    c3d->decodeThread = (DecodeThread *)malloc(sizeof(DecodeThread));
+    if (c3d->decodeThread) {
+        DecodeThread_init(c3d->decodeThread);
+    }
+
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -176,6 +181,15 @@ void C3DRenderer_init(Renderer *renderer, DataWin *dataWin) {
 
 void C3DRenderer_destroy(Renderer *renderer) {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
+
+    // Сначала останавливаем декод-тред
+    // Важно: до C3D_TexDelete, иначе тред может обращаться к уже
+    // освобождённым структурам DataWin.
+    if (c3d->decodeThread) {
+        DecodeThread_destroy(c3d->decodeThread);
+        free(c3d->decodeThread);
+        c3d->decodeThread = NULL;
+    }
 
     // Удаляем все загруженные текстуры (включая белую заглушку = texCount-й слот)
     for (uint32_t i = 0; i <= c3d->texCount; i++) {
@@ -221,7 +235,12 @@ void C3DRenderer_endFrame(Renderer *renderer) {
     // C3D_FrameEnd автоматически сбрасывает весь linear heap через
     // GSPGPU_FlushDataCache(__ctru_linear_heap, __ctru_linear_heap_size),
     // поэтому отдельный flush VBO здесь не нужен.
-    C3D_FrameEnd(0);
+
+    // НЕ вызываем C3D_FrameEnd здесь.
+    // C3D_FrameEnd теперь вызывается рендер-тредом (Core 1) через RenderThread_signalDraw().
+    // Это позволяет Core 0 немедленно перейти к Runner_step следующего кадра,
+    // пока Core 1 ожидает GPU/VBlank.
+    // C3D_FrameEnd(0);
 }
 
 void C3DRenderer_beginView(Renderer *renderer,
