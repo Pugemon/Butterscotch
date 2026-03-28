@@ -1,0 +1,28 @@
+; === Uniforms ===
+.alias proj_mtx c0
+
+; === Inputs (from VBO) ===
+.alias in_pos v0
+.alias in_tex v1
+.alias in_clr v2
+
+; === Outputs (to rasterizer / TexEnv) ===
+.alias out_pos o0
+.alias out_tex o1
+.alias out_clr o2
+
+.proc main
+    ; Transform position (proj * vec4)
+    dp4 out_pos.x, proj_mtx[0], in_pos
+    dp4 out_pos.y, proj_mtx[1], in_pos
+    dp4 out_pos.z, proj_mtx[2], in_pos
+    dp4 out_pos.w, proj_mtx[3], in_pos
+
+    ; Pass UV
+    mov out_tex, in_tex
+
+    ; Pass color
+    mov out_clr, in_clr
+
+    end
+.end

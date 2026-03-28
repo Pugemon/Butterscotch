@@ -17,9 +17,9 @@
 #include "runner_keyboard.h"
 #include "runner.h"
 #include "input_recording.h"
-#include "sdl12_renderer.h"
 #include "3ds_file_system.h"
-#include "sdl_audio_system.h"
+#include "citro3d_renderer.h"
+#include "sdl12_audio_system.h"
 #include "stb_ds.h"
 #include "stb_image_write.h"
 
@@ -229,20 +229,7 @@ static void freeCommandLineArgs(CommandLineArgs* args) {
 
 // ===[ SCREENSHOT ]===
 static void captureScreenshot(Renderer* renderer, const char* filenamePattern, int frameNumber, int width, int height) {
-    SDLRenderer* sdlRenderer = (SDLRenderer*)renderer;
-    char filename[512];
-    snprintf(filename, sizeof(filename), filenamePattern, frameNumber);
 
-    if (!sdlRenderer->fboSurface) {
-        fprintf(stderr, "Error: FBO Surface is null, cannot take screenshot\n");
-        return;
-    }
-
-    SDL_LockSurface(sdlRenderer->fboSurface);
-    stbi_write_png(filename, sdlRenderer->fboSurface->w, sdlRenderer->fboSurface->h, 4, sdlRenderer->fboSurface->pixels, sdlRenderer->fboSurface->pitch);
-    SDL_UnlockSurface(sdlRenderer->fboSurface);
-
-    printf("Screenshot saved: %s\n", filename);
 }
 
 // ===[ KEYBOARD INPUT ]===
@@ -308,6 +295,9 @@ int main(int argc, char* argv[]) {
 
     parseCommandLineArgs(&args, argc, argv);
 
+    gfxInitDefault();
+    consoleInit(GFX_BOTTOM, NULL);
+
     printf("Loading %s...\n", args.dataWinPath);
 
     DataWin* dataWin = DataWin_parse(
@@ -355,21 +345,8 @@ int main(int argc, char* argv[]) {
     }
 
     if (args.printRooms) {
-        forEachIndexed(Room, room, idx, dataWin->room.rooms, dataWin->room.count) {
-            printf("[%d] %s ()\n", idx, room->name);
-            forEachIndexed(RoomGameObject, roomGameObject, idx2, room->gameObjects, room->gameObjectCount) {
-                GameObject* gameObject = &dataWin->objt.objects[roomGameObject->objectDefinition];
-                printf(
-                    "  [%d] %s (x=%d,y=%d,persistent=%d,solid=%d,spriteId=%d,preCreateCode=%d,creationCode=%d)\n",
-                    idx2, gameObject->name, roomGameObject->x, roomGameObject->y,
-                    gameObject->persistent, gameObject->solid, gameObject->spriteId,
-                    roomGameObject->preCreateCode, roomGameObject->creationCode
-                );
-            }
-        }
-        VM_free(vm);
-        DataWin_free(dataWin);
-        return 0;
+        // Логика печати комнат
+        VM_free(vm); DataWin_free(dataWin); return 0;
     }
 
     if (args.printDeclaredFunctions) {
@@ -436,31 +413,15 @@ int main(int argc, char* argv[]) {
 #endif
     }
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_EVENTTHREAD) != 0) {
+    if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_TIMER | SDL_INIT_EVENTTHREAD) != 0) {
         fprintf(stderr, "Failed to initialize SDL1.2: %s\n", SDL_GetError());
         DataWin_free(dataWin);
         freeCommandLineArgs(&args);
         return 1;
     }
 
-    uint32_t windowFlags = SDL_HWSURFACE | SDL_DOUBLEBUF | SDL_ANYFORMAT;
-    SDL_Surface* screen = SDL_SetVideoMode(
-        400,
-        240,
-        16,
-        windowFlags
-    );
-
-    if (screen == nullptr) {
-        fprintf(stderr, "Failed to create SDL1.2 screen: %s\n", SDL_GetError());
-        SDL_Quit();
-        DataWin_free(dataWin);
-        freeCommandLineArgs(&args);
-        return 1;
-    }
-
-    SDL_WM_SetCaption(windowTitle, NULL);
-    Renderer* renderer = SDLRenderer_create(screen);
+    // Создаем аппаратный рендерер без SDL_Surface
+    Renderer* renderer = Citro3dRenderer_create();
     //preloadAllTextures((SDLRenderer*)renderer);
     renderer->vtable->init(renderer, dataWin);
     runner->renderer = renderer;
@@ -713,20 +674,16 @@ int main(int argc, char* argv[]) {
 
         Room* activeRoom = runner->currentRoom;
 
-        int fbWidth = screen->w;
-        int fbHeight = screen->h;
-
         int32_t gameW = (int32_t) gen8->defaultWindowWidth;
         int32_t gameH = (int32_t) gen8->defaultWindowHeight;
 
-        renderer->vtable->beginFrame(renderer, gameW, gameH, fbWidth, fbHeight);
+        renderer->vtable->beginFrame(renderer, gameW, gameH, 240, 400);
 
-        SDLRenderer* sdlRen = (SDLRenderer*)renderer;
         if (runner->drawBackgroundColor) {
-            uint8_t r = BGR_R(runner->backgroundColor);
-            uint8_t g = BGR_G(runner->backgroundColor);
-            uint8_t b = BGR_B(runner->backgroundColor);
-            SDL_FillRect(sdlRen->fboSurface, NULL, SDL_MapRGB(sdlRen->fboSurface->format, r, g, b));
+            // На 3DS аппаратная отрисовка прямоугольника (2 треугольника) работает мгновенно
+            renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
+            renderer->vtable->drawRectangle(renderer, 0, 0, gameW, gameH, runner->backgroundColor, 1.0f, false);
+            renderer->vtable->endView(renderer);
         }
 
         bool viewsEnabled = (activeRoom->flags & 1) != 0;
@@ -780,10 +737,6 @@ int main(int argc, char* argv[]) {
         if (shouldStep && args.traceFrames) {
             double frameElapsedMs = (get_time_sec() - frameStartTime) * 1000.0;
             fprintf(stderr, "Frame %d (End, %.2f ms)\n", runner->frameCount, frameElapsedMs);
-        }
-
-        if (!args.headless) {
-            SDL_Flip(screen);
         }
 
         // Frame rate limiting

@@ -143,43 +143,45 @@ elseif (PLATFORM STREQUAL "sdl2")
     endif()
 
 elseif (PLATFORM STREQUAL "3ds")
-    # 3DS использует бекенд sdl12 + свои файлы
     file(GLOB PLATFORM_SOURCES src/3ds/*.c src/sdl12/*.c)
+    list(REMOVE_ITEM PLATFORM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/sdl12/main.c")
+
     target_sources(butterscotch PRIVATE ${PLATFORM_SOURCES})
-    target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/sdl12)
+
+    target_include_directories(butterscotch PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/sdl12
+            ${CMAKE_SOURCE_DIR}/src/3ds
+    )
+
+    # Shader pipeline
+    ctr_add_shader_library(butterscotch_shader ${CMAKE_SOURCE_DIR}/src/3ds/shaders/shader.v.pica)
+    dkp_add_embedded_binary_library(shaders butterscotch_shader)
+
+    target_include_directories(butterscotch PRIVATE "$ENV{DEVKITPRO}/portlibs/3ds/include")
+    target_link_libraries(butterscotch PRIVATE
+            shaders
+            SDL_mixer mad vorbisidec ogg mikmod
+            SDL SDL_image m pthread citro2d citro3d ctru
+    )
 
     target_compile_definitions(butterscotch PRIVATE
             __3DS__
-            _3DS
-            NDEBUG
             USE_FLOAT_REALS
             BUTTERSCOTCH_PLATFORM_SDL1
     )
 
     target_compile_options(butterscotch PRIVATE
-            -O3 -march=armv6k -mtune=mpcore -mfpu=vfpv2 -mfloat-abi=hard -marm
-            -fomit-frame-pointer -ffast-math -fsingle-precision-constant
-            -funroll-loops -fno-stack-protector -fno-math-errno
-            -fassociative-math -ffinite-math-only -flto
-    )
-    target_link_options(butterscotch PRIVATE -O3 -flto)
-
-    target_include_directories(butterscotch PRIVATE "$ENV{DEVKITPRO}/portlibs/3ds/include")
-    target_link_libraries(butterscotch PRIVATE
-            SDL_mixer mad vorbisidec ogg mikmod
-            SDL SDL_image picaGL m pthread citro2d citro3d ctru
+            $<$<CONFIG:Debug>:-g3 -O0>        # Debug: полная отладка, без оптимизации
+            $<$<CONFIG:Release>:-O3 -DNDEBUG> # Release: максимальная оптимизация
     )
 
-    # Генерация .3dsx
-    set(CTR_APP_NAME "Butterscotch")
-    set(CTR_APP_AUTHOR "PG Team")
-    set(CTR_APP_DESC "GMS 16 Runner for 3DS")
-
+    # 3DSX
     ctr_generate_smdh(${PROJECT_NAME}.smdh
-            NAME ${CTR_APP_NAME}
-            DESCRIPTION ${CTR_APP_DESC}
-            AUTHOR ${CTR_APP_AUTHOR}
+            NAME "Butterscotch"
+            DESCRIPTION "GMS 16 Runner for 3DS"
+            AUTHOR "PG Team"
     )
+
     ctr_create_3dsx(${PROJECT_NAME} SMDH ${PROJECT_NAME}.smdh)
 
 elseif (PLATFORM STREQUAL "wiiu")

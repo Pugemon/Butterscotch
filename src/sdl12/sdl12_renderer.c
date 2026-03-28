@@ -8,7 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <SDL_video.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include "stb_image.h"
