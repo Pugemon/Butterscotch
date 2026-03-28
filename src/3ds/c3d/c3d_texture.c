@@ -192,11 +192,7 @@ void ensureTextureLoaded(Citro3dRenderer *c3d, int pageId) {
         return;
     }
 
-    // stbi_set_flip_vertically_on_load(1) нужен потому, что swizzleToTex
-    // ожидает строки снизу вверх (OpenGL-конвенция).
-    // TODO: при переходе на .tex3ds формат этот флип убрать.
     int w, h, ch;
-    stbi_set_flip_vertically_on_load(1);
     uint8_t *px = stbi_load_from_memory(raw, (int)txtr->blobSize, &w, &h, &ch, 4);
     free(raw);
 

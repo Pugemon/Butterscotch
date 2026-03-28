@@ -65,7 +65,7 @@ void swizzleToTex(C3D_Tex *tex, const u32 *src, u32 srcW, u32 srcH);
  * @param tex   [out] Неинициализированная C3D_Tex
  * @param realW [out] Оригинальная ширина (до POT-округления)
  * @param realH [out] Оригинальная высота
- * @param rgba  Пиксели RGBA8 (строки снизу вверх — stb_image flip)
+ * @param rgba  Пиксели RGBA8
  * @param w     Ширина в пикселях
  * @param h     Высота в пикселях
  * @return true при успехе, false если C3D_TexInit провалился
@@ -93,7 +93,7 @@ bool createWhiteTexture(C3D_Tex *tex);
  *  1. Считает загруженные текстуры; если >= MAX_CACHED_TEXTURES,
  *     вытесняет текстуру с минимальным texLastUsed (самую давнюю).
  *  2. Читает PNG-blob из DataWin->txtr по blobOffset/blobSize.
- *  3. Декодирует PNG через stb_image (RGBA8, с вертикальным флипом).
+ *  3. Декодирует PNG через stb_image (RGBA8).
  *  4. Загружает через uploadTexture() → GPU_RGBA4.
  *
  * Вызывать перед каждым draw-вызовом, использующим данную текстуру.

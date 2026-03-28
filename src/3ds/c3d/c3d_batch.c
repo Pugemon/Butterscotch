@@ -65,8 +65,8 @@ void calcUV(const C3D_Tex *tex,
 
     *u0 = srcX / potW;
     *u1 = (srcX + srcW) / potW;
-    *v0 = srcY / potH;
-    *v1 = (srcY + srcH) / potH;
+    *v0 = 1.0f - (srcY / potH);
+    *v1 = 1.0f - ((srcY + srcH) / potH);
 }
 
 #endif // __3DS__
