@@ -1,28 +1,42 @@
+; PICA200 vertex shader for butterscotch (Corrected Version)
+
 ; === Uniforms ===
-.alias proj_mtx c0
+; Нам нужна только ОДНА матрица, как и в вашем C-коде
+.fvec projMtx[4]
 
-; === Inputs (from VBO) ===
-.alias in_pos v0
-.alias in_tex v1
-.alias in_clr v2
+; === Constants ===
+; x=0.0, y=1.0, z=0.5, w=1/255.0
+.constf common_const(0.0, 1.0, 0.5, 0.00392156839)
+.alias  ones   common_const.yyyy
+.alias  clrdiv common_const.wwww
 
-; === Outputs (to rasterizer / TexEnv) ===
-.alias out_pos o0
-.alias out_tex o1
-.alias out_clr o2
+; === Outputs ===
+.out oPosition  position
+.out oTexCoord0 texcoord0
+.out oColor     color
 
+; === Inputs (должны точно соответствовать вашему C3D_AttrInfo) ===
+.in iPosition  v0  ; Слот 0: float3
+.in iTexCoord  v1  ; Слот 1: float2
+.in iColor     v2  ; Слот 2: ubyte4
+
+.entry main
 .proc main
-    ; Transform position (proj * vec4)
-    dp4 out_pos.x, proj_mtx[0], in_pos
-    dp4 out_pos.y, proj_mtx[1], in_pos
-    dp4 out_pos.z, proj_mtx[2], in_pos
-    dp4 out_pos.w, proj_mtx[3], in_pos
+	; 1. Готовим позицию, добавляя W=1.0
+	mov r0.xyz, iPosition
+	mov r0.w,   ones
 
-    ; Pass UV
-    mov out_tex, in_tex
+	; 2. Трансформируем позицию ОДНОЙ матрицей
+	dp4 oPosition.x, projMtx[0], r0
+	dp4 oPosition.y, projMtx[1], r0
+	dp4 oPosition.z, projMtx[2], r0
+	dp4 oPosition.w, projMtx[3], r0
 
-    ; Pass color
-    mov out_clr, in_clr
+	; 3. Передаем UV-координаты
+	mov oTexCoord0, iTexCoord
 
-    end
+	; 4. Нормализуем цвет (из 0-255 в 0-1), меняя операнды местами
+	mul oColor, clrdiv, iColor
+
+	end
 .end

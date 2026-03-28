@@ -1383,28 +1383,28 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
 
     dw->file = file;
 
-    fprintf(stderr,"--- Memory Statistics for %s ---\n", dw->gen8.name);
-
-    size_t strings_mem = 0;
-    for(uint32_t i=0; i < dw->strg.count; i++) {
-        if(dw->strg.strings[i]) strings_mem += strlen(dw->strg.strings[i]);
-    }
-
-    fprintf(stderr,"Resources count:\n");
-    fprintf(stderr,"  Scripts:    %u\n", dw->scpt.count);
-    fprintf(stderr,"  Variables:  %u\n", dw->vari.variableCount);
-    fprintf(stderr,"  Objects:    %u\n", dw->objt.count);
-    fprintf(stderr,"  Textures:   %u\n", dw->txtr.count);
-    fprintf(stderr,"  Sounds:     %u\n", dw->sond.count);
-    fprintf(stderr,"  Rooms:      %u\n", dw->room.count);
-    fprintf(stdout,"  Bytecode:   %zu KB\n", (size_t)(dw->bytecodeBuffer ? dw->gen8.bytecodeVersion : 0)); // тут лучше взять размер чанка CODE
-
-    fprintf(stderr,"Estimated Memory:\n");
-    fprintf(stderr,"  Strings Buffer:  %zu KB\n", dw->strgBufferBase > 0 ? (strings_mem / 1024) : 0);
-    fprintf(stderr,"  Objects State:   %zu KB\n", (dw->objt.count * sizeof(GameObject)) / 1024);
-    fprintf(stderr,"  VM Global Vars:  %zu KB\n", (dw->glob.count * sizeof(RValue)) / 1024);
-
-    fprintf(stderr,"-------------------------------\n");
+    // fprintf(stderr,"--- Memory Statistics for %s ---\n", dw->gen8.name);
+    //
+    // size_t strings_mem = 0;
+    // for(uint32_t i=0; i < dw->strg.count; i++) {
+    //     if(dw->strg.strings[i]) strings_mem += strlen(dw->strg.strings[i]);
+    // }
+    //
+    // fprintf(stderr,"Resources count:\n");
+    // fprintf(stderr,"  Scripts:    %u\n", dw->scpt.count);
+    // fprintf(stderr,"  Variables:  %u\n", dw->vari.variableCount);
+    // fprintf(stderr,"  Objects:    %u\n", dw->objt.count);
+    // fprintf(stderr,"  Textures:   %u\n", dw->txtr.count);
+    // fprintf(stderr,"  Sounds:     %u\n", dw->sond.count);
+    // fprintf(stderr,"  Rooms:      %u\n", dw->room.count);
+    // fprintf(stdout,"  Bytecode:   %zu KB\n", (size_t)(dw->bytecodeBuffer ? dw->gen8.bytecodeVersion : 0)); // тут лучше взять размер чанка CODE
+    //
+    // fprintf(stderr,"Estimated Memory:\n");
+    // fprintf(stderr,"  Strings Buffer:  %zu KB\n", dw->strgBufferBase > 0 ? (strings_mem / 1024) : 0);
+    // fprintf(stderr,"  Objects State:   %zu KB\n", (dw->objt.count * sizeof(GameObject)) / 1024);
+    // fprintf(stderr,"  VM Global Vars:  %zu KB\n", (dw->glob.count * sizeof(RValue)) / 1024);
+    //
+    // fprintf(stderr,"-------------------------------\n");
 
 
     return dw;

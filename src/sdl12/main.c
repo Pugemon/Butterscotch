@@ -309,7 +309,7 @@ int main(int argc, char* argv[]) {
         "butterscotch.exe",
         "--trace-function-calls", "mouse_check_button",
         "--trace-function-calls", "mouse_check_button_pressed",
-        "C:\\GOG Games\\Undertale\\data.win"
+        "C:\\Users\\Pugemon\\Desktop\\DevMops\\Personal\\Projects\\C\\Butterscotch-3ds-src\\data.win"
     };
     int my_argc = 6;
 

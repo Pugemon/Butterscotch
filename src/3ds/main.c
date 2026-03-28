@@ -333,8 +333,6 @@ int main(int argc, char* argv[]) {
     Gen8* gen8 = &dataWin->gen8;
     printf("Loaded \"%s\" (%d) successfully!\n", gen8->name, gen8->gameID);
 
-    char windowTitle[256];
-    snprintf(windowTitle, sizeof(windowTitle), "Butterscotch - %s", gen8->displayName);
 
     VMContext* vm = VM_create(dataWin);
 
@@ -418,10 +416,14 @@ int main(int argc, char* argv[]) {
         DataWin_free(dataWin);
         freeCommandLineArgs(&args);
         return 1;
-    }
+    } else printf("Initialized SDL1.2\n");
 
     // Создаем аппаратный рендерер без SDL_Surface
+    printf("Initializing Citro3D\n");
     Renderer* renderer = Citro3dRenderer_create();
+    if (renderer == nullptr) {
+        fprintf(stderr, "Failed to create Citro3D Renderer\n");
+    }
     //preloadAllTextures((SDLRenderer*)renderer);
     renderer->vtable->init(renderer, dataWin);
     runner->renderer = renderer;
@@ -677,11 +679,27 @@ int main(int argc, char* argv[]) {
         int32_t gameW = (int32_t) gen8->defaultWindowWidth;
         int32_t gameH = (int32_t) gen8->defaultWindowHeight;
 
-        renderer->vtable->beginFrame(renderer, gameW, gameH, 240, 400);
+        renderer->vtable->beginFrame(renderer, gameW, gameH, 400, 240); // 400, 240 для 3DS
+
+        // --- ЛОГИКА МАСШТАБИРОВАНИЯ ЭКРАНА 3DS (400x240) ---
+        float scaleX = 400.0f / (float)gameW;
+        float scaleY = 240.0f / (float)gameH;
+
+        // ВАРИАНТ 1: Сохранить пропорции (по центру экрана, без искажения пикселей)
+        // Чтобы использовать ВАРИАНТ 2 (растянуть), просто закомментируй следующие 3 строки:
+        float scale = (scaleX < scaleY) ? scaleX : scaleY;
+        scaleX = scale;
+        scaleY = scale;
+        // ----------------------------------------------------
+
+        // Считаем отступы для центрирования
+        int32_t offsetX = (int32_t)((400.0f - (gameW * scaleX)) / 2.0f);
+        int32_t offsetY = (int32_t)((240.0f - (gameH * scaleY)) / 2.0f);
 
         if (runner->drawBackgroundColor) {
-            // На 3DS аппаратная отрисовка прямоугольника (2 треугольника) работает мгновенно
-            renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
+            int32_t screenW = (int32_t)(gameW * scaleX);
+            int32_t screenH = (int32_t)(gameH * scaleY);
+            renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, offsetX, offsetY, screenW, screenH, 0.0f);
             renderer->vtable->drawRectangle(renderer, 0, 0, gameW, gameH, runner->backgroundColor, 1.0f, false);
             renderer->vtable->endView(renderer);
         }
@@ -697,14 +715,21 @@ int main(int argc, char* argv[]) {
                 int32_t viewY = activeRoom->views[vi].viewY;
                 int32_t viewW = activeRoom->views[vi].viewWidth;
                 int32_t viewH = activeRoom->views[vi].viewHeight;
+
                 int32_t portX = activeRoom->views[vi].portX;
                 int32_t portY = activeRoom->views[vi].portY;
                 int32_t portW = activeRoom->views[vi].portWidth;
                 int32_t portH = activeRoom->views[vi].portHeight;
                 float viewAngle = runner->viewAngles[vi];
 
+                // Применяем масштаб к порту (Viewport)
+                int32_t screenPortX = offsetX + (int32_t)(portX * scaleX);
+                int32_t screenPortY = offsetY + (int32_t)(portY * scaleY);
+                int32_t screenPortW = (int32_t)(portW * scaleX);
+                int32_t screenPortH = (int32_t)(portH * scaleY);
+
                 runner->viewCurrent = vi;
-                renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, portX, portY, portW, portH, viewAngle);
+                renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, screenPortX, screenPortY, screenPortW, screenPortH, viewAngle);
 
                 Runner_draw(runner);
 
@@ -714,8 +739,11 @@ int main(int argc, char* argv[]) {
         }
 
         if (!anyViewRendered) {
+            int32_t screenW = (int32_t)(gameW * scaleX);
+            int32_t screenH = (int32_t)(gameH * scaleY);
+
             runner->viewCurrent = 0;
-            renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
+            renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, offsetX, offsetY, screenW, screenH, 0.0f);
             Runner_draw(runner);
             renderer->vtable->endView(renderer);
         }
