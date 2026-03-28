@@ -52,7 +52,7 @@ static void swizzleToMalloc_RGBA4(u16 *dst, uint32_t potW, uint32_t potH,
 
             uint32_t tileX   = x >> 3;
             uint32_t tileOff = tileRowOff + (tileX << 6);
-            uint32_t morOff  = calcMortonOffset(x & 7, y & 7);
+            uint32_t morOff  = kMortonTable[y & 7][x & 7];
 
             // GPU_RGBA4: биты [15:12]=R, [11:8]=G, [7:4]=B, [3:0]=A
             dst[tileOff + morOff] = ((u16)(r >> 4) << 12)
@@ -146,24 +146,40 @@ static void decodeThreadEntry(void *arg) {
 
 void DecodeThread_init(DecodeThread *dt) {
     memset(dt, 0, sizeof(*dt));
+
     LightEvent_Init(&dt->jobAvailable, RESET_ONESHOT);
     dt->shouldExit = false;
 
+    int32_t affinity = 1;   // по умолчанию Core 1
+    bool isNew3DS = false;
+
+    // Проверяем, запущена ли игра на New 3DS
+    APT_CheckNew3DS(&isNew3DS);
+
+    if (isNew3DS) {
+        // На New 3DS есть свободное Core 2 — можем отдать ему DecodeThread на 100%
+        affinity = 2;
+    } else {
+        // На Old 3DS DecodeThread и RenderThread будут конкурировать на Core 1
+        // Ограничиваем CPU для DecodeThread, чтобы RenderThread мог нормально рендерить
+        APT_SetAppCpuTimeLimit(30); // 30% CPU
+        affinity = 1;
+    }
+
     dt->handle = threadCreate(
-        decodeThreadEntry,
-        dt,
-        DT_STACK_SIZE,
-        DT_PRIORITY,
-        1,      // affinity: Core 1 (как и RenderThread, но они не конкурируют —
-                // RenderThread спит пока Core 1 декодирует, и наоборот)
-        false   // detached = false, нужен threadJoin при завершении
+        decodeThreadEntry,   // функция треда
+        dt,                  // аргумент
+        DT_STACK_SIZE,       // стек
+        DT_PRIORITY,         // приоритет
+        affinity,            // выбор ядра
+        false                // detached = false (нужен join при destroy)
     );
 
     if (!dt->handle) {
-        fprintf(stderr, "[DecodeThread] ОШИБКА: threadCreate не удался!\n");
+        fprintf(stderr, "[DecodeThread] FAIL: threadCreate\n");
     } else {
-        fprintf(stderr, "[DecodeThread] запущен на Core 1 (priority=0x%02X)\n",
-                DT_PRIORITY);
+        fprintf(stderr, "[DecodeThread] запущен на Core %d (priority=0x%02X)\n",
+                affinity, DT_PRIORITY);
     }
 }
 

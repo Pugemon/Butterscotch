@@ -50,21 +50,36 @@ void RenderThread_init(RenderThread* rt) {
     LightEvent_Init(&rt->drawDone,     RESET_ONESHOT);
     LightEvent_Init(&rt->endFrameDone, RESET_ONESHOT);
 
-    // Запускаем тред на Core 1 (affinity = 1).
+    int32_t affinity = 1;
+
+    // Проверяем, запущена ли игра на New 3DS
+    bool isNew3DS = false;
+    APT_CheckNew3DS(&isNew3DS);
+
+    if (isNew3DS) {
+        // На New 3DS есть свободное Core 2. Берем его на 100%!
+        affinity = 2;
+    } else {
+        // На Old 3DS мы вынуждены использовать системное Core 1.
+        // ОБЯЗАТЕЛЬНО просим у ОС дать нам 30% времени этого ядра!
+        APT_SetAppCpuTimeLimit(30);
+        affinity = 1;
+    }
+
+    // Запускаем тред на выбранном ядре
     rt->handle = threadCreate(
         renderThreadEntry,
         rt,
         RT_STACK_SIZE,
         RT_PRIORITY,
-        1,      /* affinity: Core 1 */
-        false   /* detached = false, нужен threadJoin при завершении */
+        affinity,
+        false
     );
 
     if (rt->handle == NULL) {
-        fprintf(stderr, "[RenderThread] ОШИБКА: threadCreate не удался!\n");
-        // Аварийный вариант: работаем однопоточно.
-        // Core 0 будет ждать endFrameDone вечно — нужна обработка ошибки
-        // на уровне main(). Для простоты — fatal здесь.
+        fprintf(stderr, "[RenderThread] FAIL: threadCreate\n");
+    } else {
+        printf("[RenderThread] Run on Core %d\n", affinity);
     }
 }
 

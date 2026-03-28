@@ -8,7 +8,7 @@
 #include "c3d_utils.h"
 #include "c3d_constants.h"
 #include "citro3d_renderer.h"
-#include "decode_thread.h"    // <-- НОВЫЙ INCLUDE
+#include "decode_thread.h"
 
 #include "stb_image.h"
 #include "binary_reader.h"
@@ -33,7 +33,7 @@ static inline void writePixelMorton_RGBA8(u32 *dst, u32 potW,
     u32 tileY   = y >> 3;
     u32 tilesX  = potW >> 3;
     u32 tileOff = (tileY * tilesX + tileX) << 6;  // * 64 пикселей на тайл
-    u32 locOff  = calcMortonOffset(x & 7, y & 7);
+    u32 locOff  = kMortonTable[y & 7][x & 7];
     dst[tileOff + locOff] = pixel;
 }
 
@@ -48,7 +48,7 @@ static inline void writePixelMorton_RGBA4(u16 *dst, u32 potW,
     u32 tileY   = y >> 3;
     u32 tilesX  = potW >> 3;
     u32 tileOff = (tileY * tilesX + tileX) << 6;
-    u32 locOff  = calcMortonOffset(x & 7, y & 7);
+    u32 locOff  = kMortonTable[y & 7][x & 7];
 
     // Формат GPU_RGBA4: 4 бита на канал, упакованы в u16
     // Биты [15:12]=R, [11:8]=G, [7:4]=B, [3:0]=A
@@ -68,12 +68,32 @@ void swizzleToTex(C3D_Tex *tex, const u32 *src, u32 srcW, u32 srcH) {
     u32  potW = (u32)tex->width;
     u32  potH = (u32)tex->height;
 
-    // Очищаем весь POT-буфер — пиксели за пределами srcW×srcH будут прозрачными
-    memset(dst, 0, potW * potH * sizeof(u32));
+    u32 tilesX = potW >> 3;
 
-    for (u32 y = 0; y < srcH; y++) {
-        for (u32 x = 0; x < srcW; x++) {
-            writePixelMorton_RGBA8(dst, potW, x, y, src[y * srcW + x]);
+    // Очищаем весь POT-буфер — пиксели за пределами srcW×srcH будут прозрачными
+    //memset(dst, 0, potW * potH * sizeof(u32));
+
+    for (u32 ty = 0; ty < srcH; ty += 8) {
+        for (u32 tx = 0; tx < srcW; tx += 8) {
+
+            u32 tileX   = tx >> 3;
+            u32 tileY   = ty >> 3;
+            u32 tileOff = (tileY * tilesX + tileX) << 6;
+
+            for (u32 y = 0; y < 8; y++) {
+                u32 srcY = ty + y;
+                if (srcY >= srcH) break;
+
+                const u32 *row = src + srcY * srcW;
+
+                for (u32 x = 0; x < 8; x++) {
+                    u32 srcX = tx + x;
+                    if (srcX >= srcW) break;
+
+                    u32 locOff = kMortonTable[y][x];
+                    dst[tileOff + locOff] = row[srcX];
+                }
+            }
         }
     }
 
@@ -97,14 +117,39 @@ bool uploadTexture(C3D_Tex *tex, int *realW, int *realH, const u8 *rgba, int w, 
     C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     u16 *dst = (u16 *)tex->data;
+    u32 tilesX = potW >> 3;
+
     memset(dst, 0, potW * potH * sizeof(u16));
 
-    for (u32 y = 0; y < (u32)h; y++) {
-        for (u32 x = 0; x < (u32)w; x++) {
-            u32 srcOff = (y * (u32)w + x) * 4;
-            writePixelMorton_RGBA4(dst, potW, x, y,
-                                   rgba[srcOff + 0], rgba[srcOff + 1],
-                                   rgba[srcOff + 2], rgba[srcOff + 3]);
+    for (u32 ty = 0; ty < (u32)h; ty += 8) {
+        for (u32 tx = 0; tx < (u32)w; tx += 8) {
+
+            u32 tileX   = tx >> 3;
+            u32 tileY   = ty >> 3;
+            u32 tileOff = (tileY * tilesX + tileX) << 6;
+
+            for (u32 y = 0; y < 8; y++) {
+                u32 srcY = ty + y;
+                if (srcY >= (u32)h) break;
+
+                const u8 *row = rgba + (srcY * (u32)w * 4);
+
+                for (u32 x = 0; x < 8; x++) {
+                    u32 srcX = tx + x;
+                    if (srcX >= (u32)w) break;
+
+
+
+                    const u8 *px = row + srcX * 4;
+
+                    u16 pixel = ((u16)(px[0] >> 4) << 12) |
+                                ((u16)(px[1] >> 4) <<  8) |
+                                ((u16)(px[2] >> 4) <<  4) |
+                                 (u16)(px[3] >> 4);
+                    u32 locOff = kMortonTable[y][x];
+                    dst[tileOff + locOff] = pixel;
+                }
+            }
         }
     }
 
