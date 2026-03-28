@@ -34,28 +34,6 @@ static u32 colorToABGR(uint32_t bgr, float alpha) {
     return ((u32)a << 24) | ((u32)b << 16) | ((u32)g << 8) | r;
 }
 
-// Правильный расчет смещения для текстур PICA200 (полный Morton-свиззл)
-static inline u32 get_pica_swizzle_offset(u32 x, u32 y, u32 potW, u32 potH) {
-    u32 offset = 0;
-    u32 shift = 0;
-    u32 mask = 1;
-
-    // Переплетаем биты X и Y. Если одна сторона больше другой,
-    // её оставшиеся биты просто дописываются в старшие разряды.
-    while (mask < potW || mask < potH) {
-        if (mask < potW) {
-            if (x & mask) offset |= (1 << shift);
-            shift++;
-        }
-        if (mask < potH) {
-            if (y & mask) offset |= (1 << shift);
-            shift++;
-        }
-        mask <<= 1;
-    }
-    return offset;
-}
-
 // Morton (Z-order) свиззл: линейный ABGR-буфер → тайловый формат PICA200.
 static void swizzleToTex(C3D_Tex *tex, const u32 *src, u32 srcW, u32 srcH) {
     u32 *dst = (u32 *)tex->data;
@@ -733,7 +711,7 @@ static RendererVtable c3d_vtable = {
 };
 
 Renderer *Citro3dRenderer_create(void) {
-    Citro3dRenderer *c3d = (Citro3dRenderer *)safeCalloc(1, sizeof(Citro3dRenderer));
+    Citro3dRenderer *c3d = safeCalloc(1, sizeof(Citro3dRenderer));
     c3d->base.vtable     = &c3d_vtable;
     c3d->base.drawColor  = 0xFFFFFF;
     c3d->base.drawAlpha  = 1.0f;
