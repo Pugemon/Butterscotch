@@ -1,0 +1,91 @@
+#pragma once
+#ifdef __3DS__
+
+#include <citro3d.h>
+
+typedef struct Citro3dRenderer Citro3dRenderer;
+
+/**
+ * @file c3d_batch.h
+ * @brief Батч-рендеринг: буферизация вершин и управление VBO.
+ *
+ * ## Что такое батч-рендеринг?
+ *
+ * Каждый вызов C3D_DrawArrays (команда GPU "нарисуй N вершин") имеет накладные расходы.
+ * Если рисовать каждый спрайт отдельным draw-вызовом, CPU будет отставать от GPU.
+ *
+ * Батч-рендеринг: накапливаем вершины всех спрайтов с одинаковой текстурой в один VBO,
+ * а потом отправляем их одним draw-вызовом. Это снижает число команд GPU в ~100-1000 раз.
+ *
+ * ## Принцип работы
+ *
+ *   VBO (vboData): [ sprite0_v0..v5 | sprite1_v0..v5 | ... ]
+ *                    ^batchStart                        ^vertexCount
+ *
+ *   1. checkBatch() проверяет: та же текстура? есть ли место?
+ *      - Если текстура сменилась или места нет → flushBatch() → новый батч.
+ *   2. Draw-функция пишет 6 вершин в vboData[vertexCount..vertexCount+5].
+ *   3. vertexCount += 6.
+ *   4. flushBatch() привязывает текущую текстуру, вызывает C3D_DrawArrays,
+ *      сдвигает batchStart = vertexCount.
+ *
+ * ## UV-координаты и Y-инверсия
+ *
+ * После Morton-свиззла с флипом (stbi_set_flip_vertically_on_load) текстура
+ * хранится "вверх ногами" с точки зрения GPU. Поэтому calcUV инвертирует V:
+ *   v = srcY / potH  (без инверсии, шейдер разворачивает сам через oTexCoord0)
+ */
+
+/**
+ * @brief Принудительно отправляет накопленный батч на GPU.
+ *
+ * Если батч пуст (vertexCount == batchStart) — ничего не делает.
+ *
+ * Шаги:
+ *  1. Сбрасывает D-cache для диапазона вершин (GSPGPU_FlushDataCache).
+ *  2. Привязывает текущую текстуру (или белую заглушку, если данных нет).
+ *  3. Вызывает C3D_DrawArrays(GPU_TRIANGLES, batchStart, count).
+ *  4. Сдвигает batchStart = vertexCount (начало следующего батча).
+ *
+ * @param c3d Рендерер
+ */
+void flushBatch(Citro3dRenderer *c3d);
+
+/**
+ * @brief Проверяет и при необходимости сбрасывает батч перед добавлением вершин.
+ *
+ * Батч сбрасывается если:
+ *  - сменилась текстура (texIdx != currentTexIndex), или
+ *  - не хватает места в VBO (vertexCount + verts > MAX_VERTICES).
+ *
+ * После сброса, если VBO полностью заполнен, индексы обнуляются (перезапись с начала).
+ * Это допустимо, так как GPU уже обработал предыдущий батч к этому моменту.
+ *
+ * @param c3d    Рендерер
+ * @param verts  Сколько вершин планируется добавить (обычно 6 для спрайта)
+ * @param texIdx Индекс текстуры, которая будет использоваться
+ */
+void checkBatch(Citro3dRenderer *c3d, int verts, int texIdx);
+
+/**
+ * @brief Вычисляет UV-координаты прямоугольника в текстуре.
+ *
+ * UV нормализованы в диапазон [0, 1] относительно POT-размера текстуры.
+ * Из-за Morton-свиззла с Y-флипом (см. uploadTexture) V-координата
+ * не инвертируется здесь — это делает шейдер через конвенцию oTexCoord0.
+ *
+ * Если текстура нулевого размера (не загружена) — все UV = 0.
+ *
+ * @param tex        Текстура (tex->width, tex->height — POT-размеры)
+ * @param srcX, srcY Верхний левый угол исходного прямоугольника в атласе (пикселей)
+ * @param srcW, srcH Размер прямоугольника
+ * @param u0, v0     [out] UV левого верхнего угла
+ * @param u1, v1     [out] UV правого нижнего угла
+ */
+void calcUV(const C3D_Tex *tex,
+            float srcX, float srcY,
+            float srcW, float srcH,
+            float *u0, float *v0,
+            float *u1, float *v1);
+
+#endif // __3DS__

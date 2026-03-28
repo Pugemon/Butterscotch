@@ -143,7 +143,7 @@ elseif (PLATFORM STREQUAL "sdl2")
     endif()
 
 elseif (PLATFORM STREQUAL "3ds")
-    file(GLOB PLATFORM_SOURCES src/3ds/*.c src/sdl12/*.c)
+    file(GLOB PLATFORM_SOURCES src/3ds/*.c src/3ds/c3d/*.c src/sdl12/*.c)
     list(REMOVE_ITEM PLATFORM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/sdl12/main.c")
 
     target_sources(butterscotch PRIVATE ${PLATFORM_SOURCES})
@@ -151,6 +151,7 @@ elseif (PLATFORM STREQUAL "3ds")
     target_include_directories(butterscotch PRIVATE
             ${CMAKE_SOURCE_DIR}/src/sdl12
             ${CMAKE_SOURCE_DIR}/src/3ds
+            ${CMAKE_SOURCE_DIR}/src/3ds/c3d
     )
 
     # Shader pipeline
