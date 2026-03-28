@@ -453,7 +453,7 @@ static void ensureTextureLoaded(Citro3dRenderer *c3d, int pageId) {
         return;
     }
 
-    // Читаем бинарник из файла (как вы и делали)
+    // Читаем бинарник из файла
     BinaryReader reader = BinaryReader_create(dw->file, dw->fileSize);
     uint8_t *raw = BinaryReader_readBytesAt(&reader, txtr->blobOffset, txtr->blobSize);
     if (!raw) {
@@ -462,7 +462,7 @@ static void ensureTextureLoaded(Citro3dRenderer *c3d, int pageId) {
     }
 
     int w, h, ch;
-    stbi_set_flip_vertically_on_load(1);
+    stbi_set_flip_vertically_on_load(1); // TODO: Есть вариант переворачивать текстуру шейдером, или где то ещё, не забыть убрать при переходе на tex3d (формат для 3ds)
     uint8_t *px = stbi_load_from_memory(raw, (int)txtr->blobSize, &w, &h, &ch, 4);
     free(raw);
 
