@@ -12,6 +12,10 @@
 
 #include "stb_ds.h"
 
+#ifdef __3DS__
+#include "c3d/c3d_texture_t3b.h"
+#endif
+
 // Эти статические переменные будут хранить данные ТОЛЬКО для текущей комнаты.
 static RoomGameObject* currentRoomGameObjects = NULL;
 static RoomTile* currentRoomTiles = NULL;
@@ -134,6 +138,78 @@ static void Runner_loadObjectEvents(Runner* runner, GameObject* obj) {
     obj->eventsLoaded = true;
 }
 
+// ── Хелпер: собирает уникальные texturePageId для комнаты ─────────────────
+//
+// Как работает:
+//   Тайлы:   tile->backgroundDefinition → Background.textureOffset
+//             → DataWin_resolveTPAG() → TexturePageItem → texturePageId
+//   Объекты: roomObj->objectDefinition → GameObject.spriteId
+//             → Sprite.textureOffsets[frame] → DataWin_resolveTPAG() → texturePageId
+//
+// Возвращает malloc-массив уникальных page ID. Caller освобождает через free().
+
+#ifdef __3DS__
+static uint32_t *collectRoomPageIds(DataWin *dw,
+                                     RoomTile       *tiles,  uint32_t tileCount,
+                                     RoomGameObject *objs,   uint32_t objCount,
+                                     uint32_t *outCount)
+{
+    if (dw->tpag.count == 0) { *outCount = 0; return NULL; }
+
+    // Bitset: один байт на слот texturePageId. Дешевле qsort для малых texCount.
+    uint8_t *seen = calloc(dw->tpag.count, sizeof(uint8_t));
+    if (!seen) { *outCount = 0; return NULL; }
+
+    // Тайлы: каждый тайл ссылается на Background → TPAG → texturePageId
+    for (uint32_t i = 0; i < tileCount; i++) {
+        int32_t tpagIdx = Renderer_resolveBackgroundTPAGIndex(dw, tiles[i].backgroundDefinition);
+        if (tpagIdx < 0 || (uint32_t)tpagIdx >= dw->tpag.count) continue;
+        int32_t pid = dw->tpag.items[tpagIdx].texturePageId;
+        if (pid >= 0 && (uint32_t)pid < dw->tpag.count) seen[pid] = 1;
+    }
+
+    // Объекты: GameObject → Sprite → все кадры анимации → texturePageId
+    for (uint32_t i = 0; i < objCount; i++) {
+        int32_t objDef = objs[i].objectDefinition;
+        if (objDef < 0 || (uint32_t)objDef >= dw->objt.count) continue;
+
+        int32_t sprId = dw->objt.objects[objDef].spriteId;
+        if (sprId < 0 || (uint32_t)sprId >= dw->sprt.count) continue;
+
+        Sprite *spr = &dw->sprt.sprites[sprId];
+        for (uint32_t f = 0; f < spr->textureCount; f++) {
+            int32_t tpagIdx = DataWin_resolveTPAG(dw, spr->textureOffsets[f]);
+            if (tpagIdx < 0 || (uint32_t)tpagIdx >= dw->tpag.count) continue;
+            int32_t pid = dw->tpag.items[tpagIdx].texturePageId;
+            if (pid >= 0 && (uint32_t)pid < dw->tpag.count) seen[pid] = 1;
+        }
+    }
+
+    // Собираем результат
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < dw->tpag.count; i++) {
+        if (seen[i]) count++;
+    }
+
+    uint32_t *result = NULL;
+    if (count > 0) {
+        result = malloc(count * sizeof(uint32_t));
+        if (result) {
+            uint32_t w = 0;
+            for (uint32_t i = 0; i < dw->tpag.count; i++) {
+                if (seen[i]) result[w++] = i;
+            }
+        } else {
+            count = 0;
+        }
+    }
+
+    free(seen);
+    *outCount = count;
+    return result;
+}
+#endif // __3DS__
+
 // Загружает данные комнаты (объекты, тайлы, слои)
 static void Runner_loadRoomData(Runner* runner, Room* room) {
     DataWin* dw = runner->dataWin;
@@ -196,6 +272,39 @@ static void Runner_loadRoomData(Runner* runner, Room* room) {
         // Сейчас просто пропускаем, чтобы не усложнять.
         room->layerCount = 0;
     }
+
+
+
+    // ── Предзагрузка текстур (только 3DS) ────────────────────────────────────
+    //
+    // ПОЧЕМУ ЗДЕСЬ, а не в ensureAtlasLoaded во время рендеринга:
+    //   fread с SD-карты на 3DS = до 5 мс на текстуру. Если грузить в рантайме,
+    //   игрок увидит фриз. Runner_loadRoomData вызывается ДО первого кадра —
+    //   идеальный момент для блокирующей загрузки.
+    //
+    // ПОЧЕМУ collectRoomPageIds, а не dw->tpag.items, dw->tpag.count:
+    //   Передача всего tpag загрузила бы текстуры ВСЕЙ игры.
+    //   При бюджете 4 MiB это немедленно исчерпало бы VRAM и LRU начал бы
+    //   вытеснять только что загруженные текстуры ещё до начала рендеринга.
+    //
+    // ПОЧЕМУ ПОСЛЕ загрузки тайлов и объектов:
+    //   collectRoomPageIds читает currentRoomTiles и currentRoomGameObjects,
+    //   которые заполняются выше в этой же функции.
+
+#ifdef __3DS__
+    if (runner->renderer != NULL) {
+        uint32_t  pageCount = 0;
+        uint32_t *pageIds   = collectRoomPageIds(dw,
+                                                  currentRoomTiles,       room->tileCount,
+                                                  currentRoomGameObjects, room->gameObjectCount,
+                                                  &pageCount);
+        if (pageIds != NULL) {
+            TexArchive_preloadPageIds((Citro3dRenderer *)runner->renderer,
+                                      pageIds, pageCount);
+            free(pageIds);
+        }
+    }
+#endif
 }
 
 // Освобождает память комнаты

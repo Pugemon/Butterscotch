@@ -67,8 +67,7 @@ void C3DRenderer_initShader(Citro3dRenderer *c3d) {
     c3d->uLoc_projection = shaderInstanceGetUniformLocation(
         c3d->shader.vertexShader, "projMtx");
 
-    fprintf(stderr, "[C3D] Shader loaded. projMtx=%d, mdlvMtx=%d\n",
-            c3d->uLoc_projection);
+    fprintf(stderr, "[C3D] Shader loaded. projMtx=%d\n", c3d->uLoc_projection);
 }
 
 void C3DRenderer_initVertexLayout(Citro3dRenderer *c3d) {
@@ -156,13 +155,12 @@ void C3DRenderer_initTextures(Citro3dRenderer *c3d, DataWin *dataWin) {
 
     c3d->archiveFile    = NULL;
     c3d->archiveOffsets = NULL;
+    c3d->vramUsed       = 0;
 
-    // Путь: рядом с data.win (basePath уже есть в N3dsFileSystem)
-    // Передать basePath можно через аргумент или глобал — на ваш выбор.
-    // Пример с захардкоженным путём для теста:
+    // Путь к .t3b бандлу строим рядом с data.win: basePath уже содержит
+    // директорию с data.win (включая trailing slash), добавляем имя файла.
     char archivePath[512];
-    snprintf(archivePath, sizeof(archivePath),
-             "sdmc:/3ds/butterscotch/undertale/undertale.t3b");
+    snprintf(archivePath, sizeof(archivePath), "%sundertale.t3b", c3d->basePath);
     TexArchive_open(c3d, archivePath);
 
     fprintf(stderr, "[C3D] Init done: %u game textures + 1 white stub.\n", texCount);

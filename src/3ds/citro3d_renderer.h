@@ -61,8 +61,9 @@ typedef struct Citro3dRenderer {
     int       whiteTexIndex; ///< Индекс белой заглушки (= texCount)
 
     // ── LRU-кэш текстур ───────────────────────────────────────────────────────
-    uint32_t *texLastUsed; ///< texLastUsed[i] = currentFrame, когда последний раз использовалась
+    uint32_t *texLastUsed;  ///< texLastUsed[i] = currentFrame последнего использования
     uint32_t  currentFrame; ///< Счётчик кадров (инкрементируется в beginFrame)
+    size_t    vramUsed;     ///< Суммарный tex->size загруженных текстур (без белой заглушки)
 
     // ── VBO и состояние батча ─────────────────────────────────────────────────
     C3D_Vertex *vboData;       ///< Вершинный буфер в linearAlloc (MAX_VERTICES вершин)
