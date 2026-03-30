@@ -32,12 +32,30 @@ void ResetProgress(string text)
     UpdateProgress(0);
 }
 
-// Константы для 3DS
-int maxPOT = 512;
+// 1. ИСПРАВЛЕНИЕ: Ставим 1024, чтобы избежать сжатия фонов и артефактов
+int maxPOT = 1024;
 string packagerDirectory = Path.Combine(ExePath, "Packager");
 Directory.CreateDirectory(packagerDirectory);
 
-ResetProgress("Processing POT Textures (Each item as separate file)...");
+ResetProgress("Fixing Font Coordinates...");
+
+// 2. ИСПРАВЛЕНИЕ: Перевод координат шрифтов из абсолютных в локальные!
+foreach (var font in Data.Fonts)
+{
+    if (font.Texture == null) continue;
+    var tpag = font.Texture;
+
+    foreach (var glyph in font.Glyphs)
+    {
+        // Смещаем глифы относительно начала их нового обрезанного атласа
+        if (glyph.SourceX >= tpag.SourceX)
+            glyph.SourceX = (ushort)(glyph.SourceX - tpag.SourceX);
+        if (glyph.SourceY >= tpag.SourceY)
+            glyph.SourceY = (ushort)(glyph.SourceY - tpag.SourceY);
+    }
+}
+
+ResetProgress("Processing POT Textures...");
 
 Data.EmbeddedTextures.Clear();
 if (Data.TextureGroupInfo != null)
@@ -54,7 +72,7 @@ SyncBinding("EmbeddedTextures", true);
 await Task.Run(() =>
 {
     using var worker = new TextureWorker();
-    
+
     for (int i = 0; i < Data.TexturePageItems.Count; i++)
     {
         var item = Data.TexturePageItems[i];
@@ -98,7 +116,7 @@ await Task.Run(() =>
 
             using (MagickImage spriteImg = new MagickImage(tempSprite))
             {
-                // Если было масштабирование (больше 512), ресайзим сам спрайт
+                // Если было масштабирование (больше 1024), ресайзим сам спрайт
                 if (originalW != item.SourceWidth || originalH != item.SourceHeight)
                     spriteImg.Resize((uint)originalW, (uint)originalH);
 
@@ -123,8 +141,7 @@ await Task.Run(() =>
             item.SourceWidth = (ushort)originalW;
             item.SourceHeight = (ushort)originalH;
 
-            // ИСПРАВЛЕНИЕ: Возвращаем Target-координаты на место!
-            // Если спрайт был уменьшен (scale < 1.0f), смещения тоже нужно уменьшить.
+            // Возвращаем Target-координаты обратно с учетом масштаба
             item.TargetX = (ushort)Math.Round(oldTargetX * scale);
             item.TargetY = (ushort)Math.Round(oldTargetY * scale);
             item.TargetWidth = (ushort)Math.Round(oldTargetW * scale);
@@ -140,4 +157,4 @@ await Task.Run(() =>
 DisableAllSyncBindings();
 HideProgressBar();
 
-ScriptMessage("Готово! Все текстуры приведены к POT (мин. 8x8) и сохранены отдельно.");
+ScriptMessage("Готово! Все текстуры приведены к POT и сохранены отдельно.");
