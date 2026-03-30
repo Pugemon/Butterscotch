@@ -125,13 +125,23 @@ static size_t evictOneLRU(Citro3dRenderer *c3d) {
  * но загрузку не блокирует — лучше превысить бюджет, чем показать чёрный экран.
  */
 static bool evictUntilFits(Citro3dRenderer *c3d, size_t needed) {
-    while (c3d->vramUsed + needed > VRAM_BUDGET_BYTES) {
+    // Оставляем 1.5 МБ VRAM под экраны и Z-буфер
+    const u32 SAFE_VRAM = 1536 * 1024;
+    // Оставляем 4 МБ Linear RAM про запас для внутренних нужд 3DS и аудио
+    const u32 SAFE_LINEAR = 4 * 1024 * 1024;
+
+    while (true) {
+        u32 freeVRAM = vramSpaceFree();
+        u32 freeLinear = linearSpaceFree();
+
+        // Если есть место хотя бы в ОДНОМ из пулов - прерываем цикл
+        if ((freeVRAM >= needed + SAFE_VRAM) || (freeLinear >= needed + SAFE_LINEAR)) {
+            break;
+        }
+
         size_t freed = evictOneLRU(c3d);
         if (freed == 0) {
-            // Нечего вытеснять, но места нет. Загружаем всё равно.
-            fprintf(stderr, "[T3B] WARNING: budget exceeded! "
-                    "needed=%zu, used=%zu, budget=%u\n",
-                    needed, c3d->vramUsed, VRAM_BUDGET_BYTES);
+            fprintf(stderr, "[OOM] WARNING: Cannot free space! VRAM/FCRAM full!\n");
             return false;
         }
     }
@@ -197,6 +207,13 @@ static bool importBlob(Citro3dRenderer *c3d, int atlasId, void *buf, uint32_t si
         return false;
     }
 
+    void* vramPtr = vramAlloc(tex->size);
+    if (vramPtr != NULL) {
+        memcpy(vramPtr, tex->data, tex->size);
+        linearFree(tex->data);
+        tex->data = vramPtr;
+    }
+
     // sub->width/height — логический размер спрайта внутри POT-текстуры.
     // tex->width/height — POT-размер, нужен calcUV для правильных UV-координат.
     const Tex3DS_SubTexture *sub = Tex3DS_GetSubTexture(t3x, 0);
@@ -215,7 +232,7 @@ static bool importBlob(Citro3dRenderer *c3d, int atlasId, void *buf, uint32_t si
             atlasId,
             c3d->texRealW[atlasId], c3d->texRealH[atlasId],
             tex->width, tex->height,
-            tex->size, c3d->vramUsed, VRAM_BUDGET_BYTES);
+            tex->size, c3d->vramUsed, vramSpaceFree() + c3d->vramUsed);
 
     return true;
 }

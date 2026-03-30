@@ -55,7 +55,13 @@ u32 nextPOT(u32 n);
  * @param alpha Прозрачность [0.0 = прозрачно, 1.0 = непрозрачно]
  * @return u32 в формате ABGR
  */
-u32 colorToABGR(uint32_t bgr, float alpha);
+static inline u32 colorToABGR(uint32_t bgr, float alpha) {
+    // Если прозрачности нет (95% случаев), просто ставим байт альфы в 0xFF
+    if (alpha >= 1.0f) return bgr | 0xFF000000u;
+
+    // Иначе заменяем старший байт на нашу вычисленную альфу
+    return bgr | (((u32)(alpha * 255.0f)) << 24);
+}
 
 
 static const u8 kMortonTable[8][8] = {

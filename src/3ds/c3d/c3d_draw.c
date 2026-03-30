@@ -24,7 +24,7 @@
  * гарантирует загрузку текстуры, проверяет батч, заполняет UV.
  * Возвращает указатель на буфер вершин или NULL при ошибке.
  */
-static C3D_Vertex *prepareQuad(Citro3dRenderer *c3d,
+static inline C3D_Vertex *prepareQuad(Citro3dRenderer *c3d,
                                 Renderer *renderer,
                                 int32_t tpagIndex,
                                 float srcX, float srcY,
