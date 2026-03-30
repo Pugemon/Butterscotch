@@ -52,6 +52,7 @@ typedef struct Citro3dRenderer {
     shaderProgram_s   shader;    ///< Программа шейдера (vertex only)
     int8_t            uLoc_projection; ///< Локация uniform projMtx в шейдере
     C3D_Mtx           projection;      ///< Текущая проекционная матрица
+    float viewX, viewY, viewW, viewH; ///< Viewport Culling
 
     // ── Массивы текстур (размер texCount + 1 для белой заглушки) ─────────────
     C3D_Tex  *textures;    ///< C3D_Tex[texCount+1]: GPU-текстуры (NULL.data = не загружена)

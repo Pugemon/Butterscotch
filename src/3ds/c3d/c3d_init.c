@@ -280,6 +280,12 @@ void C3DRenderer_beginView(Renderer *renderer,
                     (u32)portH,
                     (u32)portW);
 
+    // Сохраняем координаты 2D FRUSTUM CULLING ---
+    c3d->viewX = (float)viewX;
+    c3d->viewY = (float)viewY;
+    c3d->viewW = (float)viewW;
+    c3d->viewH = (float)viewH;
+
     // Ортографическая проекция: (0,0) в левом верхнем углу, Y растёт вниз.
     // Mtx_OrthoTilt учитывает поворот экрана на 90° автоматически.
     // Диапазон глубины [1, -1] (reversed) — стандарт Citro3D.

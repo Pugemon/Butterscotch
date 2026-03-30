@@ -60,6 +60,19 @@ void C3DRenderer_drawSprite(Renderer *renderer,
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
     TexturePageItem *tpag = &renderer->dataWin->tpag.items[tpagIndex];
 
+    // --- 2D FRUSTUM CULLING ---
+    // Считаем максимально возможный радиус спрайта с запасом (чтобы учесть вращение)
+    float absScaleX = fabsf(xscale);
+    float absScaleY = fabsf(yscale);
+    float maxDim = (tpag->sourceWidth * absScaleX) + (tpag->sourceHeight * absScaleY);
+
+    // Если спрайт полностью за границами экрана — просто выходим!
+    // Это экономит сотни вызовов сложных расчетов каждый кадр.
+    if (x + maxDim < c3d->viewX || x - maxDim > c3d->viewX + c3d->viewW ||
+        y + maxDim < c3d->viewY || y - maxDim > c3d->viewY + c3d->viewH) {
+        return;
+        }
+
     float u0, v0, u1, v1;
     C3D_Vertex *v = prepareQuad(c3d, renderer, tpagIndex,
                                  tpag->sourceX, tpag->sourceY,
