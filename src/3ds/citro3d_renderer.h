@@ -44,6 +44,7 @@ typedef struct {
 
 typedef struct Citro3dRenderer {
     Renderer          base;      ///< Базовый класс (ДОЛЖЕН быть первым полем)
+    char              basePath[512]; /// Путь до папки с data.win (нужен для загрузки t3b)
 
     // ── GPU-ресурсы ──────────────────────────────────────────────────────────
     C3D_RenderTarget *target;    ///< Render target (буфер кадра в VRAM)
@@ -69,6 +70,12 @@ typedef struct Citro3dRenderer {
     int         batchStart;    ///< Начало текущего незакоммиченного батча
     int         currentTexIndex; ///< Текстура текущего батча (-1 = не задана)
     DecodeThread *decodeThread; ///< NULL если не инициализирован
+
+    // ── .t3b бандл (ETC1A4 T3X текстуры) ────────────────────────────────────────
+    FILE     *archiveFile;       ///< Файл открыт на всё время жизни рендерера
+    uint32_t *archiveOffsets;    ///< offsets[0..texCount]: start/end в DATA-секции
+    uint32_t  archiveDataOff;    ///< Абсолютный оффсет начала DATA в файле
+    char      archivePath[512];  ///< Путь к .t3b (для логов/переоткрытия)
 } Citro3dRenderer;
 
 // ─────────────────────────────────────────────────────────────────────────────

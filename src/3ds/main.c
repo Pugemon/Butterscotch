@@ -425,6 +425,10 @@ int main(int argc, char* argv[]) {
     if (renderer == nullptr) {
         fprintf(stderr, "Failed to create Citro3D Renderer\n");
     }
+
+    // Передаем базовый путь рендереру (sdmc:/3ds/butterscotch/undertale/)
+    strncpy(((Citro3dRenderer*)renderer)->basePath, fileSystem->basePath, 511);
+
     //preloadAllTextures((SDLRenderer*)renderer);
     renderer->vtable->init(renderer, dataWin);
     runner->renderer = renderer;

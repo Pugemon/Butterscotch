@@ -13,6 +13,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "c3d_texture_t3b.h"
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Внутренний хелпер: получить текстуру и UV для TPAG-индекса
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +37,8 @@ static C3D_Vertex *prepareQuad(Citro3dRenderer *c3d,
     TexturePageItem *tpag = &renderer->dataWin->tpag.items[tpagIndex];
     int pid = tpag->texturePageId;
 
-    ensureTextureLoaded(c3d, pid);
+    ensureAtlasLoaded(c3d, pid);
+    //ensureTextureLoaded(c3d, pid);
     checkBatch(c3d, 6, pid);
 
     calcUV(&c3d->textures[pid], srcX, srcY, srcW, srcH, u0, v0, u1, v1);

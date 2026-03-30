@@ -4,6 +4,7 @@
 #include "c3d_constants.h"
 #include "c3d_batch.h"
 #include "c3d_texture.h"
+#include "c3d_texture_t3b.h"
 #include "citro3d_renderer.h"
 
 #include <3ds.h>
@@ -153,6 +154,17 @@ void C3DRenderer_initTextures(Citro3dRenderer *c3d, DataWin *dataWin) {
     c3d->batchStart      = 0;
     c3d->currentTexIndex = -1;
 
+    c3d->archiveFile    = NULL;
+    c3d->archiveOffsets = NULL;
+
+    // Путь: рядом с data.win (basePath уже есть в N3dsFileSystem)
+    // Передать basePath можно через аргумент или глобал — на ваш выбор.
+    // Пример с захардкоженным путём для теста:
+    char archivePath[512];
+    snprintf(archivePath, sizeof(archivePath),
+             "sdmc:/3ds/butterscotch/undertale/undertale.t3b");
+    TexArchive_open(c3d, archivePath);
+
     fprintf(stderr, "[C3D] Init done: %u game textures + 1 white stub.\n", texCount);
     c3d->decodeThread = (DecodeThread *)malloc(sizeof(DecodeThread));
     if (c3d->decodeThread) {
@@ -181,6 +193,8 @@ void C3DRenderer_init(Renderer *renderer, DataWin *dataWin) {
 
 void C3DRenderer_destroy(Renderer *renderer) {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
+
+    TexArchive_close(c3d);
 
     // Сначала останавливаем декод-тред
     // Важно: до C3D_TexDelete, иначе тред может обращаться к уже
