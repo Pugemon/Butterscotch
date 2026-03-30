@@ -49,24 +49,19 @@ void checkBatch(Citro3dRenderer *c3d, int verts, int texIdx) {
     }
 }
 
-void calcUV(const C3D_Tex *tex,
-            float srcX, float srcY,
-            float srcW, float srcH,
-            float *u0, float *v0,
-            float *u1, float *v1)
-{
+void calcUV(const C3D_Tex *tex, float srcX, float srcY, float srcW, float srcH, float *u0, float *v0, float *u1, float *v1) {
     if (tex->width == 0 || tex->height == 0) {
         *u0 = *v0 = *u1 = *v1 = 0.0f;
         return;
     }
 
-    float potW = (float)tex->width;
-    float potH = (float)tex->height;
+    float invW = 1.0f / (float)tex->width;
+    float invH = 1.0f / (float)tex->height;
 
-    *u0 = srcX / potW;
-    *u1 = (srcX + srcW) / potW;
-    *v0 = 1.0f - (srcY / potH);
-    *v1 = 1.0f - ((srcY + srcH) / potH);
+    *u0 = srcX * invW;
+    *u1 = (srcX + srcW) * invW;
+    *v0 = 1.0f - (srcY * invH);
+    *v1 = 1.0f - ((srcY + srcH) * invH);
 }
 
 #endif // __3DS__

@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "c3d_utils.h"
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Подфункции инициализации
 // ─────────────────────────────────────────────────────────────────────────────
@@ -187,6 +189,7 @@ void C3DRenderer_init(Renderer *renderer, DataWin *dataWin) {
     C3DRenderer_initVBO(c3d);
     C3DRenderer_initRenderState(c3d);
     C3DRenderer_initTextures(c3d, dataWin);
+    initMathLUTs();
 }
 
 void C3DRenderer_destroy(Renderer *renderer) {

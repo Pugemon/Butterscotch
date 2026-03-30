@@ -73,15 +73,22 @@ void C3DRenderer_drawSprite(Renderer *renderer,
     float lx1 = lx0 + (float)tpag->sourceWidth * xscale;
     float ly1 = ly0 + (float)tpag->sourceHeight * yscale;
 
-    // Поворачиваем все 4 угла вокруг pivot
-    float rad = angleDeg * (float)(M_PI / 180.0);
-    float cs = cosf(rad), sn = sinf(rad);
-
     float rx0, ry0, rx1, ry1, rx2, ry2, rx3, ry3;
-    rotatePoint(lx0, ly0, cs, sn, &rx0, &ry0);
-    rotatePoint(lx1, ly0, cs, sn, &rx1, &ry1);
-    rotatePoint(lx0, ly1, cs, sn, &rx2, &ry2);
-    rotatePoint(lx1, ly1, cs, sn, &rx3, &ry3);
+
+    // FAST PATH: Пропускаем тяжелую математику для неповёрнутых спрайтов
+    if (angleDeg == 0.0f) {
+        rx0 = lx0; ry0 = ly0;
+        rx1 = lx1; ry1 = ly0;
+        rx2 = lx0; ry2 = ly1;
+        rx3 = lx1; ry3 = ly1;
+    } else {
+        float sn, cs;
+        fast_sincosf(angleDeg, &sn, &cs);
+        rotatePoint(lx0, ly0, cs, sn, &rx0, &ry0);
+        rotatePoint(lx1, ly0, cs, sn, &rx1, &ry1);
+        rotatePoint(lx0, ly1, cs, sn, &rx2, &ry2);
+        rotatePoint(lx1, ly1, cs, sn, &rx3, &ry3);
+    }
 
     u32 clr = colorToABGR(color, alpha);
 
@@ -165,12 +172,15 @@ void C3DRenderer_drawLine(Renderer *renderer,
 {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
     float dx = x2 - x1, dy = y2 - y1;
-    float len = sqrtf(dx * dx + dy * dy);
-    if (len < LINE_MIN_LENGTH) return;
+    float lenSq = dx * dx + dy * dy;
+    if (lenSq < (LINE_MIN_LENGTH * LINE_MIN_LENGTH)) return;
+
+    float invLen = 1.0f / sqrtf(lenSq);
+    float halfWidth = width * 0.5f;
 
     // Нормаль к линии (перпендикуляр), масштабированная на полуширину
-    float nx = -(dy / len) * (width * 0.5f);
-    float ny =  (dx / len) * (width * 0.5f);
+    float nx = -dy * invLen * halfWidth;
+    float ny =  dx * invLen * halfWidth;
 
     checkBatch(c3d, 6, c3d->whiteTexIndex);
     u32 clr = colorToABGR(color, alpha);
@@ -193,11 +203,17 @@ void C3DRenderer_drawLineColor(Renderer *renderer,
 {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
     float dx = x2 - x1, dy = y2 - y1;
-    float len = sqrtf(dx * dx + dy * dy);
-    if (len < LINE_MIN_LENGTH) return;
+    float lenSq = dx * dx + dy * dy; // Используем квадрат длины
 
-    float nx = -(dy / len) * (width * 0.5f);
-    float ny =  (dx / len) * (width * 0.5f);
+    if (lenSq < (LINE_MIN_LENGTH * LINE_MIN_LENGTH)) return;
+
+    // Компиляторы ARM часто превращают (1.0f / sqrtf) в очень быструю
+    // аппаратную инструкцию rsqrte (Reverse Square Root Estimate).
+    float invLen = 1.0f / sqrtf(lenSq);
+    float halfWidth = width * 0.5f;
+
+    float nx = -dy * invLen * halfWidth;
+    float ny =  dx * invLen * halfWidth;
 
     checkBatch(c3d, 6, c3d->whiteTexIndex);
     u32 clr1 = colorToABGR(color1, alpha);

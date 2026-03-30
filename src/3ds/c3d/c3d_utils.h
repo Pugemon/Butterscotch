@@ -118,4 +118,8 @@ static inline void rotatePoint(float x, float y,
     *oy = -sn * x + cs * y;
 }
 
+void initMathLUTs();
+
+void fast_sincosf(float angleDeg, float *out_sin, float *out_cos);
+
 #endif // __3DS__
