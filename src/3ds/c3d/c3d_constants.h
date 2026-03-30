@@ -70,6 +70,19 @@
  */
 #define MAX_CACHED_TEXTURES 8
 
+/**
+ * Резерв VRAM под системные нужды: render target (240×400×4 = 375 KiB),
+ * depth/stencil buffer (240×400×4 = 375 KiB) и запас. Итого ≈ 1.5 MiB.
+ * Используется в evictUntilFits, чтобы не загружать текстуры вплотную к нулю.
+ */
+#define VRAM_SAFE_RESERVE   (1536u * 1024u)       ///< 1.5 MiB
+
+/**
+ * Резерв Linear Heap под аудио-буферы (~1 MiB), стеки тредов, VBO и запас ОС.
+ * Используется в evictUntilFits как нижняя граница свободной linear памяти.
+ */
+#define LINEAR_SAFE_RESERVE (4u * 1024u * 1024u)  ///< 4 MiB
+
 // ─── VBO / Батч ───────────────────────────────────────────────────────────────
 
 /**

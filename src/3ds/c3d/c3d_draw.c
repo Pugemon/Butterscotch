@@ -60,18 +60,39 @@ void C3DRenderer_drawSprite(Renderer *renderer,
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
     TexturePageItem *tpag = &renderer->dataWin->tpag.items[tpagIndex];
 
-    // --- 2D FRUSTUM CULLING ---
-    // Считаем максимально возможный радиус спрайта с запасом (чтобы учесть вращение)
-    float absScaleX = fabsf(xscale);
-    float absScaleY = fabsf(yscale);
-    float maxDim = (tpag->sourceWidth * absScaleX) + (tpag->sourceHeight * absScaleY);
+    // ── 2D FRUSTUM CULLING ───────────────────────────────────────────────────
+    // Локальные координаты четырёх углов спрайта (относительно точки x,y).
+    // targetX/targetY — смещение контента внутри bounding rect'а TPAG;
+    // originX/originY — pivot, вокруг которого происходит вращение.
+    // Без учёта targetX/Y culling даёт ложные отсечения у края экрана.
+    float lx0 = ((float)tpag->targetX - originX) * xscale;
+    float ly0 = ((float)tpag->targetY - originY) * yscale;
+    float lx1 = lx0 + (float)tpag->sourceWidth  * xscale;
+    float ly1 = ly0 + (float)tpag->sourceHeight * yscale;
 
-    // Если спрайт полностью за границами экрана — просто выходим!
-    // Это экономит сотни вызовов сложных расчетов каждый кадр.
-    if (x + maxDim < c3d->viewX || x - maxDim > c3d->viewX + c3d->viewW ||
-        y + maxDim < c3d->viewY || y - maxDim > c3d->viewY + c3d->viewH) {
-        return;
-        }
+    if (angleDeg == 0.0f) {
+        // FAST PATH: точный AABB без поворота. fminf/fmaxf нужны при отрицательном scale.
+        float worldL = x + fminf(lx0, lx1);
+        float worldR = x + fmaxf(lx0, lx1);
+        float worldT = y + fminf(ly0, ly1);
+        float worldB = y + fmaxf(ly0, ly1);
+        if (worldR < c3d->viewX || worldL > c3d->viewX + c3d->viewW ||
+            worldB < c3d->viewY || worldT > c3d->viewY + c3d->viewH) return;
+    } else {
+        // ROTATED PATH: описывающая окружность вокруг центра спрайта.
+        // Центр спрайта в локальных координатах:
+        float cx = (lx0 + lx1) * 0.5f;
+        float cy = (ly0 + ly1) * 0.5f;
+        // Радиус описывающей окружности (половина диагонали bounding rect'а):
+        float hw = fabsf(lx1 - lx0) * 0.5f;
+        float hh = fabsf(ly1 - ly0) * 0.5f;
+        float radius = sqrtf(hw * hw + hh * hh);
+        // Центр в мировых координатах:
+        float worldCX = x + cx;
+        float worldCY = y + cy;
+        if (worldCX + radius < c3d->viewX || worldCX - radius > c3d->viewX + c3d->viewW ||
+            worldCY + radius < c3d->viewY || worldCY - radius > c3d->viewY + c3d->viewH) return;
+    }
 
     float u0, v0, u1, v1;
     C3D_Vertex *v = prepareQuad(c3d, renderer, tpagIndex,
@@ -80,12 +101,7 @@ void C3DRenderer_drawSprite(Renderer *renderer,
                                  &u0, &v0, &u1, &v1);
     if (!v) return;
 
-    // Вычисляем угловые точки спрайта в локальном пространстве (относительно pivot)
-    float lx0 = ((float)tpag->targetX - originX) * xscale;
-    float ly0 = ((float)tpag->targetY - originY) * yscale;
-    float lx1 = lx0 + (float)tpag->sourceWidth * xscale;
-    float ly1 = ly0 + (float)tpag->sourceHeight * yscale;
-
+    // lx0/ly0/lx1/ly1 уже вычислены выше для culling — переиспользуем.
     float rx0, ry0, rx1, ry1, rx2, ry2, rx3, ry3;
 
     // FAST PATH: Пропускаем тяжелую математику для неповёрнутых спрайтов

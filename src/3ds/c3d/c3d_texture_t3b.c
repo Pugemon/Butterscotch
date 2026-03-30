@@ -125,23 +125,25 @@ static size_t evictOneLRU(Citro3dRenderer *c3d) {
  * но загрузку не блокирует — лучше превысить бюджет, чем показать чёрный экран.
  */
 static bool evictUntilFits(Citro3dRenderer *c3d, size_t needed) {
-    // Оставляем 1.5 МБ VRAM под экраны и Z-буфер
-    const u32 SAFE_VRAM = 1536 * 1024;
-    // Оставляем 4 МБ Linear RAM про запас для внутренних нужд 3DS и аудио
-    const u32 SAFE_LINEAR = 4 * 1024 * 1024;
-
+    // Tex3DS_TextureImport(true) пробует VRAM, при нехватке падает в linear heap.
+    // Значит нам достаточно чтобы ХОТЯ БЫ ОДИН из пулов имел свободное место.
+    // Оба порога берём из констант — никаких магических чисел внутри функции.
     while (true) {
-        u32 freeVRAM = vramSpaceFree();
+        u32 freeVRAM   = vramSpaceFree();
         u32 freeLinear = linearSpaceFree();
 
-        // Если есть место хотя бы в ОДНОМ из пулов - прерываем цикл
-        if ((freeVRAM >= needed + SAFE_VRAM) || (freeLinear >= needed + SAFE_LINEAR)) {
-            break;
-        }
+        bool vramOk   = (freeVRAM   >= needed + VRAM_SAFE_RESERVE);
+        bool linearOk = (freeLinear >= needed + LINEAR_SAFE_RESERVE);
+
+        if (vramOk || linearOk) break;
 
         size_t freed = evictOneLRU(c3d);
         if (freed == 0) {
-            fprintf(stderr, "[OOM] WARNING: Cannot free space! VRAM/FCRAM full!\n");
+            // Нечего вытеснять, но места нет ни там ни там.
+            // Грузим всё равно — лучше превысить бюджет, чем показать чёрный экран.
+            fprintf(stderr, "[T3B] WARNING: no room for %zu bytes "
+                    "(freeVRAM=%u, freeLinear=%u). Loading anyway.\n",
+                    needed, freeVRAM, freeLinear);
             return false;
         }
     }
@@ -209,9 +211,9 @@ static bool importBlob(Citro3dRenderer *c3d, int atlasId, void *buf, uint32_t si
 
     void* vramPtr = vramAlloc(tex->size);
     if (vramPtr != NULL) {
-        memcpy(vramPtr, tex->data, tex->size);
-        linearFree(tex->data);
-        tex->data = vramPtr;
+        memcpy(vramPtr, tex->data, tex->size); // Синхронное копирование
+        linearFree(tex->data);                 // Мгновенно возвращаем FCRAM эмулятору
+        tex->data = vramPtr;                   // citro3d аппаратно поймёт, что это VRAM
     }
 
     // sub->width/height — логический размер спрайта внутри POT-текстуры.
@@ -220,19 +222,21 @@ static bool importBlob(Citro3dRenderer *c3d, int atlasId, void *buf, uint32_t si
     c3d->texRealW[atlasId] = (int)sub->width;
     c3d->texRealH[atlasId] = (int)sub->height;
 
-    C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexSetFilter(tex, GPU_LINEAR, GPU_NEAREST);
     C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-    Tex3DS_TextureFree(t3x);  // освобождаем обёртку; данные в linearAlloc остаются
+    Tex3DS_TextureFree(t3x);  // освобождаем обёртку; данные в VRAM/linear остаются
 
-    c3d->vramUsed += tex->size;
+    c3d->vramUsed += tex->size;  // приблизительный учёт (VRAM + linear heap суммарно)
 
     fprintf(stderr, "[T3B] Tex %d OK: sprite=%dx%d GPU=%ux%u "
-            "size=%zu VRAM used=%zu/%u\n",
+            "size=%zu bytes (approx used=%zu, freeVRAM=%lu, freeLinear=%lu)\n",
             atlasId,
             c3d->texRealW[atlasId], c3d->texRealH[atlasId],
             tex->width, tex->height,
-            tex->size, c3d->vramUsed, vramSpaceFree() + c3d->vramUsed);
+            tex->size, c3d->vramUsed,
+            (unsigned long)vramSpaceFree(),
+            (unsigned long)linearSpaceFree());
 
     return true;
 }
