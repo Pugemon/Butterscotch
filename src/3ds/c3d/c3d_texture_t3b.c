@@ -203,7 +203,7 @@ static bool importBlob(Citro3dRenderer *c3d, int atlasId, void *buf, uint32_t si
     c3d->texRealW[atlasId] = (int)sub->width;
     c3d->texRealH[atlasId] = (int)sub->height;
 
-    C3D_TexSetFilter(tex, GPU_LINEAR, GPU_NEAREST);
+    C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     Tex3DS_TextureFree(t3x);  // освобождаем обёртку; данные в linearAlloc остаются

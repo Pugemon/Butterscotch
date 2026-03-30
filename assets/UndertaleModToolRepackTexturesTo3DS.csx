@@ -58,15 +58,24 @@ await Task.Run(() =>
     for (int i = 0; i < Data.TexturePageItems.Count; i++)
     {
         var item = Data.TexturePageItems[i];
-        
+
         // 1. Получаем исходный размер
         int originalW = item.SourceWidth;
         int originalH = item.SourceHeight;
 
+        // ИСПРАВЛЕНИЕ: Сохраняем оригинальные параметры обрезки!
         // 2. Если спрайт больше 512, масштабируем его до вписывания в 512
+        ushort oldTargetX = item.TargetX;
+        ushort oldTargetY = item.TargetY;
+        ushort oldTargetW = item.TargetWidth;
+        ushort oldTargetH = item.TargetHeight;
+        ushort oldBoundingW = item.BoundingWidth;
+        ushort oldBoundingH = item.BoundingHeight;
+
+        float scale = 1.0f;
         if (originalW > maxPOT || originalH > maxPOT)
         {
-            float scale = Math.Min((float)maxPOT / originalW, (float)maxPOT / originalH);
+            scale = Math.Min((float)maxPOT / originalW, (float)maxPOT / originalH);
             originalW = Math.Max(1, (int)(originalW * scale));
             originalH = Math.Max(1, (int)(originalH * scale));
         }
@@ -96,7 +105,7 @@ await Task.Run(() =>
                 // Рисуем спрайт в угол 0,0
                 canvas.Composite(spriteImg, 0, 0, CompositeOperator.Copy);
             }
-            
+
             // Сохраняем итоговый файл
             canvas.Write(fullPath);
             File.Delete(tempSprite);
@@ -113,12 +122,15 @@ await Task.Run(() =>
             item.SourceY = 0;
             item.SourceWidth = (ushort)originalW;
             item.SourceHeight = (ushort)originalH;
-            
-            // Если движок использует Target-координаты, их тоже стоит сбросить (опционально)
-            item.TargetX = 0;
-            item.TargetY = 0;
-            item.TargetWidth = (ushort)originalW;
-            item.TargetHeight = (ushort)originalH;
+
+            // ИСПРАВЛЕНИЕ: Возвращаем Target-координаты на место!
+            // Если спрайт был уменьшен (scale < 1.0f), смещения тоже нужно уменьшить.
+            item.TargetX = (ushort)Math.Round(oldTargetX * scale);
+            item.TargetY = (ushort)Math.Round(oldTargetY * scale);
+            item.TargetWidth = (ushort)Math.Round(oldTargetW * scale);
+            item.TargetHeight = (ushort)Math.Round(oldTargetH * scale);
+            item.BoundingWidth = (ushort)Math.Round(oldBoundingW * scale);
+            item.BoundingHeight = (ushort)Math.Round(oldBoundingH * scale);
         }
 
         UpdateProgress(1);

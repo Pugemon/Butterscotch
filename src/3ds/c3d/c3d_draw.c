@@ -62,16 +62,16 @@ void C3DRenderer_drawSprite(Renderer *renderer,
 
     float u0, v0, u1, v1;
     C3D_Vertex *v = prepareQuad(c3d, renderer, tpagIndex,
-                                 (float)tpag->sourceX, (float)tpag->sourceY,
-                                 (float)tpag->sourceWidth, (float)tpag->sourceHeight,
+                                 tpag->sourceX, tpag->sourceY,
+                                 tpag->sourceWidth, tpag->sourceHeight,
                                  &u0, &v0, &u1, &v1);
     if (!v) return;
 
     // Вычисляем угловые точки спрайта в локальном пространстве (относительно pivot)
-    float lx0 = -originX * xscale;
-    float ly0 = -originY * yscale;
-    float lx1 = (tpag->sourceWidth  - originX) * xscale;
-    float ly1 = (tpag->sourceHeight - originY) * yscale;
+    float lx0 = ((float)tpag->targetX - originX) * xscale;
+    float ly0 = ((float)tpag->targetY - originY) * yscale;
+    float lx1 = lx0 + (float)tpag->sourceWidth * xscale;
+    float ly1 = ly0 + (float)tpag->sourceHeight * yscale;
 
     // Поворачиваем все 4 угла вокруг pivot
     float rad = angleDeg * (float)(M_PI / 180.0);
@@ -191,9 +191,27 @@ void C3DRenderer_drawLineColor(Renderer *renderer,
                                 float width,
                                 uint32_t color1, uint32_t color2, float alpha)
 {
-    // TODO: реализовать настоящий градиент через разные цвета вершин
-    (void)color2;
-    C3DRenderer_drawLine(renderer, x1, y1, x2, y2, width, color1, alpha);
+    Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
+    float dx = x2 - x1, dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < LINE_MIN_LENGTH) return;
+
+    float nx = -(dy / len) * (width * 0.5f);
+    float ny =  (dx / len) * (width * 0.5f);
+
+    checkBatch(c3d, 6, c3d->whiteTexIndex);
+    u32 clr1 = colorToABGR(color1, alpha);
+    u32 clr2 = colorToABGR(color2, alpha);
+    C3D_Vertex *v = &c3d->vboData[c3d->vertexCount];
+
+    v[0] = (C3D_Vertex){x1-nx, y1-ny, SPRITE_Z_DEPTH, 0.0f, 0.0f, clr1};
+    v[1] = (C3D_Vertex){x1+nx, y1+ny, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr1};
+    v[2] = (C3D_Vertex){x2-nx, y2-ny, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr2};
+    v[3] = (C3D_Vertex){x1+nx, y1+ny, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr1};
+    v[4] = (C3D_Vertex){x2+nx, y2+ny, SPRITE_Z_DEPTH, 1.0f, 1.0f, clr2};
+    v[5] = (C3D_Vertex){x2-nx, y2-ny, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr2};
+
+    c3d->vertexCount += 6;
 }
 
 void C3DRenderer_drawText(Renderer *renderer,

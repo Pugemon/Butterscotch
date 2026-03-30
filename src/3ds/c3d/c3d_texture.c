@@ -112,7 +112,7 @@ bool uploadTexture(C3D_Tex *tex, int *realW, int *realH, const u8 *rgba, int w, 
     }
 
     // LINEAR при увеличении — сглаживание; NEAREST при уменьшении — чёткость пикселей
-    C3D_TexSetFilter(tex, GPU_LINEAR, GPU_NEAREST);
+    C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
     // CLAMP_TO_EDGE: не повторять текстуру за краями (предотвращает "кровотечение" атласа)
     C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
@@ -279,7 +279,7 @@ void ensureTextureLoaded(Citro3dRenderer *c3d, int pageId) {
             //   FlushDataCache → GPU/GSP → только Core 0
             C3D_Tex *tex = &c3d->textures[pageId];
             if (C3D_TexInit(tex, (u16)potW, (u16)potH, GPU_RGBA4)) {
-                C3D_TexSetFilter(tex, GPU_LINEAR, GPU_NEAREST);
+                C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
                 C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
                 // Swizzled данные уже в правильном формате — просто копируем.
