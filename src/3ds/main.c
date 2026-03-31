@@ -297,6 +297,7 @@ int main(int argc, char* argv[]) {
     parseCommandLineArgs(&args, argc, argv);
 
     gfxInitDefault();
+    gfxSet3D(true);
     consoleInit(GFX_BOTTOM, NULL);
 
     printf("Loading %s...\n", args.dataWinPath);
@@ -699,82 +700,90 @@ int main(int argc, char* argv[]) {
         int32_t gameW = (int32_t) gen8->defaultWindowWidth;
         int32_t gameH = (int32_t) gen8->defaultWindowHeight;
 
-        renderer->vtable->beginFrame(renderer, gameW, gameH, 400, 240); // 400, 240 для 3DS
+        // === 3D RENDERING LOGIC ===
+        float slider3D = osGet3DSliderState();
+        int numEyes = (slider3D > 0.0f) ? 2 : 1;
 
-        // --- ЛОГИКА МАСШТАБИРОВАНИЯ ЭКРАНА 3DS (400x240) ---
-        float scaleX = 400.0f / (float)gameW;
-        float scaleY = 240.0f / (float)gameH;
+        // ХАК ПРОТИВ ДВОЙНОГО СРАБАТЫВАНИЯ ЛОГИКИ В ИВЕНТЕ DRAW:
+        // Сохраняем состояние кнопок до отрисовки
+        RunnerKeyboardState backupKb = *(runner->keyboard);
 
-        // ВАРИАНТ 1: Сохранить пропорции (по центру экрана, без искажения пикселей)
-        // Чтобы использовать ВАРИАНТ 2 (растянуть), просто закомментируй следующие 3 строки:
-        float scale = (scaleX < scaleY) ? scaleX : scaleY;
-        scaleX = scale;
-        scaleY = scale;
-        // ----------------------------------------------------
+        for (int eye = 0; eye < numEyes; eye++) {
 
-        // Считаем отступы для центрирования
-        int32_t offsetX = (int32_t)((400.0f - (gameW * scaleX)) / 2.0f);
-        int32_t offsetY = (int32_t)((240.0f - (gameH * scaleY)) / 2.0f);
-
-        if (runner->drawBackgroundColor) {
-            int32_t screenW = (int32_t)(gameW * scaleX);
-            int32_t screenH = (int32_t)(gameH * scaleY);
-            renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, offsetX, offsetY, screenW, screenH, 0.0f);
-            renderer->vtable->drawRectangle(renderer, 0, 0, gameW, gameH, runner->backgroundColor, 1.0f, false);
-            renderer->vtable->endView(renderer);
-        }
-
-        bool viewsEnabled = (activeRoom->flags & 1) != 0;
-        bool anyViewRendered = false;
-
-        if (viewsEnabled) {
-            repeat(8, vi) {
-                if (!activeRoom->views[vi].enabled) continue;
-
-                int32_t viewX = activeRoom->views[vi].viewX;
-                int32_t viewY = activeRoom->views[vi].viewY;
-                int32_t viewW = activeRoom->views[vi].viewWidth;
-                int32_t viewH = activeRoom->views[vi].viewHeight;
-
-                int32_t portX = activeRoom->views[vi].portX;
-                int32_t portY = activeRoom->views[vi].portY;
-                int32_t portW = activeRoom->views[vi].portWidth;
-                int32_t portH = activeRoom->views[vi].portHeight;
-                float viewAngle = runner->viewAngles[vi];
-
-                // Применяем масштаб к порту (Viewport)
-                int32_t screenPortX = offsetX + (int32_t)(portX * scaleX);
-                int32_t screenPortY = offsetY + (int32_t)(portY * scaleY);
-                int32_t screenPortW = (int32_t)(portW * scaleX);
-                int32_t screenPortH = (int32_t)(portH * scaleY);
-
-                runner->viewCurrent = vi;
-                renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, screenPortX, screenPortY, screenPortW, screenPortH, viewAngle);
-
-                Runner_draw(runner);
-
-                renderer->vtable->endView(renderer);
-                anyViewRendered = true;
+            if (eye == 1) {
+                // Перед отрисовкой правого глаза временно стираем факты "нажатия" кнопок!
+                // Теперь GML-логика меню в Draw-ивенте не сработает во второй раз!
+                memset(runner->keyboard->keyPressed, 0, sizeof(runner->keyboard->keyPressed));
+                memset(runner->keyboard->keyReleased, 0, sizeof(runner->keyboard->keyReleased));
             }
-        }
 
-        if (!anyViewRendered) {
-            int32_t screenW = (int32_t)(gameW * scaleX);
-            int32_t screenH = (int32_t)(gameH * scaleY);
+            renderer->vtable->beginFrame(renderer, gameW, gameH, 400, 240, eye, slider3D);
+
+            float scaleX = 400.0f / (float)gameW;
+            float scaleY = 240.0f / (float)gameH;
+            float scale = (scaleX < scaleY) ? scaleX : scaleY;
+            scaleX = scale; scaleY = scale;
+
+            int32_t offsetX = (int32_t)((400.0f - (gameW * scaleX)) / 2.0f);
+            int32_t offsetY = (int32_t)((240.0f - (gameH * scaleY)) / 2.0f);
+
+            if (runner->drawBackgroundColor) {
+                int32_t screenW = (int32_t)(gameW * scaleX);
+                int32_t screenH = (int32_t)(gameH * scaleY);
+                renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, offsetX, offsetY, screenW, screenH, 0.0f);
+                renderer->vtable->drawRectangle(renderer, 0, 0, gameW, gameH, runner->backgroundColor, 1.0f, false);
+                renderer->vtable->endView(renderer);
+            }
+
+            bool viewsEnabled = (activeRoom->flags & 1) != 0;
+            bool anyViewRendered = false;
+
+            if (viewsEnabled) {
+                repeat(8, vi) {
+                    if (!activeRoom->views[vi].enabled) continue;
+
+                    int32_t viewX = activeRoom->views[vi].viewX;
+                    int32_t viewY = activeRoom->views[vi].viewY;
+                    int32_t viewW = activeRoom->views[vi].viewWidth;
+                    int32_t viewH = activeRoom->views[vi].viewHeight;
+
+                    int32_t portX = activeRoom->views[vi].portX;
+                    int32_t portY = activeRoom->views[vi].portY;
+                    int32_t portW = activeRoom->views[vi].portWidth;
+                    int32_t portH = activeRoom->views[vi].portHeight;
+
+                    int32_t screenPortX = offsetX + (int32_t)(portX * scaleX);
+                    int32_t screenPortY = offsetY + (int32_t)(portY * scaleY);
+                    int32_t screenPortW = (int32_t)(portW * scaleX);
+                    int32_t screenPortH = (int32_t)(portH * scaleY);
+
+                    runner->viewCurrent = vi;
+                    renderer->vtable->beginView(renderer, viewX, viewY, viewW, viewH, screenPortX, screenPortY, screenPortW, screenPortH, runner->viewAngles[vi]);
+
+                    Runner_draw(runner);
+
+                    renderer->vtable->endView(renderer);
+                    anyViewRendered = true;
+                }
+            }
+
+            if (!anyViewRendered) {
+                int32_t screenW = (int32_t)(gameW * scaleX);
+                int32_t screenH = (int32_t)(gameH * scaleY);
+                runner->viewCurrent = 0;
+                renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, offsetX, offsetY, screenW, screenH, 0.0f);
+                Runner_draw(runner);
+                renderer->vtable->endView(renderer);
+            }
 
             runner->viewCurrent = 0;
-            renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, offsetX, offsetY, screenW, screenH, 0.0f);
-            Runner_draw(runner);
-            renderer->vtable->endView(renderer);
+            renderer->vtable->endFrame(renderer); // FlushBatch
         }
 
-        runner->viewCurrent = 0;
+        // Возвращаем честное состояние клавиатуры для следующего кадра!
+        *(runner->keyboard) = backupKb;
 
-        renderer->vtable->endFrame(renderer);
-        // Сигналим Core 1: command list готов, можно делать C3D_FrameEnd.
-        // Core 0 продолжает выполнение (frame rate limiting), пока Core 1
-        // ждёт GPU/VBlank. Следующая RenderThread_waitEndFrame() в начале
-        // следующей итерации гарантирует, что Core 1 завершил работу.
+        // Сигналим Core 1: command list готов для ОБОИХ глаз
         #ifdef __3DS__
         RenderThread_signalDraw(&renderThread);
         #endif

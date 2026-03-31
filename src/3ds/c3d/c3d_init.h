@@ -76,7 +76,8 @@ void C3DRenderer_destroy(Renderer *renderer);
  */
 void C3DRenderer_beginFrame(Renderer *renderer,
                              int32_t gameW, int32_t gameH,
-                             int32_t windowW, int32_t windowH);
+                             int32_t windowW, int32_t windowH,
+                             int eye, float iod);
 
 /** Конец кадра: сброс оставшегося батча и отправка кадра на экран. */
 void C3DRenderer_endFrame(Renderer *renderer);

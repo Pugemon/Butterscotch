@@ -13,7 +13,11 @@ typedef struct Renderer Renderer;
 typedef struct {
     void (*init)(Renderer* renderer, DataWin* dataWin);
     void (*destroy)(Renderer* renderer);
+#ifdef __3DS__
+    void (*beginFrame)(Renderer* renderer, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH, int eye, float iod);
+#else
     void (*beginFrame)(Renderer* renderer, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH);
+#endif
     void (*endFrame)(Renderer* renderer);
     void (*beginView)(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH, int32_t portX, int32_t portY, int32_t portW, int32_t portH, float viewAngle);
     void (*endView)(Renderer* renderer);
@@ -40,6 +44,11 @@ struct Renderer {
     int32_t drawFont;    // default -1 (no font)
     int32_t drawHalign;  // 0=left, 1=center, 2=right
     int32_t drawValign;  // 0=top, 1=middle, 2=bottom
+
+    float currentDepth; // Текущая глубина слоя (depth)
+    int currentEye;     // 0 = Левый глаз/Моно, 1 = Правый глаз
+    float iod;
+    float current3DShift;
 };
 
 // ===[ Shared Helpers (platform-agnostic) ]===

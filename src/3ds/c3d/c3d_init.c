@@ -24,33 +24,30 @@ void C3DRenderer_initRenderTarget(Citro3dRenderer *c3d) {
     // C3D_DEFAULT_CMDBUF_SIZE = 0x40000 байт — стандартный размер для большинства игр.
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
 
-    // Создаём render target — область VRAM, куда GPU будет писать пиксели.
-    // Размеры в "памятной" системе координат (ширина и высота поменяны местами
-    // из-за аппаратного поворота экрана на 90°).
-    c3d->target = C3D_RenderTargetCreate(SCREEN_MEM_WIDTH, SCREEN_MEM_HEIGHT,
-                                          GPU_RB_RGBA8,
-                                          GPU_RB_DEPTH24_STENCIL8);
-    if (!c3d->target) {
+    // Левый глаз
+    c3d->targetLeft = C3D_RenderTargetCreate(SCREEN_MEM_WIDTH, SCREEN_MEM_HEIGHT, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+    C3D_RenderTargetSetOutput(c3d->targetLeft, GFX_TOP, GFX_LEFT,
+        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+        GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    if (!c3d->targetLeft) {
         fprintf(stderr, "[C3D] RenderTargetCreate failed!\n");
         return;
     }
-    fprintf(stderr, "[C3D] Render target created: %p\n", (void *)c3d->target);
+    fprintf(stderr, "[C3D] Render target created: %p\n", (void *)c3d->targetLeft);
 
-    // Привязываем render target к физическому top-экрану (GFX_TOP, GFX_LEFT).
-    // Флаги transfer описывают, как GPU копирует данные из framebuffer в LCD:
-    //   FLIP_VERT(0)     — не переворачивать по вертикали
-    //   OUT_TILED(0)     — выходной буфер линейный (LCD ожидает линейный формат)
-    //   RAW_COPY(0)      — выполнять конвертацию формата
-    //   IN_FORMAT RGBA8  — входной формат нашего render target
-    //   OUT_FORMAT RGB8  — LCD принимает RGB8 (без альфа-канала)
-    //   SCALING NONE     — без масштабирования
-    C3D_RenderTargetSetOutput(c3d->target, GFX_TOP, GFX_LEFT,
-        GX_TRANSFER_FLIP_VERT(0)   |
-        GX_TRANSFER_OUT_TILED(0)   |
-        GX_TRANSFER_RAW_COPY(0)    |
-        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8)  |
-        GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8)  |
+    // Правый глаз
+    c3d->targetRight = C3D_RenderTargetCreate(SCREEN_MEM_WIDTH, SCREEN_MEM_HEIGHT, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+    C3D_RenderTargetSetOutput(c3d->targetRight, GFX_TOP, GFX_RIGHT,
+        GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+        GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
         GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+
+    if (!c3d->targetRight) {
+        fprintf(stderr, "[C3D] RenderTargetCreate failed!\n");
+        return;
+    }
+    fprintf(stderr, "[C3D] Render target created: %p\n", (void *)c3d->targetRight);
 }
 
 void C3DRenderer_initShader(Citro3dRenderer *c3d) {
@@ -211,40 +208,48 @@ void C3DRenderer_destroy(Renderer *renderer) {
     // C3D_TexDelete самостоятельно определяет (через addrIsVRAM),
     // нужно ли вызывать vramFree или linearFree.
     for (uint32_t i = 0; i <= c3d->texCount; i++) {
-        if (c3d->textures[i].data) {
-            C3D_TexDelete(&c3d->textures[i]);
-        }
+        if (c3d->textures[i].data) C3D_TexDelete(&c3d->textures[i]);
     }
     free(c3d->textures);
-    free(c3d->texRealW);
-    free(c3d->texRealH);
-    free(c3d->texLastUsed);
+    free(c3d->texRealW); free(c3d->texRealH);
+    free(c3d->texLastUsed); free(c3d->texInVram);
 
-    linearFree(c3d->vboData);  // VBO выделялся через linearAlloc
+    linearFree(c3d->vboData);
     shaderProgramFree(&c3d->shader);
     DVLB_Free(c3d->dvlb);
-    C3D_RenderTargetDelete(c3d->target);
 
-    // C3D_Fini() и gfxExit() вызываются в main() — не здесь
+    C3D_RenderTargetDelete(c3d->targetLeft);
+    C3D_RenderTargetDelete(c3d->targetRight);
+
     free(c3d);
 }
-
 void C3DRenderer_beginFrame(Renderer *renderer,
                              int32_t gameW, int32_t gameH,
-                             int32_t windowW, int32_t windowH)
+                             int32_t windowW, int32_t windowH, int eye, float iod)
 {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
     (void)gameW; (void)gameH; (void)windowW; (void)windowH;
 
-    c3d->currentFrame++;
+    renderer->currentEye = eye;
+    renderer->iod = iod;
 
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-    C3D_RenderTargetClear(c3d->target, C3D_CLEAR_ALL, CLEAR_COLOR, 0);
-    C3D_FrameDrawOn(c3d->target);
+    if (eye == 0) {
+        c3d->currentFrame++;
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
-    // Сбрасываем состояние батча в начале каждого кадра
-    c3d->vertexCount     = 0;
-    c3d->batchStart      = 0;
+        // Сбрасываем буфер вершин ТОЛЬКО для левого глаза.
+        c3d->vertexCount = 0;
+        c3d->batchStart  = 0;
+    } else {
+        // Для правого глаза продолжаем писать в конец буфера, чтобы не затереть левый глаз
+        c3d->batchStart = c3d->vertexCount;
+    }
+
+    C3D_RenderTarget* currentTarget = (eye == 1) ? c3d->targetRight : c3d->targetLeft;
+
+    C3D_RenderTargetClear(currentTarget, C3D_CLEAR_ALL, CLEAR_COLOR, 0);
+    C3D_FrameDrawOn(currentTarget);
+
     c3d->currentTexIndex = -1;
 }
 

@@ -145,6 +145,7 @@ elseif (PLATFORM STREQUAL "sdl2")
 elseif (PLATFORM STREQUAL "3ds")
     file(GLOB PLATFORM_SOURCES src/3ds/*.c src/3ds/c3d/*.c src/sdl12/*.c)
     list(REMOVE_ITEM PLATFORM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/sdl12/main.c")
+    list(REMOVE_ITEM PLATFORM_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/sdl12/sdl12_renderer.c")
 
     target_sources(butterscotch PRIVATE ${PLATFORM_SOURCES})
 

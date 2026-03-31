@@ -678,6 +678,12 @@ void Runner_draw(Runner* runner) {
         qsort(drawList, drawCount, sizeof(Instance*), compareInstanceDepth);
     }
 
+#ifdef __3DS__
+    // =========================================================
+    // СЛОЙ 1: ДАЛЬНИЕ ФОНЫ (Утоплены ВНУТРЬ экрана)
+    // =========================================================
+    if (runner->renderer != nullptr) runner->renderer->current3DShift = 3.5f;
+#endif
     // Draw non-foreground backgrounds (behind everything)
     Runner_drawBackgrounds(runner, false);
 
@@ -748,10 +754,19 @@ void Runner_draw(Runner* runner) {
         qsort(drawables, drawableCount, sizeof(Drawable), compareDrawableDepth);
     }
 
+    // =========================================================
+    // СЛОЙ 2 и 3: ТАЙЛЫ И ПЕРСОНАЖИ
+    // =========================================================
     // Draw interleaved tiles and instances
     repeat(drawableCount, i) {
         Drawable* d = &drawables[i];
+
         if (d->type == DRAWABLE_TILE) {
+#ifdef __3DS__
+            // ТАЙЛЫ (Стены, пол). Слегка утоплены в экран (+1.5 пикселя)
+            if (runner->renderer != nullptr) runner->renderer->current3DShift = 1.0f;
+#endif
+
             if (runner->renderer != nullptr) {
                 RoomTile* tile = &currentRoomTiles[d->tileIndex];
                 float offsetX = 0.0f, offsetY = 0.0f;
@@ -788,6 +803,19 @@ void Runner_draw(Runner* runner) {
                 Renderer_drawTile(runner->renderer, tile, offsetX, offsetY);
             }
         } else {
+#ifdef __3DS__
+            // ПЕРСОНАЖИ И ОБЪЕКТЫ. Вылетают ИЗ экрана на игрока (-1.5 пикселя)
+            // Бонус: мы добавляем микро-рельеф (depth/1000), чтобы объекты,
+            // которые стоят ближе к камере (y-sorting), вылетали чуть сильнее!
+            float objShift = -1.0f + (d->depth / 2000.0f);
+
+            // Защита, чтобы объекты не улетали слишком далеко
+            if (objShift < -3.0f) objShift = -3.0f;
+            if (objShift >  0.5f) objShift =  0.5f;
+
+            if (runner->renderer != nullptr) runner->renderer->current3DShift = objShift;
+#endif
+
             Instance* inst = d->instance;
             ObjectEvent* evt = findEventAndOwner(runner->dataWin, inst->objectIndex, EVENT_DRAW, DRAW_NORMAL, nullptr, runner);
             if (evt != nullptr && evt->actionCount > 0) {
@@ -802,10 +830,24 @@ void Runner_draw(Runner* runner) {
 
     fireDrawSubtype(runner, drawList, drawCount, DRAW_END);
 
+#ifdef __3DS__
+    // =========================================================
+    // СЛОЙ 4: ПЕРЕДНИЕ ФОНЫ (Слегка парят над персонажами)
+    // =========================================================
+    if (runner->renderer != nullptr) runner->renderer->current3DShift = -2.0f;
+#endif
+
     // Draw foreground backgrounds (in front of instances, behind GUI)
     Runner_drawBackgrounds(runner, true);
 
     fireDrawSubtype(runner, drawList, drawCount, DRAW_POST);
+
+#ifdef __3DS__
+    // =========================================================
+    // СЛОЙ 5: ИНТЕРФЕЙС И ТЕКСТ (Парит максимально высоко)
+    // =========================================================
+    if (runner->renderer != nullptr) runner->renderer->current3DShift = -3.5f;
+#endif
     fireDrawSubtype(runner, drawList, drawCount, DRAW_GUI_BEGIN);
     fireDrawSubtype(runner, drawList, drawCount, DRAW_GUI);
     fireDrawSubtype(runner, drawList, drawCount, DRAW_GUI_END);

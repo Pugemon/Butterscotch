@@ -15,15 +15,17 @@
 
 #include "c3d_texture_t3b.h"
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Внутренний хелпер: получить текстуру и UV для TPAG-индекса
-// ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Подготавливает рендеринг по TPAG-индексу:
- * гарантирует загрузку текстуры, проверяет батч, заполняет UV.
- * Возвращает указатель на буфер вершин или NULL при ошибке.
- */
+static inline float get3DOffset(Renderer *renderer) {
+    if (renderer->iod <= 0.0f) return 0.0f; // 3D выключено
+
+    // Берем заказанный сдвиг и умножаем на ползунок 3D
+    float shift = renderer->current3DShift * renderer->iod;
+
+    // Левый глаз (0) сдвигает влево, Правый (1) - вправо
+    return (renderer->currentEye == 0) ? -shift : shift;
+}
+
 static inline C3D_Vertex *prepareQuad(Citro3dRenderer *c3d,
                                 Renderer *renderer,
                                 int32_t tpagIndex,
@@ -48,30 +50,17 @@ static inline C3D_Vertex *prepareQuad(Citro3dRenderer *c3d,
     return &c3d->vboData[c3d->vertexCount];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Draw-функции
-// ─────────────────────────────────────────────────────────────────────────────
-
-void C3DRenderer_drawSprite(Renderer *renderer,
-                             int32_t tpagIndex,
-                             float x, float y,
-                             float originX, float originY,
-                             float xscale, float yscale,
-                             float angleDeg,
-                             uint32_t color, float alpha)
+void C3DRenderer_drawSprite(Renderer *renderer, int32_t tpagIndex, float x, float y, float originX, float originY, float xscale, float yscale, float angleDeg, uint32_t color, float alpha)
 {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
     TexturePageItem *tpag = &renderer->dataWin->tpag.items[tpagIndex];
 
-    // ── 2D FRUSTUM CULLING ───────────────────────────────────────────────────
-    // Локальные координаты четырёх углов спрайта (относительно точки x,y).
-    // targetX/targetY — смещение контента внутри bounding rect'а TPAG;
-    // originX/originY — pivot, вокруг которого происходит вращение.
-    // Без учёта targetX/Y culling даёт ложные отсечения у края экрана.
     float lx0 = ((float)tpag->targetX - originX) * xscale;
     float ly0 = ((float)tpag->targetY - originY) * yscale;
     float lx1 = lx0 + (float)tpag->sourceWidth  * xscale;
     float ly1 = ly0 + (float)tpag->sourceHeight * yscale;
+
+    float maxShift = 30.0f; // Запас для 3D, чтобы не отсекало куски у края экрана
 
     if (angleDeg == 0.0f) {
         // FAST PATH: точный AABB без поворота. fminf/fmaxf нужны при отрицательном scale.
@@ -79,7 +68,7 @@ void C3DRenderer_drawSprite(Renderer *renderer,
         float worldR = x + fmaxf(lx0, lx1);
         float worldT = y + fminf(ly0, ly1);
         float worldB = y + fmaxf(ly0, ly1);
-        if (worldR < c3d->viewX || worldL > c3d->viewX + c3d->viewW ||
+        if (worldR < c3d->viewX - maxShift || worldL > c3d->viewX + c3d->viewW + maxShift ||
             worldB < c3d->viewY || worldT > c3d->viewY + c3d->viewH) return;
     } else {
         // ROTATED PATH: описывающая окружность вокруг центра спрайта.
@@ -93,15 +82,12 @@ void C3DRenderer_drawSprite(Renderer *renderer,
         // Центр в мировых координатах:
         float worldCX = x + cx;
         float worldCY = y + cy;
-        if (worldCX + radius < c3d->viewX || worldCX - radius > c3d->viewX + c3d->viewW ||
+        if (worldCX + radius < c3d->viewX - maxShift || worldCX - radius > c3d->viewX + c3d->viewW + maxShift ||
             worldCY + radius < c3d->viewY || worldCY - radius > c3d->viewY + c3d->viewH) return;
     }
 
     float u0, v0, u1, v1;
-    C3D_Vertex *v = prepareQuad(c3d, renderer, tpagIndex,
-                                 tpag->sourceX, tpag->sourceY,
-                                 tpag->sourceWidth, tpag->sourceHeight,
-                                 &u0, &v0, &u1, &v1);
+    C3D_Vertex *v = prepareQuad(c3d, renderer, tpagIndex, tpag->sourceX, tpag->sourceY, tpag->sourceWidth, tpag->sourceHeight, &u0, &v0, &u1, &v1);
     if (!v) return;
 
     // lx0/ly0/lx1/ly1 уже вычислены выше для culling — переиспользуем.
@@ -123,25 +109,19 @@ void C3DRenderer_drawSprite(Renderer *renderer,
     }
 
     u32 clr = colorToABGR(color, alpha);
+    float offX = get3DOffset(renderer);
 
-    // 2 треугольника (v0-v1-v2, v1-v3-v2) = 1 quad без index buffer
-    v[0] = (C3D_Vertex){x+rx0, y+ry0, SPRITE_Z_DEPTH, u0, v0, clr};
-    v[1] = (C3D_Vertex){x+rx1, y+ry1, SPRITE_Z_DEPTH, u1, v0, clr};
-    v[2] = (C3D_Vertex){x+rx2, y+ry2, SPRITE_Z_DEPTH, u0, v1, clr};
-    v[3] = (C3D_Vertex){x+rx1, y+ry1, SPRITE_Z_DEPTH, u1, v0, clr};
-    v[4] = (C3D_Vertex){x+rx3, y+ry3, SPRITE_Z_DEPTH, u1, v1, clr};
-    v[5] = (C3D_Vertex){x+rx2, y+ry2, SPRITE_Z_DEPTH, u0, v1, clr};
+    v[0] = (C3D_Vertex){x+rx0+offX, y+ry0, SPRITE_Z_DEPTH, u0, v0, clr};
+    v[1] = (C3D_Vertex){x+rx1+offX, y+ry1, SPRITE_Z_DEPTH, u1, v0, clr};
+    v[2] = (C3D_Vertex){x+rx2+offX, y+ry2, SPRITE_Z_DEPTH, u0, v1, clr};
+    v[3] = (C3D_Vertex){x+rx1+offX, y+ry1, SPRITE_Z_DEPTH, u1, v0, clr};
+    v[4] = (C3D_Vertex){x+rx3+offX, y+ry3, SPRITE_Z_DEPTH, u1, v1, clr};
+    v[5] = (C3D_Vertex){x+rx2+offX, y+ry2, SPRITE_Z_DEPTH, u0, v1, clr};
 
     c3d->vertexCount += 6;
 }
 
-void C3DRenderer_drawSpritePart(Renderer *renderer,
-                                 int32_t tpagIndex,
-                                 int32_t srcOffX, int32_t srcOffY,
-                                 int32_t srcW, int32_t srcH,
-                                 float x, float y,
-                                 float xscale, float yscale,
-                                 uint32_t color, float alpha)
+void C3DRenderer_drawSpritePart(Renderer *renderer, int32_t tpagIndex, int32_t srcOffX, int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y, float xscale, float yscale, uint32_t color, float alpha)
 {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
 
@@ -155,38 +135,32 @@ void C3DRenderer_drawSpritePart(Renderer *renderer,
     float worldT = y + fminf(0.0f, scaledH);
     float worldB = y + fmaxf(0.0f, scaledH);
 
-    // Если кусок спрайта вне экрана — пропускаем! (Это спасёт FPS на больших картах)
-    if (worldR < c3d->viewX || worldL > c3d->viewX + c3d->viewW ||
+    float maxShift = 30.0f; // Запас для 3D
+    if (worldR < c3d->viewX - maxShift || worldL > c3d->viewX + c3d->viewW + maxShift ||
         worldB < c3d->viewY || worldT > c3d->viewY + c3d->viewH) return;
 
     TexturePageItem *tpag = &renderer->dataWin->tpag.items[tpagIndex];
 
     float u0, v0, u1, v1;
-    // ВАЖНО: Убедитесь, что prepareQuad внутри вызывает checkBatch(c3d, 6, tpagIndex)!
-    C3D_Vertex *v = prepareQuad(c3d, renderer, tpagIndex,
-                                 (float)(tpag->sourceX + srcOffX),
-                                 (float)(tpag->sourceY + srcOffY),
-                                 (float)srcW, (float)srcH,
-                                 &u0, &v0, &u1, &v1);
+    C3D_Vertex *v = prepareQuad(c3d, renderer, tpagIndex, (float)(tpag->sourceX + srcOffX), (float)(tpag->sourceY + srcOffY), (float)srcW, (float)srcH, &u0, &v0, &u1, &v1);
     if (!v) return;
 
     float x2 = x + scaledW;
     float y2 = y + scaledH;
     u32 clr  = colorToABGR(color, alpha);
+    float offX = get3DOffset(renderer);
 
-    v[0] = (C3D_Vertex){x,  y,  SPRITE_Z_DEPTH, u0, v0, clr};
-    v[1] = (C3D_Vertex){x2, y,  SPRITE_Z_DEPTH, u1, v0, clr};
-    v[2] = (C3D_Vertex){x,  y2, SPRITE_Z_DEPTH, u0, v1, clr};
-    v[3] = (C3D_Vertex){x2, y,  SPRITE_Z_DEPTH, u1, v0, clr};
-    v[4] = (C3D_Vertex){x2, y2, SPRITE_Z_DEPTH, u1, v1, clr};
-    v[5] = (C3D_Vertex){x,  y2, SPRITE_Z_DEPTH, u0, v1, clr};
+    v[0] = (C3D_Vertex){x + offX,  y,  SPRITE_Z_DEPTH, u0, v0, clr};
+    v[1] = (C3D_Vertex){x2+ offX, y,  SPRITE_Z_DEPTH, u1, v0, clr};
+    v[2] = (C3D_Vertex){x + offX,  y2, SPRITE_Z_DEPTH, u0, v1, clr};
+    v[3] = (C3D_Vertex){x2+ offX, y,  SPRITE_Z_DEPTH, u1, v0, clr};
+    v[4] = (C3D_Vertex){x2+ offX, y2, SPRITE_Z_DEPTH, u1, v1, clr};
+    v[5] = (C3D_Vertex){x + offX,  y2, SPRITE_Z_DEPTH, u0, v1, clr};
 
     c3d->vertexCount += 6;
 }
 
-void C3DRenderer_drawRectangle(Renderer *renderer,
-                                float x1, float y1, float x2, float y2,
-                                uint32_t color, float alpha, bool outline)
+void C3DRenderer_drawRectangle(Renderer *renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline)
 {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
 
@@ -196,7 +170,8 @@ void C3DRenderer_drawRectangle(Renderer *renderer,
     float worldT = fminf(y1, y2);
     float worldB = fmaxf(y1, y2);
 
-    if (worldR < c3d->viewX || worldL > c3d->viewX + c3d->viewW ||
+    float maxShift = 30.0f;
+    if (worldR < c3d->viewX - maxShift || worldL > c3d->viewX + c3d->viewW + maxShift ||
         worldB < c3d->viewY || worldT > c3d->viewY + c3d->viewH) return;
 
     if (outline) {
@@ -209,25 +184,24 @@ void C3DRenderer_drawRectangle(Renderer *renderer,
         return;
     }
 
-    // Защита от переполнения VBO!
+    // Защита от переполнения VBO
     if (!checkBatch(c3d, 6, c3d->whiteTexIndex)) return;
 
     u32 clr = colorToABGR(color, alpha);
     C3D_Vertex *v = &c3d->vboData[c3d->vertexCount];
+    float offX = get3DOffset(renderer);
 
-    v[0] = (C3D_Vertex){x1, y1, SPRITE_Z_DEPTH, 0.0f, 0.0f, clr};
-    v[1] = (C3D_Vertex){x2, y1, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr};
-    v[2] = (C3D_Vertex){x1, y2, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr};
-    v[3] = (C3D_Vertex){x2, y1, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr};
-    v[4] = (C3D_Vertex){x2, y2, SPRITE_Z_DEPTH, 1.0f, 1.0f, clr};
-    v[5] = (C3D_Vertex){x1, y2, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr};
+    v[0] = (C3D_Vertex){x1 + offX, y1, SPRITE_Z_DEPTH, 0.0f, 0.0f, clr};
+    v[1] = (C3D_Vertex){x2 + offX, y1, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr};
+    v[2] = (C3D_Vertex){x1 + offX, y2, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr};
+    v[3] = (C3D_Vertex){x2 + offX, y1, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr};
+    v[4] = (C3D_Vertex){x2 + offX, y2, SPRITE_Z_DEPTH, 1.0f, 1.0f, clr};
+    v[5] = (C3D_Vertex){x1 + offX, y2, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr};
 
     c3d->vertexCount += 6;
 }
 
-void C3DRenderer_drawLine(Renderer *renderer,
-                           float x1, float y1, float x2, float y2,
-                           float width, uint32_t color, float alpha)
+void C3DRenderer_drawLine(Renderer *renderer, float x1, float y1, float x2, float y2, float width, uint32_t color, float alpha)
 {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
     float dx = x2 - x1, dy = y2 - y1;
@@ -246,39 +220,34 @@ void C3DRenderer_drawLine(Renderer *renderer,
     float worldT = fminf(y1, y2) - halfWidth;
     float worldB = fmaxf(y1, y2) + halfWidth;
 
-    if (worldR < c3d->viewX || worldL > c3d->viewX + c3d->viewW ||
+    float maxShift = 30.0f;
+    if (worldR < c3d->viewX - maxShift || worldL > c3d->viewX + c3d->viewW + maxShift ||
         worldB < c3d->viewY || worldT > c3d->viewY + c3d->viewH) return;
 
-    // ЗАЩИТА VBO: checkBatch должен возвращать bool. Если буфер полон и
-    // flushBatch не смог освободить место (например, сброс запрещен), выходим!
     if (!checkBatch(c3d, 6, c3d->whiteTexIndex)) return;
 
     u32 clr = colorToABGR(color, alpha);
     C3D_Vertex *v = &c3d->vboData[c3d->vertexCount];
+    float offX = get3DOffset(renderer);
 
-    v[0] = (C3D_Vertex){x1-nx, y1-ny, SPRITE_Z_DEPTH, 0.0f, 0.0f, clr};
-    v[1] = (C3D_Vertex){x1+nx, y1+ny, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr};
-    v[2] = (C3D_Vertex){x2-nx, y2-ny, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr};
-    v[3] = (C3D_Vertex){x1+nx, y1+ny, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr};
-    v[4] = (C3D_Vertex){x2+nx, y2+ny, SPRITE_Z_DEPTH, 1.0f, 1.0f, clr};
-    v[5] = (C3D_Vertex){x2-nx, y2-ny, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr};
+    v[0] = (C3D_Vertex){x1-nx + offX, y1-ny, SPRITE_Z_DEPTH, 0.0f, 0.0f, clr};
+    v[1] = (C3D_Vertex){x1+nx + offX, y1+ny, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr};
+    v[2] = (C3D_Vertex){x2-nx + offX, y2-ny, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr};
+    v[3] = (C3D_Vertex){x1+nx + offX, y1+ny, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr};
+    v[4] = (C3D_Vertex){x2+nx + offX, y2+ny, SPRITE_Z_DEPTH, 1.0f, 1.0f, clr};
+    v[5] = (C3D_Vertex){x2-nx + offX, y2-ny, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr};
 
     c3d->vertexCount += 6;
 }
 
-void C3DRenderer_drawLineColor(Renderer *renderer,
-                                float x1, float y1, float x2, float y2,
-                                float width,
-                                uint32_t color1, uint32_t color2, float alpha)
+void C3DRenderer_drawLineColor(Renderer *renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1, uint32_t color2, float alpha)
 {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
     float dx = x2 - x1, dy = y2 - y1;
-    float lenSq = dx * dx + dy * dy; // Используем квадрат длины
+    float lenSq = dx * dx + dy * dy;
 
     if (lenSq < (LINE_MIN_LENGTH * LINE_MIN_LENGTH)) return;
 
-    // Компиляторы ARM часто превращают (1.0f / sqrtf) в очень быструю
-    // аппаратную инструкцию rsqrte (Reverse Square Root Estimate).
     float invLen = 1.0f / sqrtf(lenSq);
     float halfWidth = width * 0.5f;
 
@@ -290,33 +259,29 @@ void C3DRenderer_drawLineColor(Renderer *renderer,
     float worldT = fminf(y1, y2) - halfWidth;
     float worldB = fmaxf(y1, y2) + halfWidth;
 
-    if (worldR < c3d->viewX || worldL > c3d->viewX + c3d->viewW ||
+    float maxShift = 30.0f;
+    if (worldR < c3d->viewX - maxShift || worldL > c3d->viewX + c3d->viewW + maxShift ||
         worldB < c3d->viewY || worldT > c3d->viewY + c3d->viewH) return;
 
-    // ЗАЩИТА VBO: checkBatch должен возвращать bool. Если буфер полон и
-    // flushBatch не смог освободить место (например, сброс запрещен), выходим!
     if (!checkBatch(c3d, 6, c3d->whiteTexIndex)) return;
     u32 clr1 = colorToABGR(color1, alpha);
     u32 clr2 = colorToABGR(color2, alpha);
     C3D_Vertex *v = &c3d->vboData[c3d->vertexCount];
+    float offX = get3DOffset(renderer);
 
-    v[0] = (C3D_Vertex){x1-nx, y1-ny, SPRITE_Z_DEPTH, 0.0f, 0.0f, clr1};
-    v[1] = (C3D_Vertex){x1+nx, y1+ny, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr1};
-    v[2] = (C3D_Vertex){x2-nx, y2-ny, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr2};
-    v[3] = (C3D_Vertex){x1+nx, y1+ny, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr1};
-    v[4] = (C3D_Vertex){x2+nx, y2+ny, SPRITE_Z_DEPTH, 1.0f, 1.0f, clr2};
-    v[5] = (C3D_Vertex){x2-nx, y2-ny, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr2};
+    v[0] = (C3D_Vertex){x1-nx+offX, y1-ny, SPRITE_Z_DEPTH, 0.0f, 0.0f, clr1};
+    v[1] = (C3D_Vertex){x1+nx+offX, y1+ny, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr1};
+    v[2] = (C3D_Vertex){x2-nx+offX, y2-ny, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr2};
+    v[3] = (C3D_Vertex){x1+nx+offX, y1+ny, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr1};
+    v[4] = (C3D_Vertex){x2+nx+offX, y2+ny, SPRITE_Z_DEPTH, 1.0f, 1.0f, clr2};
+    v[5] = (C3D_Vertex){x2-nx+offX, y2-ny, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr2};
 
     c3d->vertexCount += 6;
 }
 
-void C3DRenderer_drawText(Renderer *renderer,
-                           const char *text,
-                           float x, float y,
-                           float xscale, float yscale,
-                           float angleDeg)
+void C3DRenderer_drawText(Renderer *renderer, const char *text, float x, float y, float xscale, float yscale, float angleDeg)
 {
-    (void)angleDeg;  // TODO: повёрнутый текст не реализован
+    (void)angleDeg;
     DataWin *dw = renderer->dataWin;
 
     int32_t fontIdx = renderer->drawFont;

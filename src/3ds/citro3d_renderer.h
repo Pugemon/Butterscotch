@@ -47,7 +47,8 @@ typedef struct Citro3dRenderer {
     char              basePath[512]; /// Путь до папки с data.win (нужен для загрузки t3b)
 
     // ── GPU-ресурсы ──────────────────────────────────────────────────────────
-    C3D_RenderTarget *target;    ///< Render target (буфер кадра в VRAM)
+    C3D_RenderTarget *targetLeft; ///< Рендер таргет буфера левого глаза
+    C3D_RenderTarget *targetRight; ///< Рендер таргет буфера правого глаза
     DVLB_s           *dvlb;      ///< Скомпилированный бинарник шейдера
     shaderProgram_s   shader;    ///< Программа шейдера (vertex only)
     int8_t            uLoc_projection; ///< Локация uniform projMtx в шейдере
