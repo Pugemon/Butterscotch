@@ -85,65 +85,77 @@ void TexArchive_close(Citro3dRenderer *c3d) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Вытесняет одну LRU-текстуру. Возвращает сколько байт освободилось, или 0
- * если вытеснять нечего (все слоты пусты).
+ * Освобождает одну текстуру. Вызывает правильный free в зависимости от пула.
  *
- * ВАЖНО: сбрасывает батч ДО удаления — VBO может содержать вершины,
- * ссылающиеся на эту текстуру. Рисование с удалённой текстурой = мусор на экране.
+ * C3D_TexDelete ВСЕГДА вызывает linearFree(tex->data).
+ * Если tex->data указывает в VRAM → linearFree(vram_addr) → corruption heap.
+ * Поэтому для VRAM-текстур вызываем vramFree + memset вручную.
  */
-static size_t evictOneLRU(Citro3dRenderer *c3d) {
-    int      oldestId   = -1;
-    uint32_t oldestTime = UINT32_MAX;
+static size_t freeTexture(Citro3dRenderer *c3d, int id) {
+    if (!c3d->textures[id].data) return 0;
 
-    for (uint32_t i = 0; i < c3d->texCount; i++) {
-        if (c3d->textures[i].data != NULL && c3d->texLastUsed[i] < oldestTime) {
-            oldestTime = c3d->texLastUsed[i];
-            oldestId   = (int)i;
-        }
-    }
+    size_t freed = c3d->textures[id].size;
 
-    if (oldestId < 0) return 0;
+    // ВАЖНО: Мы полностью доверяем C3D_TexDelete.
+    // Внутри она вызовет addrIsVRAM(tex->data) и сделает правильный free.
+    C3D_TexDelete(&c3d->textures[id]);
 
-    size_t freed = c3d->textures[oldestId].size;
-    fprintf(stderr, "[T3B] Evict tex %d (frame %u, %zu bytes). VRAM: %zu → %zu\n",
-            oldestId, oldestTime, freed, c3d->vramUsed, c3d->vramUsed - freed);
+    // Очищаем структуру и сбрасываем флаг пула
+    memset(&c3d->textures[id], 0, sizeof(C3D_Tex));
+    c3d->texInVram[id] = false;
+    c3d->textures[id].data = NULL;
 
-    // Сброс батча ДО удаления — обязательно
-    extern void flushBatch(Citro3dRenderer *c3d);
-    flushBatch(c3d);
-
-    C3D_TexDelete(&c3d->textures[oldestId]);
-    c3d->textures[oldestId].data = NULL;
     c3d->vramUsed -= freed;
-
     return freed;
 }
 
 /**
- * Освобождает VRAM в цикле, пока vramUsed + needed <= VRAM_BUDGET_BYTES.
- * Возвращает false если места всё равно не хватило (некого вытеснять),
- * но загрузку не блокирует — лучше превысить бюджет, чем показать чёрный экран.
+ * Ищет LRU-текстуру из конкретного пула (VRAM или linear).
+ * Возвращает id или -1 если нет текстур в этом пуле.
  */
-static bool evictUntilFits(Citro3dRenderer *c3d, size_t needed) {
-    // Tex3DS_TextureImport(true) пробует VRAM, при нехватке падает в linear heap.
-    // Значит нам достаточно чтобы ХОТЯ БЫ ОДИН из пулов имел свободное место.
-    // Оба порога берём из констант — никаких магических чисел внутри функции.
-    while (true) {
-        u32 freeVRAM   = vramSpaceFree();
-        u32 freeLinear = linearSpaceFree();
+static int findLRU(const Citro3dRenderer *c3d, bool fromVram) {
+    int      oldestId   = -1;
+    uint32_t oldestTime = UINT32_MAX;
+    for (uint32_t i = 0; i < c3d->texCount; i++) {
+        if (!c3d->textures[i].data) continue;
+        if (c3d->texInVram[i] != fromVram) continue;
+        if (c3d->texLastUsed[i] < oldestTime) {
+            oldestTime = c3d->texLastUsed[i];
+            oldestId   = (int)i;
+        }
+    }
+    return oldestId;
+}
 
-        bool vramOk   = (freeVRAM   >= needed + VRAM_SAFE_RESERVE);
-        bool linearOk = (freeLinear >= needed + LINEAR_SAFE_RESERVE);
+/**
+ * Вытесняет одну LRU-текстуру из указанного пула.
+ * Перед удалением сбрасывает батч — GPU может ещё держать ссылку на эту текстуру.
+ */
+static size_t evictLRU(Citro3dRenderer *c3d, bool fromVram) {
+    int id = findLRU(c3d, fromVram);
+    if (id < 0) return 0;
 
-        if (vramOk || linearOk) break;
+    fprintf(stderr, "[T3B] Evict tex %d from %s (frame %u, %zu bytes)\n",
+            id, fromVram ? "VRAM" : "linear", c3d->texLastUsed[id],
+            c3d->textures[id].size);
 
-        size_t freed = evictOneLRU(c3d);
+    // Сброс батча ДО удаления: GPU мог получить draw call с этой текстурой.
+    extern void flushBatch(Citro3dRenderer *c3d);
+    flushBatch(c3d);
+
+    return freeTexture(c3d, id);
+}
+
+/**
+ * Освобождает linear heap, вытесняя linear-текстуры, пока не хватит места.
+ * Намеренно не трогает VRAM-текстуры — они linear не занимают.
+ */
+static bool evictUntilLinearFits(Citro3dRenderer *c3d, size_t needed) {
+    while (linearSpaceFree() < needed + LINEAR_SAFE_RESERVE) {
+        size_t freed = evictLRU(c3d, false /* linear */);
         if (freed == 0) {
-            // Нечего вытеснять, но места нет ни там ни там.
-            // Грузим всё равно — лучше превысить бюджет, чем показать чёрный экран.
-            fprintf(stderr, "[T3B] WARNING: no room for %zu bytes "
-                    "(freeVRAM=%u, freeLinear=%u). Loading anyway.\n",
-                    needed, freeVRAM, freeLinear);
+            fprintf(stderr, "[T3B] WARNING: no linear textures to evict for %zu bytes "
+                    "(freeLinear=%lu)\n", needed, (unsigned long)linearSpaceFree());
             return false;
         }
     }
@@ -195,48 +207,62 @@ static void *readBlob(Citro3dRenderer *c3d, int atlasId, uint32_t *outSize) {
 }
 
 /**
- * Импортирует t3x-блоб в GPU-текстуру. Обновляет vramUsed и texRealW/H.
- * Возвращает true при успехе.
+ * Импортирует t3x-блоб в GPU-текстуру.
+ *
+ * Шаг 1 — всегда загружаем в linear heap (vram=false, безопасно, никакого DMA):
+ *   Tex3DS_TextureImport(vram=false) делает memcpy прямо в tex->data (linear).
+ *   Нет GX_TextureCopy, нет race condition с рендер-тредом.
+ *
+ * Шаг 2 — опциональный promote в VRAM через CPU memcpy (только если gpuDmaSafe):
+ *   Когда Core 1 спит (между beginFrame и endFrame), CPU может писать в VRAM
+ *   напрямую по AXI-шине без кэш-флашей. Это освобождает linear heap для VM.
+ *   НЕ используем Tex3DS с vram=true — он делает асинхронный GX_TextureCopy
+ *   который конкурирует с C3D_FrameEnd на Core 1 за GSP-очередь.
+ *
+ * Шаг 3 — записываем texInVram[atlasId] для корректного освобождения позднее.
  */
 static bool importBlob(Citro3dRenderer *c3d, int atlasId, void *buf, uint32_t size) {
     C3D_Tex *tex = &c3d->textures[atlasId];
 
-    // Tex3DS_TextureImport аллоцирует linearAlloc и копирует данные.
-    // Формат ETC1A4 — Morton-упорядоченный по умолчанию, свиззл не нужен.
+    // Шаг 1: загружаем в linear heap
     Tex3DS_Texture t3x = Tex3DS_TextureImport(buf, size, tex, NULL, false);
     if (!t3x) {
         fprintf(stderr, "[T3B] Tex3DS_TextureImport failed for tex %d\n", atlasId);
         return false;
     }
 
-    void* vramPtr = vramAlloc(tex->size);
-    if (vramPtr != NULL) {
-        memcpy(vramPtr, tex->data, tex->size); // Синхронное копирование
-        linearFree(tex->data);                 // Мгновенно возвращаем FCRAM эмулятору
-        tex->data = vramPtr;                   // citro3d аппаратно поймёт, что это VRAM
-    }
-
-    // sub->width/height — логический размер спрайта внутри POT-текстуры.
-    // tex->width/height — POT-размер, нужен calcUV для правильных UV-координат.
     const Tex3DS_SubTexture *sub = Tex3DS_GetSubTexture(t3x, 0);
     c3d->texRealW[atlasId] = (int)sub->width;
     c3d->texRealH[atlasId] = (int)sub->height;
+    Tex3DS_TextureFree(t3x);  // освобождает обёртку; tex->data (linear) остаётся
 
-    C3D_TexSetFilter(tex, GPU_LINEAR, GPU_NEAREST);
+    C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-    Tex3DS_TextureFree(t3x);  // освобождаем обёртку; данные в VRAM/linear остаются
+    // Шаг 2: promote в VRAM если Core 1 спит
+    c3d->texInVram[atlasId] = false;
+    if (c3d->gpuDmaSafe) {
+        // Если VRAM полон — вытесняем старейшую VRAM-текстуру
+        if (vramSpaceFree() < tex->size + VRAM_SAFE_RESERVE) {
+            evictLRU(c3d, true /* VRAM */);
+        }
+        void *vramPtr = vramAlloc(tex->size);
+        if (vramPtr) {
+            memcpy(vramPtr, tex->data, tex->size);  // CPU copy, нет DMA
+            linearFree(tex->data);
+            tex->data = vramPtr;
+            c3d->texInVram[atlasId] = true;
+        }
+    }
 
-    c3d->vramUsed += tex->size;  // приблизительный учёт (VRAM + linear heap суммарно)
+    c3d->vramUsed += tex->size;
 
     fprintf(stderr, "[T3B] Tex %d OK: sprite=%dx%d GPU=%ux%u "
-            "size=%zu bytes (approx used=%zu, freeVRAM=%lu, freeLinear=%lu)\n",
-            atlasId,
-            c3d->texRealW[atlasId], c3d->texRealH[atlasId],
-            tex->width, tex->height,
-            tex->size, c3d->vramUsed,
-            (unsigned long)vramSpaceFree(),
-            (unsigned long)linearSpaceFree());
+            "size=%zu bytes in %s (freeVRAM=%lu freeLinear=%lu)\n",
+            atlasId, c3d->texRealW[atlasId], c3d->texRealH[atlasId],
+            tex->width, tex->height, tex->size,
+            c3d->texInVram[atlasId] ? "VRAM" : "linear",
+            (unsigned long)vramSpaceFree(), (unsigned long)linearSpaceFree());
 
     return true;
 }
@@ -260,9 +286,7 @@ void ensureAtlasLoaded(Citro3dRenderer *c3d, int atlasId) {
     void *buf = readBlob(c3d, atlasId, &size);
     if (!buf) return;
 
-    // Оцениваем нужный VRAM по размеру блоба: для ETC1A4 это точный размер.
-    // evictUntilFits вытеснит LRU-текстуры пока не освободится место.
-    evictUntilFits(c3d, (size_t)size);
+    evictUntilLinearFits(c3d, (size_t)size);
 
     bool ok = importBlob(c3d, atlasId, buf, size);
     free(buf);  // освобождаем сразу: Tex3DS_TextureImport уже скопировал в linearAlloc

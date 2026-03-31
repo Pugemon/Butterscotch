@@ -141,6 +141,7 @@ void C3DRenderer_initTextures(Citro3dRenderer *c3d, DataWin *dataWin) {
     c3d->texRealW    = (int      *)safeCalloc(texCount + 1, sizeof(int));
     c3d->texRealH    = (int      *)safeCalloc(texCount + 1, sizeof(int));
     c3d->texLastUsed = (uint32_t *)safeCalloc(texCount + 1, sizeof(uint32_t));
+    c3d->texInVram   = (bool     *)safeCalloc(texCount + 1, sizeof(bool));
 
     // Белая текстура — всегда загружена, занимает слот сразу за игровыми
     c3d->whiteTexIndex = (int)texCount;
@@ -206,7 +207,9 @@ void C3DRenderer_destroy(Renderer *renderer) {
         c3d->decodeThread = NULL;
     }
 
-    // Удаляем все загруженные текстуры (включая белую заглушку = texCount-й слот)
+    // Удаляем все загруженные текстуры (включая белую заглушку = texCount-й слот).
+    // C3D_TexDelete самостоятельно определяет (через addrIsVRAM),
+    // нужно ли вызывать vramFree или linearFree.
     for (uint32_t i = 0; i <= c3d->texCount; i++) {
         if (c3d->textures[i].data) {
             C3D_TexDelete(&c3d->textures[i]);

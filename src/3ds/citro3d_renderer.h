@@ -64,7 +64,20 @@ typedef struct Citro3dRenderer {
     // ── LRU-кэш текстур ───────────────────────────────────────────────────────
     uint32_t *texLastUsed;  ///< texLastUsed[i] = currentFrame последнего использования
     uint32_t  currentFrame; ///< Счётчик кадров (инкрементируется в beginFrame)
-    size_t    vramUsed;     ///< Суммарный tex->size загруженных текстур (без белой заглушки)
+    size_t    vramUsed;     ///< Суммарный tex->size загруженных текстур (VRAM + linear)
+
+    /**
+     * Флаг безопасности CPU-копирования в VRAM.
+     * true  — Core 1 спит в LightEvent_Wait, можно делать memcpy в VRAM.
+     * false — Core 1 может быть в C3D_FrameEnd, трогать VRAM небезопасно.
+     * Устанавливается в beginFrame, снимается в endFrame.
+     */
+    bool  gpuDmaSafe;
+
+    /**
+     * texInVram[i] = true → tex->data для текстуры i указывает в VRAM.
+     */
+    bool     *texInVram;
 
     // ── VBO и состояние батча ─────────────────────────────────────────────────
     C3D_Vertex *vboData;       ///< Вершинный буфер в linearAlloc (MAX_VERTICES вершин)
