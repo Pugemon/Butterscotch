@@ -434,6 +434,15 @@ RValue VMBuiltins_getVariable(VMContext *ctx, Variable* varDef, int32_t arrayInd
         case B_VIEW_VISIBLE: if(arrayIndex >= 0 && arrayIndex < 8) runner->currentRoom->views[arrayIndex].enabled = RValue_toBool(val); break;
         case B_VIEW_ANGLE: if(arrayIndex >= 0 && arrayIndex < 8) runner->viewAngles[arrayIndex] = (float)RValue_toReal(val); break;
 
+        // Бекграунд
+        case B_BG_VISIBLE: if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) runner->backgrounds[arrayIndex].visible = RValue_toBool(val); break;
+        case B_BG_INDEX: if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) runner->backgrounds[arrayIndex].backgroundIndex = RValue_toInt32(val); break;
+        case B_BG_X: if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) runner->backgrounds[arrayIndex].x = RValue_toReal(val); break;
+        case B_BG_Y: if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) runner->backgrounds[arrayIndex].y = RValue_toReal(val); break;
+        case B_BG_HSPEED: if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) runner->backgrounds[arrayIndex].speedX = RValue_toReal(val); break;
+        case B_BG_VSPEED: if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) runner->backgrounds[arrayIndex].speedY = RValue_toReal(val); break;
+        case B_BG_ALPHA: if (arrayIndex >= 0 && MAX_BACKGROUNDS > arrayIndex) runner->backgrounds[arrayIndex].alpha = RValue_toReal(val); break;
+
         // Аргументы (если скрипт меняет свои аргументы)
         case B_ARGUMENT:
             if (ctx->scriptArgs && arrayIndex >= 0 && arrayIndex < ctx->scriptArgCount) {

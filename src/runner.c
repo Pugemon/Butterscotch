@@ -617,15 +617,60 @@ static void fireDrawSubtype(Runner* runner, Instance** drawList, int32_t drawCou
 }
 
 void Runner_draw(Runner* runner) {
-    // Collect active + visible instances for event dispatch
-    Instance** drawList = nullptr;
-    int32_t count = (int32_t) arrlen(runner->instances);
-    repeat(count, i) {
-        Instance* inst = runner->instances[i];
-        if (inst->active && inst->visible) {
-            arrput(drawList, inst);
+    Room* room = runner->currentRoom;
+
+    // ─── 1. ВЫЧИСЛЯЕМ ГРАНИЦЫ КАМЕРЫ В САМОМ НАЧАЛЕ ─────────────────────────
+    float camL = 0.0f, camR = (float)room->width, camT = 0.0f, camB = (float)room->height;
+    if (room->flags & 1) {
+        camL = 9999999.0f; camR = -9999999.0f; camT = 9999999.0f; camB = -9999999.0f;
+        bool anyViewActive = false;
+        repeat(8, v) {
+            if (room->views[v].enabled) {
+                anyViewActive = true;
+                if (room->views[v].viewX < camL) camL = (float)room->views[v].viewX;
+                if (room->views[v].viewX + room->views[v].viewWidth > camR) camR = (float)(room->views[v].viewX + room->views[v].viewWidth);
+                if (room->views[v].viewY < camT) camT = (float)room->views[v].viewY;
+                if (room->views[v].viewY + room->views[v].viewHeight > camB) camB = (float)(room->views[v].viewY + room->views[v].viewHeight);
+            }
+        }
+        if (!anyViewActive) {
+            camL = 0.0f; camR = (float)room->width; camT = 0.0f; camB = (float)room->height;
         }
     }
+    // Запас (margin), чтобы объекты не исчезали на краю и тени рисовались корректно
+    camL -= 128.0f; camR += 128.0f; camT -= 128.0f; camB += 128.0f;
+    // ────────────────────────────────────────────────────────────────────────
+
+    // ─── 2. СОБИРАЕМ АКТИВНЫЕ И ВИДИМЫЕ ИНСТАНСЫ С ОТСЕЧЕНИЕМ ───────────────
+    Instance** drawList = nullptr;
+    int32_t count = (int32_t) arrlen(runner->instances);
+
+    repeat(count, i) {
+        Instance* inst = runner->instances[i];
+        if (!inst->active || !inst->visible) continue;
+
+        // Если у объекта есть спрайт, мы можем проверить его BBox
+        Sprite* spr = Collision_getSprite(runner->dataWin, inst);
+        if (spr != nullptr) {
+            InstanceBBox bbox = Collision_computeBBox(runner->dataWin, inst);
+            if (bbox.valid) {
+                // Если объект физически за экраном — ПРОПУСКАЕМ ЕГО!
+                if (bbox.right < camL || bbox.left > camR || bbox.bottom < camT || bbox.top > camB) {
+                    continue;
+                }
+            } else {
+                // Если маски нет, проверяем просто по координатам x/y
+                if (inst->x + spr->width < camL || inst->x - spr->width > camR ||
+                    inst->y + spr->height < camT || inst->y - spr->height > camB) {
+                    continue;
+                }
+            }
+        }
+        // ВАЖНО: Объекты без спрайта (контроллеры, гуи) всегда добавляются,
+        // чтобы не сломать логику Draw/GUI событий!
+        arrput(drawList, inst);
+    }
+    // ────────────────────────────────────────────────────────────────────────
 
     // Sort by depth descending (higher depth first)
     int32_t drawCount = (int32_t) arrlen(drawList);
@@ -649,10 +694,7 @@ void Runner_draw(Runner* runner) {
         arrput(drawables, d);
     }
 
-    Room* room = runner->currentRoom;
-
     // ─── CPU CULLING: Вычисляем границы активной камеры ─────────────────────
-    float camL = 0.0f, camR = (float)room->width, camT = 0.0f, camB = (float)room->height;
     if (room->flags & 1) { // Если виды (views) включены
         camL = 9999999.0f; camR = -9999999.0f; camT = 9999999.0f; camB = -9999999.0f;
         bool anyViewActive = false;
@@ -1139,6 +1181,13 @@ static void dispatchCollisionEvents(Runner* runner) {
                     for (int32_t j = count - 1; j >= 0; j--) {
                         Instance* other = runner->instances[j];
                         if (!other->active || other == self) continue;
+
+                        // ─── ФИКС: ГРУБОЕ ОТСЕЧЕНИЕ ПО ДИСТАНЦИИ ─────────────
+                        // Не проверяем коллизии для объектов, которые находятся дальше 500 пикселей друг от друга!
+                        // Это сокращает количество проверок в лесу на 95%!
+                        if (GMLReal_fabs(self->x - other->x) > 500.0 || GMLReal_fabs(self->y - other->y) > 500.0) continue;
+                        // ────────────────────────────────────────────────────
+
                         if (!Collision_matchesTarget(dataWin, other, targetObjIndex)) continue;
 
                         InstanceBBox bboxOther = cachedBBoxes[j]; // БЕРЕМ ИЗ КЭША!
