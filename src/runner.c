@@ -649,13 +649,52 @@ void Runner_draw(Runner* runner) {
         arrput(drawables, d);
     }
 
-    // Add tiles (skip hidden layers)
     Room* room = runner->currentRoom;
+
+    // ─── CPU CULLING: Вычисляем границы активной камеры ─────────────────────
+    float camL = 0.0f, camR = (float)room->width, camT = 0.0f, camB = (float)room->height;
+    if (room->flags & 1) { // Если виды (views) включены
+        camL = 9999999.0f; camR = -9999999.0f; camT = 9999999.0f; camB = -9999999.0f;
+        bool anyViewActive = false;
+        repeat(8, v) {
+            if (room->views[v].enabled) {
+                anyViewActive = true;
+                if (room->views[v].viewX < camL) camL = (float)room->views[v].viewX;
+                if (room->views[v].viewX + room->views[v].viewWidth > camR) camR = (float)(room->views[v].viewX + room->views[v].viewWidth);
+                if (room->views[v].viewY < camT) camT = (float)room->views[v].viewY;
+                if (room->views[v].viewY + room->views[v].viewHeight > camB) camB = (float)(room->views[v].viewY + room->views[v].viewHeight);
+            }
+        }
+        if (!anyViewActive) {
+            camL = 0.0f; camR = (float)room->width; camT = 0.0f; camB = (float)room->height;
+        }
+    }
+    // Добавляем запас (margin), чтобы тайлы не исчезали на самом краю экрана
+    camL -= 64.0f; camR += 64.0f; camT -= 64.0f; camB += 64.0f;
+    // ────────────────────────────────────────────────────────────────────────
+
+    // Add tiles (skip hidden layers AND off-screen tiles)
     repeat(room->tileCount, i) {
         RoomTile* tile = &currentRoomTiles[i];
+
         // Check if this tile's layer is hidden
         ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
         if (layerIdx >= 0 && !runner->tileLayerMap[layerIdx].value.visible) continue;
+
+        // ─── БЫСТРОЕ ОТСЕЧЕНИЕ (CPU Culling) ────────────────────────────────
+        float scaledW = (float)tile->width * tile->scaleX;
+        float scaledH = (float)tile->height * tile->scaleY;
+
+        float tL = (float)tile->x + fminf(0.0f, scaledW);
+        float tR = (float)tile->x + fmaxf(0.0f, scaledW);
+        float tT = (float)tile->y + fminf(0.0f, scaledH);
+        float tB = (float)tile->y + fmaxf(0.0f, scaledH);
+
+        // Если тайл физически не попадает в границы камеры — ПРОПУСКАЕМ ЕГО!
+        if (tR < camL || tL > camR || tB < camT || tT > camB) {
+            continue; // Тайл не добавится в drawables и не пойдет в qsort!
+        }
+        // ────────────────────────────────────────────────────────────────────
 
         Drawable d = { .type = DRAWABLE_TILE, .depth = tile->tileDepth, .tileIndex = (int32_t) i };
         arrput(drawables, d);
