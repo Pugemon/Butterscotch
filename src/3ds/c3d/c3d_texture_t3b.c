@@ -116,14 +116,24 @@ static size_t freeTexture(Citro3dRenderer *c3d, int id) {
 static int findLRU(const Citro3dRenderer *c3d, bool fromVram) {
     int      oldestId   = -1;
     uint32_t oldestTime = UINT32_MAX;
+
     for (uint32_t i = 0; i < c3d->texCount; i++) {
         if (!c3d->textures[i].data) continue;
         if (c3d->texInVram[i] != fromVram) continue;
+
+        // Если текстура использовалась (ensureAtlasLoaded) в текущем кадре,
+        // её удалять КАТЕГОРИЧЕСКИ нельзя! GPU уже получил команды на отрисовку с ней,
+        // и эти команды будут выполнены только в конце кадра.
+        if (c3d->texLastUsed[i] == c3d->currentFrame) {
+            continue;
+        }
+
         if (c3d->texLastUsed[i] < oldestTime) {
             oldestTime = c3d->texLastUsed[i];
             oldestId   = (int)i;
         }
     }
+
     return oldestId;
 }
 

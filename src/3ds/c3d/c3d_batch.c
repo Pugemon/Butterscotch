@@ -8,6 +8,8 @@
 #include <citro3d.h>
 #include <string.h>
 
+#include "c3d_texture_t3b.h"
+
 void flushBatch(Citro3dRenderer *c3d) {
     int count = c3d->vertexCount - c3d->batchStart;
     if (count <= 0) return;
@@ -32,21 +34,26 @@ void flushBatch(Citro3dRenderer *c3d) {
     c3d->batchStart = c3d->vertexCount;
 }
 
-void checkBatch(Citro3dRenderer *c3d, int verts, int texIdx) {
-    bool texChanged  = (c3d->currentTexIndex != texIdx);
-    bool bufferFull  = (c3d->vertexCount + verts > MAX_VERTICES);
-
-    if (texChanged || bufferFull) {
+bool checkBatch(Citro3dRenderer *c3d, int verts, int texIdx) {
+    // 1. Смена текстуры (логический разрыв батча)
+    if (c3d->currentTexIndex != texIdx) {
         flushBatch(c3d);
         c3d->currentTexIndex = texIdx;
-
-        // Если VBO полностью заполнен после сброса — перезаписываем с начала.
-        // К этому моменту GPU уже завершил отрисовку сброшенного батча.
-        if (c3d->vertexCount + verts > MAX_VERTICES) {
-            c3d->vertexCount = 0;
-            c3d->batchStart  = 0;
-        }
+        // Загружаем текстуру (только если она нужна для новых вершин)
+        ensureAtlasLoaded(c3d, texIdx);
     }
+
+    // 2. ЗАЩИТА ОТ ПЕРЕПОЛНЕНИЯ VBO
+    if (c3d->vertexCount + verts > MAX_VERTICES) {
+        // Мы не можем просто сбросить vertexCount = 0, потому что GPU
+        // ещё не отрендерил этот кадр и нуждается в этих данных!
+        // Единственный правильный выход — отбросить новые вершины (обрезать отрисовку).
+        // Если вы видите это сообщение в логах — значит у вас не работает Culling!
+        fprintf(stderr, "[!] VBO OVERFLOW! Dropping vertices. Add Frustum Culling!\n");
+        return false;
+    }
+
+    return true;
 }
 
 void calcUV(const C3D_Tex *tex, float srcX, float srcY, float srcW, float srcH, float *u0, float *v0, float *u1, float *v1) {

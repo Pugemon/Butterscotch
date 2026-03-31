@@ -66,7 +66,7 @@ void flushBatch(Citro3dRenderer *c3d);
  * @param verts  Сколько вершин планируется добавить (обычно 6 для спрайта)
  * @param texIdx Индекс текстуры, которая будет использоваться
  */
-void checkBatch(Citro3dRenderer *c3d, int verts, int texIdx);
+bool checkBatch(Citro3dRenderer *c3d, int verts, int texIdx);
 
 /**
  * @brief Вычисляет UV-координаты прямоугольника в текстуре.

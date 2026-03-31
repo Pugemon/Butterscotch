@@ -37,9 +37,12 @@ static inline C3D_Vertex *prepareQuad(Citro3dRenderer *c3d,
     TexturePageItem *tpag = &renderer->dataWin->tpag.items[tpagIndex];
     int pid = tpag->texturePageId;
 
-    ensureAtlasLoaded(c3d, pid);
+    /// Теперь текстуры загружает checkBatch
+    //ensureAtlasLoaded(c3d, pid);
     //ensureTextureLoaded(c3d, pid);
-    checkBatch(c3d, 6, pid);
+    if (!checkBatch(c3d, 6, tpagIndex)) {
+        return NULL; // VBO переполнен, отказываемся выдавать вершины
+    }
 
     calcUV(&c3d->textures[pid], srcX, srcY, srcW, srcH, u0, v0, u1, v1);
     return &c3d->vboData[c3d->vertexCount];
@@ -141,9 +144,25 @@ void C3DRenderer_drawSpritePart(Renderer *renderer,
                                  uint32_t color, float alpha)
 {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
+
+    // ── 2D FRUSTUM CULLING (FAST PATH) ───────────────────────────────────────
+    float scaledW = (float)srcW * xscale;
+    float scaledH = (float)srcH * yscale;
+
+    // Поддержка отрицательного скейла (отражение спрайта)
+    float worldL = x + fminf(0.0f, scaledW);
+    float worldR = x + fmaxf(0.0f, scaledW);
+    float worldT = y + fminf(0.0f, scaledH);
+    float worldB = y + fmaxf(0.0f, scaledH);
+
+    // Если кусок спрайта вне экрана — пропускаем! (Это спасёт FPS на больших картах)
+    if (worldR < c3d->viewX || worldL > c3d->viewX + c3d->viewW ||
+        worldB < c3d->viewY || worldT > c3d->viewY + c3d->viewH) return;
+
     TexturePageItem *tpag = &renderer->dataWin->tpag.items[tpagIndex];
 
     float u0, v0, u1, v1;
+    // ВАЖНО: Убедитесь, что prepareQuad внутри вызывает checkBatch(c3d, 6, tpagIndex)!
     C3D_Vertex *v = prepareQuad(c3d, renderer, tpagIndex,
                                  (float)(tpag->sourceX + srcOffX),
                                  (float)(tpag->sourceY + srcOffY),
@@ -151,8 +170,8 @@ void C3DRenderer_drawSpritePart(Renderer *renderer,
                                  &u0, &v0, &u1, &v1);
     if (!v) return;
 
-    float x2 = x + (float)srcW * xscale;
-    float y2 = y + (float)srcH * yscale;
+    float x2 = x + scaledW;
+    float y2 = y + scaledH;
     u32 clr  = colorToABGR(color, alpha);
 
     v[0] = (C3D_Vertex){x,  y,  SPRITE_Z_DEPTH, u0, v0, clr};
@@ -171,8 +190,18 @@ void C3DRenderer_drawRectangle(Renderer *renderer,
 {
     Citro3dRenderer *c3d = (Citro3dRenderer *)renderer;
 
+    // ── CULLING ─────────────────────────────────────────────────────────────
+    float worldL = fminf(x1, x2);
+    float worldR = fmaxf(x1, x2);
+    float worldT = fminf(y1, y2);
+    float worldB = fmaxf(y1, y2);
+
+    if (worldR < c3d->viewX || worldL > c3d->viewX + c3d->viewW ||
+        worldB < c3d->viewY || worldT > c3d->viewY + c3d->viewH) return;
+
     if (outline) {
-        // Обводка = 4 линии по периметру
+        // Обводка = 4 линии по периметру (drawLine сама проверит culling, если нужно,
+        // но мы уже отсекли прямоугольник целиком, что быстрее)
         renderer->vtable->drawLine(renderer, x1, y1, x2, y1, 1.0f, color, alpha);
         renderer->vtable->drawLine(renderer, x2, y1, x2, y2, 1.0f, color, alpha);
         renderer->vtable->drawLine(renderer, x2, y2, x1, y2, 1.0f, color, alpha);
@@ -180,11 +209,12 @@ void C3DRenderer_drawRectangle(Renderer *renderer,
         return;
     }
 
-    checkBatch(c3d, 6, c3d->whiteTexIndex);
+    // Защита от переполнения VBO!
+    if (!checkBatch(c3d, 6, c3d->whiteTexIndex)) return;
+
     u32 clr = colorToABGR(color, alpha);
     C3D_Vertex *v = &c3d->vboData[c3d->vertexCount];
 
-    // UV (0,0)..(1,1) — сэмплируем центр белой текстуры, цвет чисто от вершины
     v[0] = (C3D_Vertex){x1, y1, SPRITE_Z_DEPTH, 0.0f, 0.0f, clr};
     v[1] = (C3D_Vertex){x2, y1, SPRITE_Z_DEPTH, 1.0f, 0.0f, clr};
     v[2] = (C3D_Vertex){x1, y2, SPRITE_Z_DEPTH, 0.0f, 1.0f, clr};
@@ -211,7 +241,18 @@ void C3DRenderer_drawLine(Renderer *renderer,
     float nx = -dy * invLen * halfWidth;
     float ny =  dx * invLen * halfWidth;
 
-    checkBatch(c3d, 6, c3d->whiteTexIndex);
+    float worldL = fminf(x1, x2) - halfWidth;
+    float worldR = fmaxf(x1, x2) + halfWidth;
+    float worldT = fminf(y1, y2) - halfWidth;
+    float worldB = fmaxf(y1, y2) + halfWidth;
+
+    if (worldR < c3d->viewX || worldL > c3d->viewX + c3d->viewW ||
+        worldB < c3d->viewY || worldT > c3d->viewY + c3d->viewH) return;
+
+    // ЗАЩИТА VBO: checkBatch должен возвращать bool. Если буфер полон и
+    // flushBatch не смог освободить место (например, сброс запрещен), выходим!
+    if (!checkBatch(c3d, 6, c3d->whiteTexIndex)) return;
+
     u32 clr = colorToABGR(color, alpha);
     C3D_Vertex *v = &c3d->vboData[c3d->vertexCount];
 
@@ -244,7 +285,17 @@ void C3DRenderer_drawLineColor(Renderer *renderer,
     float nx = -dy * invLen * halfWidth;
     float ny =  dx * invLen * halfWidth;
 
-    checkBatch(c3d, 6, c3d->whiteTexIndex);
+    float worldL = fminf(x1, x2) - halfWidth;
+    float worldR = fmaxf(x1, x2) + halfWidth;
+    float worldT = fminf(y1, y2) - halfWidth;
+    float worldB = fmaxf(y1, y2) + halfWidth;
+
+    if (worldR < c3d->viewX || worldL > c3d->viewX + c3d->viewW ||
+        worldB < c3d->viewY || worldT > c3d->viewY + c3d->viewH) return;
+
+    // ЗАЩИТА VBO: checkBatch должен возвращать bool. Если буфер полон и
+    // flushBatch не смог освободить место (например, сброс запрещен), выходим!
+    if (!checkBatch(c3d, 6, c3d->whiteTexIndex)) return;
     u32 clr1 = colorToABGR(color1, alpha);
     u32 clr2 = colorToABGR(color2, alpha);
     C3D_Vertex *v = &c3d->vboData[c3d->vertexCount];
