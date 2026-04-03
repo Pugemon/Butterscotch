@@ -18,20 +18,16 @@ Drop-in replacement for `<GLES/gl.h>` that maps fixed-function GL calls to Citro
 
 ## Building
 
-Requires [devkitPro](https://devkitpro.org/) with devkitARM, libctru, and citro3d installed.
+Requires [devkitPro](https://devkitpro.org/) with devkitARM, libctru, citro3d, and CMake 3.13+ installed.
 
 ```bash
-# Build library and all examples
+mkdir build && cd build
+cmake -DCMAKE_TOOLCHAIN_FILE=../cmake/DevkitArm3DS.cmake ..
 make
 
-# Build only the library
-cd src && make
-
-# Build a single example
-cd examples/01_triangle && make
-
-# Clean everything
-make clean
+# Build without examples
+cmake -DCMAKE_TOOLCHAIN_FILE=../cmake/DevkitArm3DS.cmake -DGL2CITRO3D_BUILD_EXAMPLES=OFF ..
+make
 ```
 
 ## Project Structure
@@ -42,14 +38,16 @@ gl2citro3d/
 │   └── gl2citro3d.h          # Public API header (replaces <GLES/gl.h>)
 ├── src/
 │   ├── gl2citro3d.c           # Implementation (~1700 lines)
-│   └── Makefile               # Builds libgl2citro3d.a
+│   └── CMakeLists.txt         # Builds libgl2citro3d.a
 ├── shaders/
 │   └── gl2citro3d_shader.pica # PICA200 vertex shader
+├── cmake/
+│   └── DevkitArm3DS.cmake     # Toolchain file for cross-compilation
 ├── examples/
 │   ├── 01_triangle/           # Colored triangle (vertex colors, orthographic)
 │   ├── 02_textured_quad/      # Textured quad (texture loading, UV repeat)
 │   └── 03_rotating_cube/      # Rotating cube (perspective, depth test, transforms)
-├── Makefile                   # Top-level build
+├── CMakeLists.txt             # Top-level build
 └── README.md
 ```
 
@@ -57,10 +55,9 @@ gl2citro3d/
 
 ### Integration
 
-1. Build the library: `cd src && make`
+1. Add as a CMake subdirectory or build separately
 2. Include the header: `#include "gl2citro3d.h"`
-3. Link against: `-lgl2citro3d -lcitro3d -lctru -lm`
-4. Add include/lib paths to your Makefile
+3. Link with CMake: `target_link_libraries(your_app PRIVATE gl2citro3d)`
 
 ### Initialization
 
