@@ -45,6 +45,10 @@ typedef struct {
     // When lazyLoadRooms is true, this list indicates which rooms should be loaded during load time instead of demand. They will also not be freed.
     StringBooleanEntry* eagerlyLoadedRooms;
 
+    bool skipTextureBlobData;
+    bool skipAudioBlobData;
+    const char* codeCachePath;
+
     // Optional progress callback, called before each chunk is parsed.
     // chunkName: 4-character chunk name (e.g. "GEN8", "SPRT")
     // chunkIndex: 0-based index of the current chunk being parsed
@@ -843,6 +847,7 @@ typedef struct DataWin {
     FILE* lazyLoadFile;
     char* lazyLoadFilePath;     // owned strdup of the original file path, for diagnostics
     bool lazyLoadRooms;          // mirrors the parser option so Runner can branch without re-reading options
+    char* filePath;
 } DataWin;
 
 DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options);

@@ -55,14 +55,25 @@ typedef struct {
     void (*drawSpritePart)(Renderer* renderer, int32_t tpagIndex, int32_t srcOffX, int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y, float xscale, float yscale, float angleDeg, float pivotX, float pivotY, uint32_t color, float alpha);
     void (*drawSpritePos)(Renderer* renderer, int32_t tpagIndex, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float alpha);
     void (*drawRectangle)(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t color, float alpha, bool outline);
+    void (*drawRectangleColor)(Renderer* renderer, float x1, float y1, float x2, float y2, uint32_t col1, uint32_t col2, uint32_t col3, uint32_t col4, float alpha, bool outline);
     void (*drawLine)(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color, float alpha);
     void (*drawTriangle)(Renderer *renderer, float x1, float y1, float x2, float y2, float x3, float y3, bool outline);
+    void (*drawTriangleColor)(Renderer* renderer, float x1, float y1, float x2, float y2, float x3, float y3, uint32_t col1, uint32_t col2, uint32_t col3, float alpha, bool outline);
     void (*drawLineColor)(Renderer* renderer, float x1, float y1, float x2, float y2, float width, uint32_t color1, uint32_t color2, float alpha);
     void (*drawText)(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg);
     void (*drawTextColor)(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t c1, int32_t c2, int32_t c3, int32_t c4, float alpha);
     void (*flush)(Renderer* renderer);
     int32_t (*createSpriteFromSurface)(Renderer* renderer, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
+    int32_t (*createSpriteFromSurfaceEx)(Renderer* renderer, int32_t surfaceId, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
     void (*deleteSprite)(Renderer* renderer, int32_t spriteIndex);
+    int32_t (*createSurface)(Renderer* renderer, int32_t width, int32_t height);
+    void (*freeSurface)(Renderer* renderer, int32_t surfaceId);
+    bool (*surfaceExists)(Renderer* renderer, int32_t surfaceId);
+    bool (*surfaceGetSize)(Renderer* renderer, int32_t surfaceId, int32_t* width, int32_t* height);
+    bool (*surfaceSetTarget)(Renderer* renderer, int32_t surfaceId);
+    void (*surfaceResetTarget)(Renderer* renderer);
+    void (*drawSurface)(Renderer* renderer, int32_t surfaceId, float x, float y, float xscale, float yscale, float angleDeg, uint32_t color, float alpha);
+    void (*clearTarget)(Renderer* renderer, uint32_t color, float alpha);
     void (*gpuSetBlendMode)(Renderer* renderer, int32_t mode);
     void (*gpuSetBlendModeExt)(Renderer* renderer, int32_t sfactor, int32_t dfactor);
     void (*gpuSetBlendEnable)(Renderer* renderer, bool enable);
@@ -76,6 +87,12 @@ typedef struct {
     // Optional: tile a source sub-rect (in tpag source-page space) across a dest rect, for nine-slice Repeat/BlankRepeat at angle 0.
     // srcX/srcY are post tpag->targetX/Y. nullptr = per-tile drawSpritePart fallback (also used for Mirror and non-zero angle).
     void (*drawTiledPart)(Renderer* renderer, int32_t tpagIndex, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH, float dstX, float dstY, float dstW, float dstH, uint32_t color, float alpha);
+    void (*drawCircle)(Renderer* renderer, float x, float y, float radius, uint32_t color, float alpha, bool outline, int32_t precision);
+    void (*drawEllipse)(Renderer* renderer, float cx, float cy, float rx, float ry, uint32_t color, float alpha, bool outline, int32_t precision);
+    void (*drawRoundrect)(Renderer* renderer, float x1, float y1, float x2, float y2, float radx, float rady, uint32_t color, float alpha, bool outline, int32_t precision);
+    void (*onRoomChanged)(Renderer* renderer, int32_t roomIndex);
+    void (*setBlendMode)(Renderer* renderer, int32_t mode);
+    void (*set3DDepthOffset)(Renderer* renderer, float depth);
 } RendererVtable;
 
 // ===[ Renderer Base Struct ]===
@@ -88,6 +105,7 @@ struct Renderer {
     int32_t drawFont;    // default -1 (no font)
     int32_t drawHalign;  // 0=left, 1=center, 2=right
     int32_t drawValign;  // 0=top, 1=middle, 2=bottom
+    int32_t circlePrecision;
 };
 
 // ===[ Shared Helpers (platform-agnostic) ]===
@@ -201,6 +219,38 @@ static void Renderer_drawSpritePartExt(Renderer* renderer, int32_t spriteIndex, 
 // Partial draw: draw_sprite_part(sprite, subimg, left, top, width, height, x, y)
 static void Renderer_drawSpritePart(Renderer* renderer, int32_t spriteIndex, int32_t subimg, int32_t left, int32_t top, int32_t width, int32_t height, float x, float y) {
     Renderer_drawSpritePartExt(renderer, spriteIndex, subimg, left, top, width, height, x, y, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFF, renderer->drawAlpha);
+}
+
+static void Renderer_drawCircle(Renderer* renderer, float x, float y, float radius, bool outline) {
+    if (renderer->vtable->drawCircle != nullptr) {
+        renderer->vtable->drawCircle(renderer, x, y, radius, renderer->drawColor, renderer->drawAlpha, outline, renderer->circlePrecision);
+    }
+}
+
+static void Renderer_drawEllipse(Renderer* renderer, float x1, float y1, float x2, float y2, bool outline) {
+    if (renderer->vtable->drawEllipse == nullptr) return;
+    if (x1 > x2) {
+        float t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y1 > y2) {
+        float t = y1;
+        y1 = y2;
+        y2 = t;
+    }
+
+    float cx = (x1 + x2) * 0.5f;
+    float cy = (y1 + y2) * 0.5f;
+    float rx = (x2 - x1) * 0.5f;
+    float ry = (y2 - y1) * 0.5f;
+    renderer->vtable->drawEllipse(renderer, cx, cy, rx, ry, renderer->drawColor, renderer->drawAlpha, outline, renderer->circlePrecision);
+}
+
+static void Renderer_drawRoundrect(Renderer* renderer, float x1, float y1, float x2, float y2, bool outline) {
+    if (renderer->vtable->drawRoundrect != nullptr) {
+        renderer->vtable->drawRoundrect(renderer, x1, y1, x2, y2, 10.0f, 10.0f, renderer->drawColor, renderer->drawAlpha, outline, renderer->circlePrecision);
+    }
 }
 
 // Resolves tpag and converts nine-slice bounding-box coords to tpag source-page space for drawTiledPart.

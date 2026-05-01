@@ -5380,6 +5380,148 @@ static RValue builtin_drawRectangleColor(VMContext* ctx, RValue* args, MAYBE_UNU
     return RValue_makeUndefined();
 }
 
+static RValue builtin_draw_clear(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (1 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer != nullptr) {
+        uint32_t color = (uint32_t) RValue_toInt32(args[0]);
+        if (runner->renderer->vtable->clearTarget != nullptr) {
+            runner->renderer->vtable->clearTarget(runner->renderer, color, 1.0f);
+        } else {
+            runner->renderer->vtable->drawRectangle(runner->renderer, -5000, -5000, 5000, 5000, color, 1.0f, false);
+        }
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_clear_alpha(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (2 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer != nullptr) {
+        uint32_t color = (uint32_t) RValue_toInt32(args[0]);
+        float alpha = (float) RValue_toReal(args[1]);
+        if (runner->renderer->vtable->clearTarget != nullptr) {
+            runner->renderer->vtable->clearTarget(runner->renderer, color, alpha);
+        } else {
+            runner->renderer->vtable->drawRectangle(runner->renderer, -5000, -5000, 5000, 5000, color, alpha, false);
+        }
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_set_blend_mode(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (1 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer != nullptr) {
+        if (runner->renderer->vtable->setBlendMode != nullptr) {
+            runner->renderer->vtable->setBlendMode(runner->renderer, RValue_toInt32(args[0]));
+        } else if (runner->renderer->vtable->gpuSetBlendMode != nullptr) {
+            runner->renderer->vtable->gpuSetBlendMode(runner->renderer, RValue_toInt32(args[0]));
+        }
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_set_circle_precision(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer != nullptr) {
+        runner->renderer->circlePrecision = RValue_toInt32(args[0]);
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_circle(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (4 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    Renderer_drawCircle(runner->renderer, (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]), (float) RValue_toReal(args[2]), RValue_toBool(args[3]));
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_circle_color(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (6 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    uint32_t prevColor = runner->renderer->drawColor;
+    runner->renderer->drawColor = (uint32_t) RValue_toInt32(args[3]);
+    Renderer_drawCircle(runner->renderer, (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]), (float) RValue_toReal(args[2]), RValue_toBool(args[5]));
+    runner->renderer->drawColor = prevColor;
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_line_color(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (6 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->drawLineColor == nullptr) {
+        return RValue_makeUndefined();
+    }
+    runner->renderer->vtable->drawLineColor(runner->renderer,
+                                            (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                                            (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]),
+                                            1.0f,
+                                            (uint32_t) RValue_toInt32(args[4]),
+                                            (uint32_t) RValue_toInt32(args[5]),
+                                            runner->renderer->drawAlpha);
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_triangle_color(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (10 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->drawTriangleColor == nullptr) {
+        return RValue_makeUndefined();
+    }
+    runner->renderer->vtable->drawTriangleColor(runner->renderer,
+                                                (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]),
+                                                (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]),
+                                                (float) RValue_toReal(args[4]), (float) RValue_toReal(args[5]),
+                                                (uint32_t) RValue_toInt32(args[6]),
+                                                (uint32_t) RValue_toInt32(args[7]),
+                                                (uint32_t) RValue_toInt32(args[8]),
+                                                runner->renderer->drawAlpha,
+                                                RValue_toBool(args[9]));
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_ellipse(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (5 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    Renderer_drawEllipse(runner->renderer, (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]), (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]), RValue_toBool(args[4]));
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_ellipse_color(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (7 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    uint32_t prevColor = runner->renderer->drawColor;
+    runner->renderer->drawColor = (uint32_t) RValue_toInt32(args[4]);
+    Renderer_drawEllipse(runner->renderer, (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]), (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]), RValue_toBool(args[6]));
+    runner->renderer->drawColor = prevColor;
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_roundrect(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (5 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    Renderer_drawRoundrect(runner->renderer, (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]), (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]), RValue_toBool(args[4]));
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_roundrect_color(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (7 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    uint32_t prevColor = runner->renderer->drawColor;
+    runner->renderer->drawColor = (uint32_t) RValue_toInt32(args[4]);
+    Renderer_drawRoundrect(runner->renderer, (float) RValue_toReal(args[0]), (float) RValue_toReal(args[1]), (float) RValue_toReal(args[2]), (float) RValue_toReal(args[3]), RValue_toBool(args[6]));
+    runner->renderer->drawColor = prevColor;
+    return RValue_makeUndefined();
+}
+
 static RValue builtin_drawHealthbar(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer == nullptr) return RValue_makeUndefined();
@@ -5614,8 +5756,36 @@ static RValue builtin_drawTextColorExtTransformed(VMContext* ctx, RValue* args, 
     return RValue_makeUndefined();
 }
 
-STUB_RETURN_UNDEFINED(draw_surface)
-STUB_RETURN_UNDEFINED(draw_surface_ext)
+static RValue builtin_draw_surface(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->drawSurface == nullptr || 3 > argCount) {
+        return RValue_makeUndefined();
+    }
+
+    int32_t surfaceId = RValue_toInt32(args[0]);
+    float x = (float) RValue_toReal(args[1]);
+    float y = (float) RValue_toReal(args[2]);
+    runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, x, y, 1.f, 1.f, 0.f, 0xFFFFFF, runner->renderer->drawAlpha);
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_surface_ext(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->drawSurface == nullptr || 8 > argCount) {
+        return RValue_makeUndefined();
+    }
+
+    int32_t surfaceId = RValue_toInt32(args[0]);
+    float x = (float) RValue_toReal(args[1]);
+    float y = (float) RValue_toReal(args[2]);
+    float xscale = (float) RValue_toReal(args[3]);
+    float yscale = (float) RValue_toReal(args[4]);
+    float rot = (float) RValue_toReal(args[5]);
+    uint32_t color = (uint32_t) RValue_toInt32(args[6]);
+    float alpha = (float) RValue_toReal(args[7]);
+    runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, x, y, xscale, yscale, rot, color, alpha);
+    return RValue_makeUndefined();
+}
 static RValue builtin_drawBackground(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer == nullptr || 3 > argCount) return RValue_makeUndefined();
@@ -5832,19 +6002,68 @@ static RValue builtinMergeColor(MAYBE_UNUSED VMContext* ctx, RValue* args, MAYBE
     return RValue_makeReal((GMLReal) (((b << 16) & 0xFF0000) | ((g << 8) & 0xFF00) | (r & 0xFF)));
 }
 
-// Surface stubs
-STUB_RETURN_ZERO(surface_create)
-STUB_RETURN_UNDEFINED(surface_free)
-STUB_RETURN_UNDEFINED(surface_set_target)
-STUB_RETURN_UNDEFINED(surface_reset_target)
-STUB_RETURN_ZERO(surface_exists)
+static RValue builtin_surface_create(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (2 > argCount) return RValue_makeReal(-1.0);
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->createSurface == nullptr) {
+        return RValue_makeReal(-1.0);
+    }
+
+    int32_t width = RValue_toInt32(args[0]);
+    int32_t height = RValue_toInt32(args[1]);
+    return RValue_makeReal((GMLReal) runner->renderer->vtable->createSurface(runner->renderer, width, height));
+}
+
+static RValue builtin_surface_free(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer != nullptr && runner->renderer->vtable->freeSurface != nullptr) {
+        runner->renderer->vtable->freeSurface(runner->renderer, RValue_toInt32(args[0]));
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_surface_set_target(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeBool(false);
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->surfaceSetTarget == nullptr) {
+        return RValue_makeBool(false);
+    }
+    return RValue_makeBool(runner->renderer->vtable->surfaceSetTarget(runner->renderer, RValue_toInt32(args[0])));
+}
+
+static RValue builtin_surface_reset_target(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer != nullptr && runner->renderer->vtable->surfaceResetTarget != nullptr) {
+        runner->renderer->vtable->surfaceResetTarget(runner->renderer);
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_surface_exists(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeBool(false);
+    int32_t surfaceId = RValue_toInt32(args[0]);
+    if (surfaceId == -1) return RValue_makeBool(true);
+
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr || runner->renderer->vtable->surfaceExists == nullptr) {
+        return RValue_makeBool(false);
+    }
+    return RValue_makeBool(runner->renderer->vtable->surfaceExists(runner->renderer, surfaceId));
+}
+
 // application_surface is surface ID -1 (sentinel); for it, return the window dimensions
 static RValue builtinSurfaceGetWidth(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     int32_t surfaceId = (int32_t) RValue_toReal(args[0]);
     if (surfaceId == -1) {
         return RValue_makeReal((GMLReal) ctx->dataWin->gen8.defaultWindowWidth);
     }
-    logStubbedFunction(ctx, "surface_get_width");
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t width = 0, height = 0;
+    if (runner->renderer != nullptr && runner->renderer->vtable->surfaceGetSize != nullptr &&
+        runner->renderer->vtable->surfaceGetSize(runner->renderer, surfaceId, &width, &height)) {
+        return RValue_makeReal((GMLReal) width);
+    }
     return RValue_makeReal(0.0);
 }
 
@@ -5853,7 +6072,12 @@ static RValue builtinSurfaceGetHeight(VMContext* ctx, RValue* args, MAYBE_UNUSED
     if (surfaceId == -1) {
         return RValue_makeReal((GMLReal) ctx->dataWin->gen8.defaultWindowHeight);
     }
-    logStubbedFunction(ctx, "surface_get_height");
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t width = 0, height = 0;
+    if (runner->renderer != nullptr && runner->renderer->vtable->surfaceGetSize != nullptr &&
+        runner->renderer->vtable->surfaceGetSize(runner->renderer, surfaceId, &width, &height)) {
+        return RValue_makeReal((GMLReal) height);
+    }
     return RValue_makeReal(0.0);
 }
 
@@ -5920,9 +6144,9 @@ static RValue builtin_spriteSetOffset(VMContext* ctx, RValue* args, MAYBE_UNUSED
 // sprite_create_from_surface(surface_id, x, y, w, h, removeback, smooth, xorig, yorig)
 static RValue builtin_spriteCreateFromSurface(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
-    if (runner->renderer == nullptr || runner->renderer->vtable->createSpriteFromSurface == nullptr) return RValue_makeReal(-1);
+    if (runner->renderer == nullptr) return RValue_makeReal(-1);
 
-    // surface_id (arg0) is ignored - we always capture from the application surface (FBO)
+    int32_t surfaceId = RValue_toInt32(args[0]);
     int32_t x = RValue_toInt32(args[1]);
     int32_t y = RValue_toInt32(args[2]);
     int32_t w = RValue_toInt32(args[3]);
@@ -5932,7 +6156,12 @@ static RValue builtin_spriteCreateFromSurface(VMContext* ctx, RValue* args, MAYB
     int32_t xorig = RValue_toInt32(args[7]);
     int32_t yorig = RValue_toInt32(args[8]);
 
-    int32_t result = runner->renderer->vtable->createSpriteFromSurface(runner->renderer, x, y, w, h, removeback, smooth, xorig, yorig);
+    int32_t result = -1;
+    if (runner->renderer->vtable->createSpriteFromSurfaceEx != nullptr) {
+        result = runner->renderer->vtable->createSpriteFromSurfaceEx(runner->renderer, surfaceId, x, y, w, h, removeback, smooth, xorig, yorig);
+    } else if (runner->renderer->vtable->createSpriteFromSurface != nullptr) {
+        result = runner->renderer->vtable->createSpriteFromSurface(runner->renderer, x, y, w, h, removeback, smooth, xorig, yorig);
+    }
     return RValue_makeReal((GMLReal) result);
 }
 
@@ -8688,7 +8917,13 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "draw_rectangle", builtin_drawRectangle);
     VM_registerBuiltin(ctx, "draw_rectangle_color", builtin_drawRectangleColor);
     VM_registerBuiltin(ctx, "draw_rectangle_colour", builtin_drawRectangleColor);
+    VM_registerBuiltin(ctx, "draw_clear", builtin_draw_clear);
+    VM_registerBuiltin(ctx, "draw_clear_alpha", builtin_draw_clear_alpha);
     VM_registerBuiltin(ctx, "draw_healthbar", builtin_drawHealthbar);
+    VM_registerBuiltin(ctx, "draw_set_blend_mode", builtin_draw_set_blend_mode);
+    VM_registerBuiltin(ctx, "draw_set_blend_mode_ext", builtinGpuSetBlendModeExt);
+    VM_registerBuiltin(ctx, "draw_set_alpha_test", builtinGpuSetAlphaTestEnable);
+    VM_registerBuiltin(ctx, "draw_set_alpha_test_ref_value", builtinGpuSetAlphaTestRef);
     VM_registerBuiltin(ctx, "draw_set_color", builtin_drawSetColor);
     VM_registerBuiltin(ctx, "draw_set_alpha", builtin_drawSetAlpha);
     VM_registerBuiltin(ctx, "draw_set_font", builtin_drawSetFont);
@@ -8718,10 +8953,24 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     }
     VM_registerBuiltin(ctx, "draw_self", builtin_draw_self);
     VM_registerBuiltin(ctx, "draw_line", builtin_draw_line);
+    VM_registerBuiltin(ctx, "draw_line_color", builtin_draw_line_color);
+    VM_registerBuiltin(ctx, "draw_line_colour", builtin_draw_line_color);
     VM_registerBuiltin(ctx, "draw_line_width", builtin_draw_line_width);
     VM_registerBuiltin(ctx, "draw_line_width_colour", builtin_draw_line_width_colour);
     VM_registerBuiltin(ctx, "draw_line_width_color", builtin_draw_line_width_colour);
     VM_registerBuiltin(ctx, "draw_triangle", builtin_draw_triangle);
+    VM_registerBuiltin(ctx, "draw_triangle_color", builtin_draw_triangle_color);
+    VM_registerBuiltin(ctx, "draw_triangle_colour", builtin_draw_triangle_color);
+    VM_registerBuiltin(ctx, "draw_circle", builtin_draw_circle);
+    VM_registerBuiltin(ctx, "draw_circle_color", builtin_draw_circle_color);
+    VM_registerBuiltin(ctx, "draw_circle_colour", builtin_draw_circle_color);
+    VM_registerBuiltin(ctx, "draw_set_circle_precision", builtin_draw_set_circle_precision);
+    VM_registerBuiltin(ctx, "draw_ellipse", builtin_draw_ellipse);
+    VM_registerBuiltin(ctx, "draw_ellipse_color", builtin_draw_ellipse_color);
+    VM_registerBuiltin(ctx, "draw_ellipse_colour", builtin_draw_ellipse_color);
+    VM_registerBuiltin(ctx, "draw_roundrect", builtin_draw_roundrect);
+    VM_registerBuiltin(ctx, "draw_roundrect_color", builtin_draw_roundrect_color);
+    VM_registerBuiltin(ctx, "draw_roundrect_colour", builtin_draw_roundrect_color);
     VM_registerBuiltin(ctx, "draw_set_colour", builtin_draw_set_colour);
     VM_registerBuiltin(ctx, "draw_get_colour", builtin_draw_get_colour);
     VM_registerBuiltin(ctx, "draw_get_color", builtin_draw_get_color);

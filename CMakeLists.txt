@@ -1,4 +1,15 @@
 cmake_minimum_required(VERSION 3.21)
+
+if(PLATFORM STREQUAL "3ds")
+    if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+        if(NOT DEFINED ENV{DEVKITPRO})
+            message(FATAL_ERROR "Please define DEVKITPRO environment variable to point to your SDK path!")
+        endif()
+
+        set(CMAKE_TOOLCHAIN_FILE "$ENV{DEVKITPRO}/cmake/3DS.cmake" CACHE PATH "toolchain file")
+    endif()
+endif()
+
 project(butterscotch C)
 
 set(CMAKE_C_STANDARD 99)
@@ -332,6 +343,86 @@ elseif(PLATFORM STREQUAL "ps2")
                 ${CMAKE_SOURCE_DIR}/ps2dev-headers/gcc-include
         )
     endif()
+elseif(PLATFORM STREQUAL "3ds")
+    add_compile_definitions(USE_FLOAT_REALS)
+    add_compile_definitions(NO_RVALUE_INT64)
+    add_compile_definitions(PLATFORM_3DS)
+
+    option(ENABLE_VM_GML_PROFILER "Enable Butterscotch VM/interpreter profiler" OFF)
+    if(ENABLE_VM_GML_PROFILER)
+        add_compile_definitions(ENABLE_VM_GML_PROFILER)
+    endif()
+
+    option(ENABLE_VM_TRACING "Enable Butterscotch VM/interpreter tracing checks" OFF)
+    if(ENABLE_VM_TRACING)
+        add_compile_definitions(ENABLE_VM_TRACING)
+    endif()
+
+    option(ENABLE_VM_OPCODE_PROFILER "Enable Butterscotch VM opcode count profiler" OFF)
+    if(ENABLE_VM_OPCODE_PROFILER)
+        add_compile_definitions(ENABLE_VM_OPCODE_PROFILER)
+    endif()
+
+    option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" OFF)
+    if(ENABLE_SPATIAL_GRID_LOGS)
+        add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
+    endif()
+
+    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" OFF)
+    if(ENABLE_VM_STUB_LOGS)
+        add_compile_definitions(ENABLE_VM_STUB_LOGS)
+    endif()
+
+    target_include_directories(butterscotch PUBLIC vendor/stb/image)
+    target_include_directories(butterscotch PUBLIC vendor/stb/vorbis)
+
+    set(SHADER_SRC "${CMAKE_SOURCE_DIR}/src/3ds/shaders/render2d.v.pica")
+    ctr_add_shader_library(render2d_shader "${SHADER_SRC}")
+    dkp_add_embedded_binary_library(3ds_shaders render2d_shader)
+    target_include_directories(butterscotch PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/.dkp-generated/3ds_shaders")
+
+    if(DEFINED ENV{DEVKITPRO})
+        target_include_directories(butterscotch PRIVATE
+            $ENV{DEVKITPRO}/libctru/include
+            $ENV{DEVKITPRO}/portlibs/3ds/include
+        )
+        target_link_directories(butterscotch PRIVATE
+            $ENV{DEVKITPRO}/libctru/lib
+            $ENV{DEVKITPRO}/portlibs/3ds/lib
+        )
+    endif()
+
+    target_link_libraries(butterscotch
+        SDL_mixer
+        mad
+        vorbisidec
+        ogg
+        mikmod
+        SDL
+        citro3d
+        ctru
+        bz2
+        m
+        3ds_shaders
+    )
+
+    target_compile_options(butterscotch PRIVATE
+        -O3
+        -flto
+        -marm
+        -ffast-math
+        -funroll-loops
+        -fomit-frame-pointer
+        -ffunction-sections
+        -fdata-sections
+    )
+
+    target_link_options(butterscotch PRIVATE
+        -flto
+        -Wl,--gc-sections
+    )
+
+    ctr_create_3dsx(butterscotch)
 else()
     message(FATAL_ERROR "Unknown platform! ${PLATFORM}")
 endif()

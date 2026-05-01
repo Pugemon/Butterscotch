@@ -1729,7 +1729,7 @@ static void parseSTRG(BinaryReader* reader, DataWin* dw) {
     free(ptrs);
 }
 
-static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
+static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWinParserOptions options) {
     Txtr* t = &dw->txtr;
 
     uint32_t count;
@@ -1802,14 +1802,15 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd) {
         }
     }
 
-    // Load blob data into owned buffers
-    repeat(count, i) {
-        if (t->textures[i].blobOffset == 0 || t->textures[i].blobSize == 0) continue;
-        t->textures[i].blobData = BinaryReader_readBytesAt(reader, t->textures[i].blobOffset, t->textures[i].blobSize);
+    if (!options.skipTextureBlobData) {
+        repeat(count, i) {
+            if (t->textures[i].blobOffset == 0 || t->textures[i].blobSize == 0) continue;
+            t->textures[i].blobData = BinaryReader_readBytesAt(reader, t->textures[i].blobOffset, t->textures[i].blobSize);
+        }
     }
 }
 
-static void parseAUDO(BinaryReader* reader, DataWin* dw) {
+static void parseAUDO(BinaryReader* reader, DataWin* dw, DataWinParserOptions options) {
     Audo* a = &dw->audo;
 
     uint32_t count;
@@ -1823,8 +1824,7 @@ static void parseAUDO(BinaryReader* reader, DataWin* dw) {
         BinaryReader_seek(reader, ptrs[i]);
         a->entries[i].dataSize = BinaryReader_readUint32(reader);
         a->entries[i].dataOffset = (uint32_t)BinaryReader_getPosition(reader);
-        // Load audio data into owned buffer
-        if (a->entries[i].dataSize > 0) {
+        if (!options.skipAudioBlobData && a->entries[i].dataSize > 0) {
             a->entries[i].data = safeMalloc(a->entries[i].dataSize);
             BinaryReader_readBytes(reader, a->entries[i].data, a->entries[i].dataSize);
         } else {
@@ -1860,6 +1860,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
 
     // Allocate and zero-initialize DataWin
     DataWin* dw = safeCalloc(1, sizeof(DataWin));
+    dw->filePath = safeStrdup(filePath);
 
     BinaryReader reader = BinaryReader_create(file, (size_t) fileSize);
 
@@ -1868,6 +1869,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
     BinaryReader_readBytes(&reader, formMagic, 4);
     if (memcmp(formMagic, "FORM", 4) != 0) {
         fprintf(stderr, "Invalid file: expected FORM magic, got '%.4s'\n", formMagic);
+        free(dw->filePath);
         free(dw);
         fclose(file);
         exit(1);
@@ -2041,9 +2043,9 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         } else if (options.parseStrg && memcmp(chunkName, "STRG", 4) == 0) {
             parseSTRG(&reader, dw);
         } else if (options.parseTxtr && memcmp(chunkName, "TXTR", 4) == 0) {
-            parseTXTR(&reader, dw, chunkEnd);
+            parseTXTR(&reader, dw, chunkEnd, options);
         } else if (options.parseAudo && memcmp(chunkName, "AUDO", 4) == 0) {
-            parseAUDO(&reader, dw);
+            parseAUDO(&reader, dw, options);
         } else {
             printf("Unknown chunk: %.4s (length %u at offset 0x%zX)\n", chunkName, chunkLength, chunkDataStart - 8);
         }
@@ -2086,6 +2088,8 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
 
 void DataWin_free(DataWin* dw) {
     if (!dw) return;
+
+    free(dw->filePath);
 
     // GEN8
     free(dw->gen8.roomOrder);

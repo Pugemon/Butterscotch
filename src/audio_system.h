@@ -45,4 +45,5 @@ typedef struct {
 struct AudioSystem {
     AudioSystemVtable* vtable;
     DataWin** audioGroups;
+    DataWin* dataWin;
 };
