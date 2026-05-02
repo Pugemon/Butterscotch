@@ -909,6 +909,8 @@ int main(int argc, char **argv) {
 
     APT_SetAppCpuTimeLimit(30);
 
+    osSetSpeedupEnable(1);
+
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE)) {
         printf("C3D_Init failed!\n");
         gfxExit();
