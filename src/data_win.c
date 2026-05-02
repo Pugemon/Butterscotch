@@ -42,6 +42,22 @@ static uint32_t* readPointerTable(BinaryReader* reader, uint32_t* outCount) {
     return ptrs;
 }
 
+static uint32_t* readPointerTableLimited(BinaryReader* reader, uint32_t* outCount, uint32_t maxCount, const char* label) {
+    size_t pos = BinaryReader_getPosition(reader);
+    *outCount = BinaryReader_readUint32(reader);
+    if (*outCount == 0) return nullptr;
+    if (*outCount > maxCount) {
+        fprintf(stderr, "DataWin: invalid %s pointer list at 0x%zX: count=%u, max=%u\n",
+                label ? label : "unknown", pos, *outCount, maxCount);
+        exit(1);
+    }
+    uint32_t* ptrs = safeMalloc(*outCount * sizeof(uint32_t));
+    repeat(*outCount, i) {
+        ptrs[i] = BinaryReader_readUint32(reader);
+    }
+    return ptrs;
+}
+
 // Reads a PointerList of EventAction entries. Used by TMLN and OBJT.
 static EventAction* readEventActions(BinaryReader* reader, DataWin* dw, uint32_t* outCount) {
     uint32_t count;
@@ -1063,7 +1079,7 @@ static void parseOBJT(BinaryReader* reader, DataWin* dw) {
 
 static void readRoomBackgrounds(BinaryReader* reader, Room* room) {
     uint32_t bgCount;
-    uint32_t* bgPtrs = readPointerTable(reader, &bgCount);
+    uint32_t* bgPtrs = readPointerTableLimited(reader, &bgCount, 64, "ROOM backgrounds");
     room->backgrounds = safeMalloc(8 * sizeof(RoomBackground));
     uint32_t fillEnd = bgCount < 8 ? bgCount : 8;
     for (uint32_t j = 0; fillEnd > j; j++) {
@@ -1088,7 +1104,7 @@ static void readRoomBackgrounds(BinaryReader* reader, Room* room) {
 
 static void readRoomViews(BinaryReader* reader, Room* room) {
     uint32_t viewCount;
-    uint32_t* viewPtrsArr = readPointerTable(reader, &viewCount);
+    uint32_t* viewPtrsArr = readPointerTableLimited(reader, &viewCount, 64, "ROOM views");
     room->views = safeMalloc(8 * sizeof(RoomView));
     for (uint32_t j = 0; viewCount > j && 8 > j; j++) {
         BinaryReader_seek(reader, viewPtrsArr[j]);
@@ -1116,7 +1132,7 @@ static void readRoomViews(BinaryReader* reader, Room* room) {
 
 static void readRoomGameObjects(BinaryReader* reader, DataWin* dw, Room* room) {
     uint32_t objCount;
-    uint32_t* objPtrs = readPointerTable(reader, &objCount);
+    uint32_t* objPtrs = readPointerTableLimited(reader, &objCount, 65535, "ROOM instances");
     room->gameObjectCount = objCount;
     if (objCount > 0) {
         room->gameObjects = safeMalloc(objCount * sizeof(RoomGameObject));
@@ -1153,7 +1169,7 @@ static void readRoomGameObjects(BinaryReader* reader, DataWin* dw, Room* room) {
 
 static void readRoomTiles(BinaryReader* reader, DataWin* dw, Room* room) {
     uint32_t tileCount;
-    uint32_t* tilePtrs = readPointerTable(reader, &tileCount);
+    uint32_t* tilePtrs = readPointerTableLimited(reader, &tileCount, 262144, "ROOM legacy tiles");
     room->tileCount = tileCount;
     if (tileCount > 0) {
         room->tiles = safeMalloc(tileCount * sizeof(RoomTile));
@@ -1180,9 +1196,32 @@ static void readRoomTiles(BinaryReader* reader, DataWin* dw, Room* room) {
     free(tilePtrs);
 }
 
+static bool tryReadLayerEffectHeader(BinaryReader* reader, uint32_t nextLayerOffset) {
+    size_t start = BinaryReader_getPosition(reader);
+    uint32_t effectEnabled = BinaryReader_readUint32(reader);
+    uint32_t effectType = BinaryReader_readUint32(reader);
+    uint32_t effectPropCount = BinaryReader_readUint32(reader);
+    size_t afterHeader = BinaryReader_getPosition(reader);
+
+    if (effectEnabled > 1 || effectPropCount > 64) {
+        BinaryReader_seek(reader, start);
+        return false;
+    }
+
+    size_t bytes = (size_t)effectPropCount * 12;
+    if (nextLayerOffset != 0 && afterHeader + bytes > nextLayerOffset) {
+        BinaryReader_seek(reader, start);
+        return false;
+    }
+
+    (void)effectType;
+    BinaryReader_skip(reader, bytes);
+    return true;
+}
+
 static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
     uint32_t layerCount;
-    uint32_t* layerPtrs = readPointerTable(reader, &layerCount);
+    uint32_t* layerPtrs = readPointerTableLimited(reader, &layerCount, 4096, "ROOM layers");
     room->layerCount = layerCount;
 
     if (layerCount == 0) {
@@ -1194,6 +1233,7 @@ static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
     room->layers = safeMalloc(layerCount * sizeof(RoomLayer));
     repeat(layerCount, j) {
         BinaryReader_seek(reader, layerPtrs[j]);
+        uint32_t nextLayerOffset = (j + 1 < layerCount) ? layerPtrs[j + 1] : 0;
         RoomLayer* layer = &room->layers[j];
         layer->name = readStringPtr(reader, dw);
         layer->id = BinaryReader_readUint32(reader);
@@ -1209,12 +1249,7 @@ static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
         layer->instancesData = nullptr;
         layer->tilesData = nullptr;
         if (DataWin_isVersionAtLeast(dw, 2022, 1, 0, 0)) {
-            // EffectEnabled (bool32), EffectType (string ptr), EffectProperties (SimpleList<EffectProperty>)
-            BinaryReader_skip(reader, 4); // EffectEnabled
-            BinaryReader_skip(reader, 4); // EffectType (string ptr)
-            uint32_t effectPropCount = BinaryReader_readUint32(reader);
-            // Each EffectProperty is 12 bytes: Kind(int32) + Name(ptr) + Value(ptr)
-            BinaryReader_skip(reader, effectPropCount * 12);
+            tryReadLayerEffectHeader(reader, nextLayerOffset);
         }
         switch (layer->type) {
             case RoomLayerType_Path:
@@ -1235,7 +1270,7 @@ static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
                 uint32_t spritesPtr = BinaryReader_readUint32(reader);
 
                 BinaryReader_seek(reader, legacyTilesPtr);
-                uint32_t *innerTilePtrs = readPointerTable(reader, &assets->legacyTileCount);
+                uint32_t *innerTilePtrs = readPointerTableLimited(reader, &assets->legacyTileCount, 262144, "ROOM asset-layer tiles");
                 if (assets->legacyTileCount > 0) {
                     assets->legacyTiles = safeMalloc(assets->legacyTileCount * sizeof(RoomTile));
                     repeat(assets->legacyTileCount, k) {
@@ -1261,7 +1296,7 @@ static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
                 free(innerTilePtrs);
 
                 BinaryReader_seek(reader, spritesPtr);
-                uint32_t *spritePtrs = readPointerTable(reader, &assets->spriteCount);
+                uint32_t *spritePtrs = readPointerTableLimited(reader, &assets->spriteCount, 65535, "ROOM asset-layer sprites");
                 if (assets->spriteCount > 0) {
                     assets->sprites = safeMalloc(assets->spriteCount * sizeof(SpriteInstance));
                     repeat(assets->spriteCount, k) {
@@ -1306,6 +1341,11 @@ static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
             case RoomLayerType_Instances: {
                 RoomLayerInstancesData* inst = safeMalloc(sizeof(RoomLayerInstancesData));
                 inst->instanceCount = BinaryReader_readUint32(reader);
+                if (inst->instanceCount > 65535) {
+                    fprintf(stderr, "DataWin: invalid ROOM layer instance count at 0x%zX: %u\n",
+                            BinaryReader_getPosition(reader) - 4, inst->instanceCount);
+                    exit(1);
+                }
                 if (inst->instanceCount > 0) {
                     inst->instanceIds = safeMalloc(inst->instanceCount * sizeof(uint32_t));
                     repeat(inst->instanceCount, k) {
@@ -1322,7 +1362,13 @@ static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
                 tiles->backgroundIndex = BinaryReader_readInt32(reader);
                 tiles->tilesX = BinaryReader_readUint32(reader);
                 tiles->tilesY = BinaryReader_readUint32(reader);
-                uint32_t totalTiles = tiles->tilesX * tiles->tilesY;
+                uint64_t totalTiles64 = (uint64_t)tiles->tilesX * (uint64_t)tiles->tilesY;
+                if (totalTiles64 > 262144) {
+                    fprintf(stderr, "DataWin: invalid ROOM tile-layer size at 0x%zX: %ux%u\n",
+                            BinaryReader_getPosition(reader) - 8, tiles->tilesX, tiles->tilesY);
+                    exit(1);
+                }
+                uint32_t totalTiles = (uint32_t)totalTiles64;
                 if (totalTiles > 0) {
                     tiles->tileData = safeMalloc(totalTiles * sizeof(uint32_t));
                     repeat(totalTiles, k) {
@@ -1405,68 +1451,6 @@ static void parseROOM(BinaryReader* reader, DataWin* dw, bool lazyLoadRooms, Str
                 }
                 break;
             }
-        }
-    }
-
-    // Detect whether Layer headers include EffectEnabled/EffectType/EffectProperties fields (added in GMS 2022.1).
-    if (DataWin_isVersionAtLeast(dw, 2, 3, 0, 0) && !DataWin_isVersionAtLeast(dw, 2022, 1, 0, 0)) {
-        repeat(count, i) {
-            BinaryReader_seek(reader, ptrs[i]);
-            // Room header before layersPtr: 22 uint32s (name..metersPerPixel).
-            BinaryReader_skip(reader, 22 * 4);
-            uint32_t layersPtr = BinaryReader_readUint32(reader);
-            uint32_t seqnPtr = BinaryReader_readUint32(reader);
-            BinaryReader_seek(reader, layersPtr);
-            uint32_t layerCount = BinaryReader_readUint32(reader);
-            if (layerCount == 0) continue;
-            uint32_t jumpOffset = BinaryReader_readUint32(reader);
-            uint32_t nextOffset = (layerCount == 1) ? seqnPtr : BinaryReader_readUint32(reader);
-            // Layer header: name(4) id(4) type(4) depth(4) xOff(4) yOff(4) hSpd(4) vSpd(4) visible(4) = 9 uint32s = 36 bytes.
-            // jumpOffset points to start of the layer; we seek to jumpOffset+8 to skip name+id then read type.
-            BinaryReader_seek(reader, jumpOffset + 8);
-            uint32_t layerType = BinaryReader_readUint32(reader);
-            if (layerType == RoomLayerType_Path || layerType == RoomLayerType_Path2) continue;
-            bool detected = false;
-            switch (layerType) {
-                case RoomLayerType_Background: {
-                    // After type, there's depth+xOff+yOff+hSpd+vSpd+visible = 6*4 = 24, then 10 background fields = 40 bytes.
-                    // Total legacy body after type read: 24 + 40 = 64 bytes. 2022.1 adds effect data > 64 bytes of additional data past the next layer boundary.
-                    size_t absPos = BinaryReader_getPosition(reader);
-                    if (nextOffset - absPos > 16 * 4) detected = true;
-                    break;
-                }
-                case RoomLayerType_Instances: {
-                    BinaryReader_skip(reader, 6 * 4);
-                    uint32_t instanceCount = BinaryReader_readUint32(reader);
-                    size_t absPos = BinaryReader_getPosition(reader);
-                    if (nextOffset - absPos != instanceCount * 4) detected = true;
-                    break;
-                }
-                case RoomLayerType_Assets: {
-                    BinaryReader_skip(reader, 6 * 4);
-                    uint32_t tileOffset = BinaryReader_readUint32(reader);
-                    size_t absPos = BinaryReader_getPosition(reader);
-                    if (tileOffset != absPos + 8 && tileOffset != absPos + 12) detected = true;
-                    break;
-                }
-                case RoomLayerType_Tiles: {
-                    BinaryReader_skip(reader, 7 * 4);
-                    uint32_t tileMapWidth = BinaryReader_readUint32(reader);
-                    uint32_t tileMapHeight = BinaryReader_readUint32(reader);
-                    size_t absPos = BinaryReader_getPosition(reader);
-                    if (nextOffset - absPos != tileMapWidth * tileMapHeight * 4) detected = true;
-                    break;
-                }
-                case RoomLayerType_Effect: {
-                    BinaryReader_skip(reader, 7 * 4);
-                    uint32_t propertyCount = BinaryReader_readUint32(reader);
-                    size_t absPos = BinaryReader_getPosition(reader);
-                    if (nextOffset - absPos != propertyCount * 3 * 4) detected = true;
-                    break;
-                }
-            }
-            if (detected) DataWin_bumpVersionTo(dw, 2022, 1, 0, 0);
-            break;
         }
     }
 
@@ -2531,7 +2515,16 @@ void DataWin_loadRoomPayload(DataWin* dw, int32_t roomIndex) {
     if (room->payloadLoaded) return;
     requireMessage(dw->lazyLoadFile != nullptr, "DataWin_loadRoomPayload called without an open lazy-load FILE*");
 
+    FILE* ownedFile = nullptr;
     FILE* f = dw->lazyLoadFile;
+    if (dw->lazyLoadFilePath != nullptr) {
+        ownedFile = fopen(dw->lazyLoadFilePath, "rb");
+        if (ownedFile != nullptr) {
+            setvbuf(ownedFile, nullptr, _IOFBF, 128 * 1024);
+            f = ownedFile;
+        }
+    }
+
     // Find file size at lazy-load time (only needed for BinaryReader bounds checking).
     long savedPos = ftell(f);
     fseek(f, 0, SEEK_END);
@@ -2540,6 +2533,10 @@ void DataWin_loadRoomPayload(DataWin* dw, int32_t roomIndex) {
 
     BinaryReader lazyReader = BinaryReader_create(f, fileSize);
     readRoomPayload(&lazyReader, dw, room);
+
+    if (ownedFile != nullptr) {
+        fclose(ownedFile);
+    }
 }
 
 // ===[ Dynamic Sprite Slot Allocation ]===

@@ -357,6 +357,13 @@ static void free_old_pages(CtrRenderer *ctx) {
                 victim = (int)i;
             }
         }
+        if (victim < 0) {
+            for (uint32_t i = 0; i < ctx->pageCount; i++) {
+                if (!ctx->pages[i].loaded || ctx->pages[i].keepResident) continue;
+                victim = (int)i;
+                break;
+            }
+        }
         if (victim < 0) break;
 
         if (!flushed) { flush_batch(ctx); flushed = true; }
@@ -368,6 +375,8 @@ static void free_old_pages(CtrRenderer *ctx) {
             }
         }
         ctx->pages[victim].loaded = false;
+        ctx->pages[victim].chunksX = 0;
+        ctx->pages[victim].chunksY = 0;
         evicted++;
     }
 }
@@ -382,6 +391,7 @@ static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *
     page->origH = h;
     page->chunksX = (int)fminf((float)((w + 1023) / 1024), CTR_MAX_CHUNKS_X);
     page->chunksY = (int)fminf((float)((h + 1023) / 1024), CTR_MAX_CHUNKS_Y);
+    bool complete = true;
 
     for (int cy = 0; cy < page->chunksY; cy++) {
         for (int cx = 0; cx < page->chunksX; cx++) {
@@ -395,7 +405,7 @@ static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *
             chunk->potH   = next_pow2(chunk->height);
 
             uint16_t *linear = calloc((size_t)chunk->potW * chunk->potH, 2);
-            if (!linear) continue;
+            if (!linear) { complete = false; continue; }
             for (int y = 0; y < chunk->height; y++) {
                 int sy = item->sourceY + chunk->srcY + y;
                 if (sy < 0 || sy >= ah) continue;
@@ -406,6 +416,7 @@ static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *
 
             if (!C3D_TexInit(&chunk->tex, (u16)chunk->potW, (u16)chunk->potH, GPU_RGBA4)) {
                 free(linear);
+                complete = false;
                 continue;
             }
             C3D_TexSetFilter(&chunk->tex, GPU_LINEAR, GPU_NEAREST);
@@ -416,6 +427,7 @@ static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *
             if (!tiled) {
                 free(linear);
                 C3D_TexDelete(&chunk->tex);
+                complete = false;
                 continue;
             }
             tile_rgba4(linear, tiled, chunk->potW, chunk->potH, chunk->potW, chunk->potH);
@@ -426,6 +438,21 @@ static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *
             linearFree(tiled);
             chunk->valid = true;
         }
+    }
+    if (!complete) {
+        for (int cx = 0; cx < page->chunksX; cx++) {
+            for (int cy = 0; cy < page->chunksY; cy++) {
+                CtrAtlasChunk *chunk = &page->chunks[cx][cy];
+                if (chunk->valid) {
+                    C3D_TexDelete(&chunk->tex);
+                    chunk->valid = false;
+                }
+            }
+        }
+        page->loaded = false;
+        page->chunksX = 0;
+        page->chunksY = 0;
+        return;
     }
     page->loaded = true;
 }
