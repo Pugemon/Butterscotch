@@ -46,8 +46,6 @@ typedef struct {
     Renderer base;
 
     // Citro3D shader pipeline
-    DVLB_s          *vshaderDvlb;
-    shaderProgram_s  shaderProg;
     int              uLoc_projection;
     C3D_AttrInfo     attrInfo;
     bool             pipelineReady;
@@ -109,5 +107,9 @@ Renderer *CtrRenderer_create(void);
 typedef void (*CtrRendererCacheProgressFn)(uint32_t pageIndex, uint32_t pageCount, const char *pagePath, void *user);
 
 void CtrRenderer_setCacheProgressCallback(CtrRendererCacheProgressFn callback, void *user);
+
+// Standalone texture cache build. Не трогает Citro3D state/pipeline — можно
+// безопасно вызывать пока активен другой рендер (например, лаунчер).
+void CtrRenderer_prepareTextureCache(DataWin *dw);
 
 void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx);

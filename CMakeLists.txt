@@ -407,8 +407,8 @@ elseif(PLATFORM STREQUAL "3ds")
     )
 
     target_compile_options(butterscotch PRIVATE
-        -O3
-        -flto
+        #-O3
+        #-flto
         -marm
         -ffast-math
         -funroll-loops
@@ -418,7 +418,7 @@ elseif(PLATFORM STREQUAL "3ds")
     )
 
     target_link_options(butterscotch PRIVATE
-        -flto
+        #-flto
         -Wl,--gc-sections
     )
 

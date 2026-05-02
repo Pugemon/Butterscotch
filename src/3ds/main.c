@@ -20,7 +20,7 @@
 #include "sdl12_audio_system.h"
 #include "render2d_shader_shbin.h"
 
-u32 __ctru_heap_size        = 0;
+u32 __ctru_heap_size        = 25 * 1024 * 1024;
 u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
 u32 __stacksize__           = 64 * 1024;
 
@@ -29,6 +29,9 @@ u32 __stacksize__           = 64 * 1024;
 
 char g_current_data_path[256];
 char g_current_cache_dir[256];
+
+DVLB_s *g_vshaderDvlb = NULL;
+shaderProgram_s g_shaderProg;
 
 typedef struct {
     char name[64];
@@ -62,8 +65,6 @@ typedef struct {
 
 typedef struct {
     C3D_RenderTarget *target;
-    DVLB_s *vshaderDvlb;
-    shaderProgram_s shaderProg;
     int uLoc_projection;
     C3D_AttrInfo attrInfo;
     C3D_Tex whiteTex;
@@ -394,10 +395,6 @@ static void launcher_gfx_destroy(LauncherGfx *gfx) {
     if (gfx->whiteTex.data) C3D_TexDelete(&gfx->whiteTex);
     if (gfx->vbuf) linearFree(gfx->vbuf);
     if (gfx->target) C3D_RenderTargetDelete(gfx->target);
-    if (gfx->vshaderDvlb) {
-        shaderProgramFree(&gfx->shaderProg);
-        DVLB_Free(gfx->vshaderDvlb);
-    }
     memset(gfx, 0, sizeof(*gfx));
 }
 
@@ -408,11 +405,7 @@ static bool launcher_gfx_init(LauncherGfx *gfx) {
     if (!gfx->target) goto fail;
     C3D_RenderTargetSetOutput(gfx->target, GFX_TOP, GFX_LEFT, LAUNCHER_DISPLAY_TRANSFER_FLAGS);
 
-    gfx->vshaderDvlb = DVLB_ParseFile((u32 *)render2d_shader_shbin, render2d_shader_shbin_size);
-    if (!gfx->vshaderDvlb) goto fail;
-    shaderProgramInit(&gfx->shaderProg);
-    shaderProgramSetVsh(&gfx->shaderProg, &gfx->vshaderDvlb->DVLE[0]);
-    gfx->uLoc_projection = shaderInstanceGetUniformLocation(gfx->shaderProg.vertexShader, "projection");
+    gfx->uLoc_projection = shaderInstanceGetUniformLocation(g_shaderProg.vertexShader, "projection");
 
     AttrInfo_Init(&gfx->attrInfo);
     AttrInfo_AddLoader(&gfx->attrInfo, 0, GPU_FLOAT, 3);
@@ -451,7 +444,7 @@ static bool launcher_begin_frame(LauncherGfx *gfx) {
     gfx->batchTex = NULL;
 
     C3D_FrameDrawOn(gfx->target);
-    C3D_BindProgram(&gfx->shaderProg);
+    C3D_BindProgram(&g_shaderProg);
     C3D_SetAttrInfo(&gfx->attrInfo);
 
     C3D_BufInfo *buf = C3D_GetBufInfo();
@@ -485,31 +478,64 @@ static void launcher_end_frame(LauncherGfx *gfx) {
     gfx->inFrame = false;
 }
 
-static void launcher_draw_background(LauncherGfx *gfx, float time) {
-    float pulse = sinf(time * 0.035f) * 0.04f;
-    float top[4] = {0.11f + pulse, 0.08f, 0.20f + pulse, 1.f};
-    float bot[4] = {0.015f, 0.025f, 0.055f, 1.f};
-    launcher_push_quad_grad(gfx, &gfx->whiteTex,
-                            0, 0, LAUNCHER_W, 0, LAUNCHER_W, LAUNCHER_H, 0, LAUNCHER_H,
-                            .5f, .5f, .5f, .5f, top, top, bot, bot);
+static u64 g_launcher_t0_ms = 0;
+static float launcher_anim_seconds(void) {
+    if (g_launcher_t0_ms == 0) g_launcher_t0_ms = osGetTime();
+    return (float)(osGetTime() - g_launcher_t0_ms) * 0.001f;
+}
 
-    for (int i = 0; i < 52; i++) {
-        float seed = (float)i * 19.73f;
-        float x = fmodf(seed * 13.1f + sinf(time * 0.025f + seed) * 18.f, (float)LAUNCHER_W + 40.f) - 20.f;
-        float y = fmodf(seed * 7.7f + time * (0.35f + (float)(i & 3) * 0.07f), (float)LAUNCHER_H + 32.f) - 16.f;
-        float s = 1.4f + (float)(i % 5) * 0.55f;
-        float a = 0.16f + (sinf(time * 0.12f + seed) + 1.f) * 0.09f;
-        float hue = (float)(i % 3);
-        if (hue < 1.f) launcher_rect(gfx, x, y, s, s, 0.95f, 0.70f, 0.22f, a);
-        else if (hue < 2.f) launcher_rect(gfx, x, y, s, s, 0.36f, 0.82f, 1.00f, a);
-        else launcher_rect(gfx, x, y, s, s, 0.92f, 0.44f, 0.88f, a);
+static void launcher_draw_background(LauncherGfx *gfx, float t) {
+    float warm = 0.5f + 0.5f * sinf(t * 0.35f);
+    float deep = 0.5f + 0.5f * sinf(t * 0.27f + 1.1f);
+    float top[4] = {0.135f + 0.045f * warm, 0.075f + 0.020f * deep, 0.205f + 0.055f * warm, 1.f};
+    float mid[4] = {0.075f + 0.030f * deep, 0.055f + 0.020f * warm, 0.165f + 0.040f * deep, 1.f};
+    float bot[4] = {0.015f,                  0.020f + 0.010f * warm, 0.055f + 0.020f * deep, 1.f};
+
+    launcher_push_quad_grad(gfx, &gfx->whiteTex,
+                            0, 0, LAUNCHER_W, 0, LAUNCHER_W, LAUNCHER_H * 0.55f, 0, LAUNCHER_H * 0.55f,
+                            .5f, .5f, .5f, .5f, top, top, mid, mid);
+    launcher_push_quad_grad(gfx, &gfx->whiteTex,
+                            0, LAUNCHER_H * 0.55f, LAUNCHER_W, LAUNCHER_H * 0.55f,
+                            LAUNCHER_W, LAUNCHER_H, 0, LAUNCHER_H,
+                            .5f, .5f, .5f, .5f, mid, mid, bot, bot);
+
+    for (int i = 0; i < 6; i++) {
+        float band_y = fmodf(t * 8.f + (float)i * 67.f, (float)LAUNCHER_H + 80.f) - 40.f;
+        float a = 0.030f + 0.020f * sinf(t * 0.6f + (float)i);
+        launcher_push_quad(gfx, &gfx->whiteTex,
+                           -20.f, band_y, LAUNCHER_W + 40.f, 18.f,
+                           .5f, .5f, .5f, .5f,
+                           (float[4]){1.0f, 0.78f, 0.36f, a});
     }
 
-    launcher_rect(gfx, 0, 0, LAUNCHER_W, 24, 0.045f, 0.040f, 0.090f, 0.88f);
-    launcher_rect(gfx, 0, 24, LAUNCHER_W, 1, 1.00f, 0.72f, 0.22f, 0.92f);
-    launcher_rect(gfx, 0, 218, LAUNCHER_W, 22, 0.035f, 0.032f, 0.070f, 0.90f);
-    launcher_rect(gfx, 0, 218, LAUNCHER_W, 1, 1.00f, 0.72f, 0.22f, 0.92f);
-    launcher_draw_text(gfx, "BUTTERSCOTCH", 10, 8, 1.35f, 1.f, 0.78f, 0.28f, 1.f);
+    for (int i = 0; i < 64; i++) {
+        float seed = (float)i * 12.91f;
+        float orbit = 18.f + (float)(i % 5) * 9.f;
+        float ang = t * (0.18f + (float)(i & 3) * 0.07f) + seed;
+        float baseX = fmodf(seed * 17.3f, (float)LAUNCHER_W);
+        float baseY = fmodf(seed * 11.7f + t * (3.f + (float)(i % 4) * 1.2f),
+                            (float)LAUNCHER_H + 40.f) - 20.f;
+        float x = baseX + cosf(ang) * orbit;
+        float y = baseY + sinf(ang * 1.3f) * orbit * 0.45f;
+        float s = 1.4f + (float)(i % 6) * 0.55f;
+        float a = 0.16f + (sinf(t * 1.4f + seed) + 1.f) * 0.10f;
+        int hue = i % 3;
+        float r = (hue == 0) ? 0.97f : (hue == 1 ? 0.38f : 0.94f);
+        float g = (hue == 0) ? 0.72f : (hue == 1 ? 0.84f : 0.46f);
+        float b = (hue == 0) ? 0.24f : (hue == 1 ? 1.00f : 0.90f);
+        launcher_rect(gfx, x, y, s, s, r, g, b, a);
+    }
+
+    launcher_rect(gfx, 0, 0,   LAUNCHER_W, 26, 0.040f, 0.035f, 0.085f, 0.92f);
+    launcher_rect(gfx, 0, 26,  LAUNCHER_W, 1,  1.00f,  0.74f,  0.24f,  0.95f);
+    launcher_rect(gfx, 0, 27,  LAUNCHER_W, 1,  0.55f,  0.30f,  0.10f,  0.55f);
+    launcher_rect(gfx, 0, 215, LAUNCHER_W, 25, 0.030f, 0.028f, 0.065f, 0.93f);
+    launcher_rect(gfx, 0, 215, LAUNCHER_W, 1,  1.00f,  0.74f,  0.24f,  0.95f);
+    launcher_rect(gfx, 0, 216, LAUNCHER_W, 1,  0.55f,  0.30f,  0.10f,  0.55f);
+
+    float titlePulse = 0.85f + 0.15f * (0.5f + 0.5f * sinf(t * 1.6f));
+    launcher_draw_text(gfx, "BUTTERSCOTCH", 10, 9, 1.35f,
+                       1.f, 0.78f * titlePulse, 0.28f * titlePulse, 1.f);
 }
 
 static void launcher_draw_scrollbar(LauncherGfx *gfx, float cam_y, float max_y) {
@@ -551,7 +577,7 @@ static void launcher_draw_icon_or_placeholder(LauncherGfx *gfx, const GameEntry 
                                 4.4f, 1.f, 1.f, 1.f, 0.90f);
 }
 
-static void launcher_render(LauncherGfx *gfx, int selected, float time, float cam_y, float select_anim) {
+static void launcher_render(LauncherGfx *gfx, int selected, float t, float cam_y, float select_anim) {
     if (!launcher_begin_frame(gfx)) return;
 
     const float tileSize = 76.f;
@@ -565,34 +591,50 @@ static void launcher_render(LauncherGfx *gfx, int selected, float time, float ca
     float maxY = rows * gapY - visibleH;
     if (maxY < 0.f) maxY = 0.f;
 
-    launcher_draw_background(gfx, time);
+    launcher_draw_background(gfx, t);
+
+    float anim = 1.f - select_anim;
+    float ease = 1.f - anim * anim * anim;
+    (void)ease;
 
     for (int i = 0; i < g_game_count; i++) {
         int col = i % cols;
         int row = i / cols;
         float x = gridX + (float)col * gapX;
         float y = gridY + (float)row * gapY - cam_y;
-        if (y < -tileSize || y > (float)LAUNCHER_H) continue;
+        if (y < -tileSize - 12.f || y > (float)LAUNCHER_H + 12.f) continue;
 
         bool sel = (i == selected);
-        launcher_rect(gfx, x + 4, y + 5, tileSize, tileSize, 0.f, 0.f, 0.f, 0.28f);
+
+        launcher_rect(gfx, x + 4, y + 5, tileSize, tileSize, 0.f, 0.f, 0.f, 0.30f);
 
         if (sel) {
-            float pulse = sinf(time * 0.20f) * 2.2f + 4.6f;
-            float grow = (1.f - select_anim) * 7.f;
-            launcher_rect(gfx, x - 6 - pulse - grow, y - 6 - pulse - grow,
-                          tileSize + 12 + pulse * 2 + grow * 2,
-                          tileSize + 12 + pulse * 2 + grow * 2,
-                          1.f, 0.72f, 0.20f, 0.26f);
+            float breath = 0.5f + 0.5f * sinf(t * 2.4f);
+            float halo = 4.f + breath * 3.f + (1.f - select_anim) * 6.f;
+            launcher_rect(gfx, x - 8 - halo, y - 8 - halo,
+                          tileSize + 16 + halo * 2, tileSize + 16 + halo * 2,
+                          1.0f, 0.72f, 0.22f, 0.10f + 0.10f * breath);
+            launcher_rect(gfx, x - 4 - halo * 0.5f, y - 4 - halo * 0.5f,
+                          tileSize + 8 + halo, tileSize + 8 + halo,
+                          1.0f, 0.78f, 0.28f, 0.20f + 0.10f * breath);
             launcher_rect(gfx, x - 3, y - 3, tileSize + 6, tileSize + 6,
-                          1.f, 0.78f, 0.25f, 1.f);
+                          1.0f, 0.82f, 0.32f, 1.f);
+            launcher_rect(gfx, x - 2, y - 2, tileSize + 4, tileSize + 4,
+                          1.0f, 0.62f, 0.16f, 1.f);
         } else {
             launcher_rect(gfx, x - 2, y - 2, tileSize + 4, tileSize + 4,
                           0.17f, 0.14f, 0.28f, 0.82f);
+            launcher_rect(gfx, x - 1, y - 1, tileSize + 2, tileSize + 2,
+                          0.05f, 0.04f, 0.10f, 0.85f);
         }
 
         launcher_rect(gfx, x, y, tileSize, tileSize, 0.065f, 0.055f, 0.12f, 1.f);
         launcher_draw_icon_or_placeholder(gfx, &g_games[i], x + 6, y + 6, tileSize - 12, i);
+
+        if (sel) {
+            float gleam = 0.18f + 0.10f * (0.5f + 0.5f * sinf(t * 3.1f));
+            launcher_rect(gfx, x, y, tileSize, 2.f, 1.0f, 0.94f, 0.62f, gleam);
+        }
     }
 
     launcher_draw_scrollbar(gfx, cam_y, maxY);
@@ -617,10 +659,12 @@ typedef struct {
 static void launcher_render_loading(LauncherGfx *gfx, const char *gameName, const char *stage,
                                     int page, int total, float percent) {
     if (!gfx || !gfx->ready || !launcher_begin_frame(gfx)) return;
-    if (percent < 0.f) percent = 0.f;
+    if (percent < 0.f)   percent = 0.f;
     if (percent > 100.f) percent = 100.f;
 
-    launcher_draw_background(gfx, percent * 0.12f);
+    float t = launcher_anim_seconds();
+
+    launcher_draw_background(gfx, t);
     launcher_draw_centered_text(gfx, "BUTTERSCOTCH", 200.f, 48.f, 2.0f, 1.f, 0.80f, 0.34f, 1.f);
 
     char title[48];
@@ -630,13 +674,29 @@ static void launcher_render_loading(LauncherGfx *gfx, const char *gameName, cons
     if (titleW > 350.f) titleScale *= 350.f / titleW;
     launcher_draw_centered_text(gfx, title, 200.f, 82.f, titleScale, 0.72f, 0.88f, 1.f, 0.95f);
 
-    launcher_draw_centered_text(gfx, stage ? stage : "LOADING", 200.f, 112.f, 1.55f, 1.f, 1.f, 1.f, 0.95f);
+    char stageText[64];
+    int dots = ((int)(t * 2.5f)) % 4;
+    snprintf(stageText, sizeof(stageText), "%s%s",
+             stage ? stage : "LOADING",
+             (dots == 0) ? "" : (dots == 1 ? "." : (dots == 2 ? ".." : "...")));
+    launcher_draw_centered_text(gfx, stageText, 200.f, 112.f, 1.55f, 1.f, 1.f, 1.f, 0.95f);
 
     float barX = 42.f, barY = 148.f, barW = 316.f, barH = 14.f;
     launcher_rect(gfx, barX - 2, barY - 2, barW + 4, barH + 4, 0.06f, 0.055f, 0.10f, 0.95f);
     launcher_rect(gfx, barX, barY, barW, barH, 0.12f, 0.11f, 0.18f, 1.f);
-    launcher_rect(gfx, barX, barY, barW * (percent / 100.f), barH, 1.f, 0.69f, 0.18f, 1.f);
-    launcher_rect(gfx, barX, barY, barW, 1.f, 1.f, 0.93f, 0.55f, 0.65f);
+
+    float fillW = barW * (percent / 100.f);
+    if (fillW > 0.f) {
+        launcher_rect(gfx, barX, barY, fillW, barH, 1.f, 0.69f, 0.18f, 1.f);
+        float shimmerX = barX + fmodf(t * 80.f, fillW + 60.f) - 30.f;
+        for (int i = 0; i < 6; i++) {
+            float sx = shimmerX + (float)i * 4.f;
+            if (sx < barX || sx + 3.f > barX + fillW) continue;
+            float a = 0.30f - (float)i * 0.04f;
+            launcher_rect(gfx, sx, barY, 3.f, barH, 1.f, 0.96f, 0.74f, a);
+        }
+        launcher_rect(gfx, barX, barY, fillW, 1.f, 1.f, 0.96f, 0.66f, 0.85f);
+    }
 
     char status[48];
     snprintf(status, sizeof(status), "%d%%", (int)(percent + 0.5f));
@@ -660,6 +720,19 @@ static void launcher_cache_progress(uint32_t pageIndex, uint32_t pageCount, cons
     int page = pageCount ? (int)pageIndex + 1 : 0;
     if (page > (int)pageCount) page = (int)pageCount;
     launcher_render_loading(state->gfx, state->gameName, "BUILDING TEXTURE CACHE", page, (int)pageCount, overall);
+}
+
+static void launcher_datawin_progress(const char *chunkName, int chunkIndex, int totalChunks,
+                                      DataWin *dw, void *user) {
+    (void)dw;
+    LoadingScreenState *state = (LoadingScreenState *)user;
+    if (!state || !state->gfx) return;
+    float parsePct = (totalChunks > 0) ? ((float)chunkIndex / (float)totalChunks) * 100.f : 100.f;
+    float overall = state->basePercent + (parsePct / 100.f) * state->spanPercent;
+    char stage[40];
+    snprintf(stage, sizeof(stage), "PARSING %.4s", chunkName ? chunkName : "DATA");
+    launcher_render_loading(state->gfx, state->gameName, stage,
+                            chunkIndex + 1, totalChunks, overall);
 }
 
 static void resolve_new_game_path(const char *request, char *out_path) {
@@ -720,11 +793,9 @@ static void scan_games(void) {
     closedir(dir);
 }
 
-static int run_launcher(void) {
+static int run_launcher_menu(LauncherGfx *gfx) {
     scan_games();
-
-    LauncherGfx gfx;
-    bool gfx_ready = launcher_gfx_init(&gfx);
+    bool gfx_ready = (gfx && gfx->ready);
 
     if (g_game_count == 0) {
         consoleClear();
@@ -733,31 +804,23 @@ static int run_launcher(void) {
         printf("\x1b[16;3H Place folders with data.win\n");
         printf("\x1b[17;5H into %s\n", BASE_DIR);
         printf("\x1b[28;5H [START] -- quit");
-        float time = 0.f;
         while (aptMainLoop()) {
             hidScanInput();
-            if (hidKeysDown() & KEY_START) {
-                if (gfx_ready) launcher_gfx_destroy(&gfx);
-                free_game_icons();
-                return -1;
+            if (hidKeysDown() & KEY_START) return -1;
+            if (gfx_ready && launcher_begin_frame(gfx)) {
+                float t = launcher_anim_seconds();
+                launcher_draw_background(gfx, t);
+                launcher_draw_centered_text(gfx, "NO GAMES FOUND", 200.f, 98.f, 2.25f, 1.f, 0.86f, 0.34f, 1.f);
+                launcher_draw_centered_text(gfx, "SDMC:/3DS/BUTTERSCOTCH", 200.f, 132.f, 1.45f, 0.70f, 0.86f, 1.f, 0.9f);
+                launcher_end_frame(gfx);
             }
-            if (gfx_ready && launcher_begin_frame(&gfx)) {
-                launcher_draw_background(&gfx, time);
-                launcher_draw_centered_text(&gfx, "NO GAMES FOUND", 200.f, 98.f, 2.25f, 1.f, 0.86f, 0.34f, 1.f);
-                launcher_draw_centered_text(&gfx, "SDMC:/3DS/BUTTERSCOTCH", 200.f, 132.f, 1.45f, 0.70f, 0.86f, 1.f, 0.9f);
-                launcher_end_frame(&gfx);
-            }
-            time += 0.16f;
             gspWaitForVBlank();
         }
-        if (gfx_ready) launcher_gfx_destroy(&gfx);
-        free_game_icons();
         return -1;
     }
 
     int selected = 0;
     int last_render = -1;
-    float time = 0.f;
     float cam_y = 0.f;
     float select_anim = 1.f;
 
@@ -770,11 +833,7 @@ static int run_launcher(void) {
         hidScanInput();
         u32 kDown = hidKeysDown();
 
-        if (kDown & KEY_START) {
-            if (gfx_ready) launcher_gfx_destroy(&gfx);
-            free_game_icons();
-            return -1;
-        }
+        if (kDown & KEY_START) return -1;
         if (kDown & (KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT)) { selected++; select_anim = 0.f; }
         if (kDown & (KEY_LEFT  | KEY_DLEFT  | KEY_CPAD_LEFT))  { selected--; select_anim = 0.f; }
         if (kDown & (KEY_DOWN  | KEY_DDOWN  | KEY_CPAD_DOWN))  { selected += cols; select_anim = 0.f; }
@@ -783,12 +842,7 @@ static int run_launcher(void) {
         if (kDown & KEY_L)                                     { selected -= cols * 2; select_anim = 0.f; }
         if (selected < 0)              selected = 0;
         if (selected >= g_game_count)  selected = g_game_count - 1;
-        if (kDown & KEY_A) {
-            int ret = selected;
-            if (gfx_ready) launcher_gfx_destroy(&gfx);
-            free_game_icons();
-            return ret;
-        }
+        if (kDown & KEY_A) return selected;
 
         int sel_row = selected / cols;
         float target_y = (float)sel_row * tile_gap_y - visible_h * 0.40f;
@@ -797,11 +851,10 @@ static int run_launcher(void) {
         if (max_y < 0.f) max_y = 0.f;
         if (target_y < 0.f) target_y = 0.f;
         if (target_y > max_y) target_y = max_y;
-        cam_y += (target_y - cam_y) * 0.22f;
-        select_anim += (1.f - select_anim) * 0.18f;
+        cam_y += (target_y - cam_y) * 0.28f;
+        select_anim += (1.f - select_anim) * 0.22f;
 
-        if (gfx_ready) launcher_render(&gfx, selected, time, cam_y, select_anim);
-        time += 0.16f;
+        if (gfx_ready) launcher_render(gfx, selected, launcher_anim_seconds(), cam_y, select_anim);
 
         if (selected != last_render) {
             consoleClear();
@@ -817,8 +870,6 @@ static int run_launcher(void) {
         }
         gspWaitForVBlank();
     }
-    if (gfx_ready) launcher_gfx_destroy(&gfx);
-    free_game_icons();
     return -1;
 }
 
@@ -833,7 +884,18 @@ static void setup_logging(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 }
+#include <malloc.h>
+void printMemoryStats() {
+    struct mallinfo mi = mallinfo();
 
+    u32 linearFree = linearSpaceFree();
+
+    float heapUsedMB = (float)mi.uordblks / 1024.0f / 1024.0f;
+    float linearFreeMB = (float)linearFree / 1024.0f / 1024.0f;
+
+    printf("[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n",
+           heapUsedMB, linearFreeMB);
+}
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -847,15 +909,27 @@ int main(int argc, char **argv) {
 
     APT_SetAppCpuTimeLimit(30);
 
-    // Полная инициализация Citro3D на старте; рендерер будет работать поверх неё.
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE)) {
         printf("C3D_Init failed!\n");
         gfxExit();
         return 1;
     }
 
-    int selected_game = run_launcher();
+    g_vshaderDvlb = DVLB_ParseFile((u32 *)render2d_shader_shbin, render2d_shader_shbin_size);
+    shaderProgramInit(&g_shaderProg);
+    shaderProgramSetVsh(&g_shaderProg, &g_vshaderDvlb->DVLE[0]);
+
+    LauncherGfx gfx;
+    bool gfx_ready = launcher_gfx_init(&gfx);
+
+    int selected_game = run_launcher_menu(&gfx);
     if (selected_game < 0) {
+        if (gfx_ready) launcher_gfx_destroy(&gfx);
+        free_game_icons();
+
+        shaderProgramFree(&g_shaderProg);
+        DVLB_Free(g_vshaderDvlb);
+
         C3D_Fini();
         cfguExit();
         gfxExit();
@@ -869,7 +943,7 @@ int main(int argc, char **argv) {
 
     while (keep_playing && aptMainLoop()) {
         g_game_change_requested = false;
-
+        int frameCounter = 0;
         char base_game_dir[256];
         char *slash = strrchr(g_current_data_path, '/');
         size_t baselen = slash ? (size_t)(slash - g_current_data_path) : 0;
@@ -891,35 +965,42 @@ int main(int argc, char **argv) {
         display_name = display_name ? display_name + 1 : base_game_dir;
         printf("\x1b[10;5H\x1b[32mLoading %s...\x1b[0m\n", display_name);
 
-        LauncherGfx loadingGfx;
-        bool loadingGfxReady = launcher_gfx_init(&loadingGfx);
-        if (loadingGfxReady) {
-            launcher_render_loading(&loadingGfx, display_name, "PREPARING", 0, 0, 2.f);
+        free_game_icons();
+
+        if (gfx_ready) {
+            launcher_render_loading(&gfx, display_name, "PREPARING", 0, 0, 2.f);
         }
 
-        // Pre-pass: генерация кэша атласов до полной загрузки игры.
         FILE *flag = fopen(cache_flag_path, "r");
         bool cached = flag != NULL;
         if (flag) fclose(flag);
 
         if (!cached) {
             printf("\n\nGenerating texture cache...\nThis may take a minute.");
-            if (loadingGfxReady) {
-                launcher_render_loading(&loadingGfx, display_name, "READING TEXTURE TABLE", 0, 0, 6.f);
+            if (gfx_ready) {
+                launcher_render_loading(&gfx, display_name, "READING TEXTURE TABLE", 0, 0, 4.f);
             }
-            DataWinParserOptions opt = { .parseGen8=1, .parseTpag=1, .parseTxtr=1, .skipTextureBlobData=1 };
+            LoadingScreenState prePassState = {
+                .gfx = gfx_ready ? &gfx : NULL,
+                .gameName = display_name,
+                .basePercent = 4.f,
+                .spanPercent = 4.f
+            };
+            DataWinParserOptions opt = {
+                .parseGen8=1, .parseTpag=1, .parseTxtr=1, .skipTextureBlobData=1,
+                .progressCallback = gfx_ready ? launcher_datawin_progress : NULL,
+                .progressCallbackUserData = &prePassState
+            };
             DataWin *dw = DataWin_parse(g_current_data_path, opt);
             if (dw) {
-                LoadingScreenState loadingState = {
-                    .gfx = loadingGfxReady ? &loadingGfx : NULL,
+                LoadingScreenState cacheState = {
+                    .gfx = gfx_ready ? &gfx : NULL,
                     .gameName = display_name,
                     .basePercent = 8.f,
                     .spanPercent = 76.f
                 };
-                CtrRenderer_setCacheProgressCallback(loadingGfxReady ? launcher_cache_progress : NULL, &loadingState);
-                Renderer *r = CtrRenderer_create();
-                r->vtable->init(r, dw);
-                r->vtable->destroy(r);
+                CtrRenderer_setCacheProgressCallback(gfx_ready ? launcher_cache_progress : NULL, &cacheState);
+                CtrRenderer_prepareTextureCache(dw);
                 CtrRenderer_setCacheProgressCallback(NULL, NULL);
                 DataWin_free(dw);
             }
@@ -928,12 +1009,19 @@ int main(int argc, char **argv) {
             if (flag) fclose(flag);
         }
 
-        if (loadingGfxReady) {
-            launcher_render_loading(&loadingGfx, display_name,
+        if (gfx_ready) {
+            launcher_render_loading(&gfx, display_name,
                                     cached ? "CACHE READY" : "CACHE SKIPPED", 0, 0,
                                     cached ? 84.f : 12.f);
         }
 
+        float fullBase = cached ? 84.f : 12.f;
+        LoadingScreenState fullParseState = {
+            .gfx = gfx_ready ? &gfx : NULL,
+            .gameName = display_name,
+            .basePercent = fullBase,
+            .spanPercent = 99.f - fullBase
+        };
         DataWinParserOptions full_opt = {
             .parseGen8=1, .parseOptn=1, .parseLang=1, .parseExtn=1, .parseSond=1,
             .parseAgrp=1, .parseSprt=1, .parseBgnd=1, .parsePath=1, .parseScpt=1,
@@ -942,15 +1030,18 @@ int main(int argc, char **argv) {
             .parseStrg=1, .parseTxtr=1, .parseAudo=1,
             .skipLoadingPreciseMasksForNonPreciseSprites=1,
             .skipTextureBlobData=cached, .skipAudioBlobData=1,
-            .codeCachePath=code_cache_path
+
+            .lazyLoadRooms=0,
+            .codeCachePath=code_cache_path,
+            .progressCallback = gfx_ready ? launcher_datawin_progress : NULL,
+            .progressCallbackUserData = &fullParseState
         };
 
-        if (loadingGfxReady) {
-            launcher_render_loading(&loadingGfx, display_name, "LOADING DATA.WIN", 0, 0, 88.f);
+        if (gfx_ready) {
+            launcher_render_loading(&gfx, display_name, "LOADING DATA.WIN", 0, 0, fullBase);
         }
         DataWin *dw = DataWin_parse(g_current_data_path, full_opt);
         if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0 || !dw) {
-            if (loadingGfxReady) launcher_gfx_destroy(&loadingGfx);
             printf("\nBoot failed.\nCheck data.win at %s\nPress START to quit.\n", g_current_data_path);
             while (aptMainLoop()) {
                 hidScanInput();
@@ -963,10 +1054,11 @@ int main(int argc, char **argv) {
 
         fprintf(stderr, "Loaded \"%s\" (ID: %d)\n", dw->gen8.name, dw->gen8.gameID);
 
-        if (loadingGfxReady) {
-            launcher_render_loading(&loadingGfx, display_name, "LAUNCHING GAME!", 0, 0, 100.f);
-            launcher_gfx_destroy(&loadingGfx);
+        if (gfx_ready) {
+            launcher_render_loading(&gfx, display_name, "LAUNCHING GAME!", 0, 0, 100.f);
         }
+
+        if (gfx_ready) { launcher_gfx_destroy(&gfx); gfx_ready = false; }
 
         VMContext      *vm  = VM_create(dw);
         N3dsFileSystem *fs  = N3dsFileSystem_create(g_current_data_path);
@@ -1031,7 +1123,6 @@ int main(int argc, char **argv) {
                 }
             }
 
-            // Top screen: 400 x 240 физических пикселей.
             ren->vtable->beginFrame(ren, gw, gh, 400, 240);
             if (run->drawBackgroundColor) {
                 ren->vtable->clearTarget(ren, run->backgroundColor, 1.f);
@@ -1081,8 +1172,11 @@ int main(int argc, char **argv) {
 
             run->viewCurrent = 0;
             ren->vtable->endFrame(ren);
+            if (frameCounter % 60 == 0) {
+                printMemoryStats();
+            }
+            frameCounter++;
 
-            // 30 FPS lock
             while (osGetTime() - t_start < 33) gspWaitForVBlank();
         }
 
@@ -1094,10 +1188,12 @@ int main(int argc, char **argv) {
         DataWin_free(dw);
         SDL_Quit();
 
+        if (!gfx_ready) gfx_ready = launcher_gfx_init(&gfx);
+
         if (g_game_change_requested) {
             resolve_new_game_path(g_next_game_path, g_current_data_path);
         } else {
-            int new_selection = run_launcher();
+            int new_selection = run_launcher_menu(&gfx);
             if (new_selection < 0) {
                 keep_playing = false;
             } else {
@@ -1106,6 +1202,12 @@ int main(int argc, char **argv) {
             }
         }
     }
+
+    if (gfx_ready) launcher_gfx_destroy(&gfx);
+    free_game_icons();
+
+    shaderProgramFree(&g_shaderProg);
+    DVLB_Free(g_vshaderDvlb);
 
     C3D_Fini();
     cfguExit();

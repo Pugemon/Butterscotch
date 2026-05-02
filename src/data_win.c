@@ -2157,9 +2157,23 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
             (options.parseTxtr && memcmp(chunkName, "TXTR", 4) == 0) ||
             (options.parseAudo && memcmp(chunkName, "AUDO", 4) == 0);
 
-        // Bulk-read the chunk data into memory for fast parsing
+        // Bulk-read the chunk into RAM for fast parsing — но ТОЛЬКО если
+        // чанк меньше hard-cap'а. На 3DS heap фрагментирован и одиночная
+        // malloc на 30+ MiB (привет AUDO/TXTR/CODE крупных GameMaker игр)
+        // надёжно убивает процесс.
+        //
+        // Если чанк больше — оставляем chunkBuffer = NULL, и BinaryReader
+        // в этом случае fallback'ится на FILE*-режим (см. binary_reader.c
+        // readCheck/BinaryReader_seek). Парсер ходит по чанку через fseek
+        // прямо по SD-карте. Медленнее на пару секунд, но НЕ падает.
+        //
+        // Парсеры, которым нужны сами blob'ы (parseTXTR/parseAUDO), либо
+        // получают skipTextureBlobData/skipAudioBlobData=1 (тогда blob'ы
+        // вообще не читаются — стримятся уже потом через blobOffset), либо
+        // делают свою отдельную DW_BIG_ALLOC (parseCODE для bytecodeBuffer).
+        enum { BULK_LOAD_CAP = 4u * 1024u * 1024u };
         uint8_t* chunkBuffer = nullptr;
-        if (shouldParse && chunkLength > 0) {
+        if (shouldParse && chunkLength > 0 && chunkLength <= BULK_LOAD_CAP) {
             chunkBuffer = safeMalloc(chunkLength);
             size_t read = fread(chunkBuffer, 1, chunkLength, reader.file);
             if (read != chunkLength) {
