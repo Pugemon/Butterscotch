@@ -15,6 +15,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
+#ifdef PLATFORM_3DS
+#include <3ds.h>
+#endif
 
 #include "rvalue.h"
 #include "stb_ds.h"
@@ -30,6 +33,33 @@
 extern char g_next_game_path[256];
 extern bool g_game_change_requested;
 #endif
+
+static GMLReal builtinTimerStartMs = -1.0;
+
+static GMLReal monotonicMilliseconds(void) {
+#ifdef _WIN32
+    LARGE_INTEGER freq, counter;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    return (GMLReal) counter.QuadPart / (GMLReal) freq.QuadPart * 1000.0;
+#elif defined(PLATFORM_3DS)
+    return (GMLReal) osGetTime();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (GMLReal) ts.tv_sec * 1000.0 + (GMLReal) ts.tv_nsec / 1000000.0;
+#endif
+}
+
+static void resetBuiltinTimers(void) {
+    builtinTimerStartMs = monotonicMilliseconds();
+}
+
+static GMLReal elapsedMilliseconds(void) {
+    if (builtinTimerStartMs < 0.0) resetBuiltinTimers();
+    GMLReal elapsed = monotonicMilliseconds() - builtinTimerStartMs;
+    return elapsed < 0.0 ? 0.0 : elapsed;
+}
 
 // ===[ STUB LOGGING ]===
 
@@ -721,19 +751,8 @@ RValue VMBuiltins_getVariable(VMContext* ctx, int16_t builtinVarId, const char* 
             return RValue_makeReal((GMLReal) runner->backgroundColor);
 
         // Timing
-        case BUILTIN_VAR_CURRENT_TIME: {
-            #ifdef _WIN32
-            LARGE_INTEGER freq, counter;
-            QueryPerformanceFrequency(&freq);
-            QueryPerformanceCounter(&counter);
-            GMLReal ms = (GMLReal) counter.QuadPart / (GMLReal) freq.QuadPart * 1000.0;
-            #else
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            GMLReal ms = (GMLReal) ts.tv_sec * 1000.0 + (GMLReal) ts.tv_nsec / 1000000.0;
-            #endif
-            return RValue_makeReal(ms);
-        }
+        case BUILTIN_VAR_CURRENT_TIME:
+            return RValue_makeReal(elapsedMilliseconds());
 
         // Arguments
         case BUILTIN_VAR_ARGUMENT_COUNT:
@@ -6978,7 +6997,10 @@ static RValue builtinPositionMeeting(VMContext* ctx, RValue* args, int32_t argCo
 }
 
 // Misc stubs
-STUB_RETURN_ZERO(get_timer)
+static RValue builtin_get_timer(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal(elapsedMilliseconds() * 1000.0);
+}
+
 static RValue builtinActionSetAlarm(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     int32_t steps = RValue_toInt32(args[0]);
     int32_t alarmIndex = RValue_toInt32(args[1]);
@@ -8729,6 +8751,7 @@ static RValue builtinSpriteCollisionMask(VMContext* ctx, RValue* args, int32_t a
 void VMBuiltins_registerAll(VMContext* ctx) {
     requireMessage(!ctx->registeredBuiltinFunctions, "Attempting to register all VMBuiltins, but it was already registered!");
     ctx->registeredBuiltinFunctions = true;
+    resetBuiltinTimers();
 
     const bool isGMS2 = DataWin_isVersionAtLeast(ctx->dataWin, 2, 0, 0, 0);
 

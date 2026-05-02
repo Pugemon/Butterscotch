@@ -1249,7 +1249,8 @@ static void native_drawSelfBorder(VMContext *ctx, Runner *runner, Instance *inst
         if (tpagIndex >= 0) {
             r->vtable->drawSpritePart(r, tpagIndex,
                                       (int32_t) l, (int32_t) t, (int32_t) (w - l), (int32_t) (h - t),
-                                      inst->x + l, inst->y + t, 1.0f, 1.0f, 0xFFFFFF, inst->imageAlpha);
+                                      inst->x + l, inst->y + t, 1.0f, 1.0f,
+                                      0.0f, 0.0f, 0.0f, 0xFFFFFF, inst->imageAlpha);
         }
     }
 }
@@ -3911,7 +3912,7 @@ static void native_loopblg_Draw0(VMContext *ctx, Runner *runner, Instance *inst)
                                       (int32_t) l, (int32_t) t,
                                       (int32_t) ((w - l) + offx), (int32_t) ((h - t) + offy),
                                       (inst->x + l) - offx, (inst->y + t) - offy,
-                                      1.0f, 1.0f, 0xFFFFFF, inst->imageAlpha);
+                                      1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFF, inst->imageAlpha);
         }
     }
 }
@@ -5361,12 +5362,14 @@ static void native_sizebone_Draw0(VMContext *ctx, Runner *runner, Instance *inst
         if (tpagTop >= 0) {
             r->vtable->drawSpritePart(r, tpagTop,
                                       (int32_t) l, (int32_t) t, (int32_t) (w - l), (int32_t) (h - t),
-                                      inst->x + l, inst->y + t, 1.0f, 1.0f, 0xFFFFFF, inst->imageAlpha);
+                                      inst->x + l, inst->y + t, 1.0f, 1.0f,
+                                      0.0f, 0.0f, 0.0f, 0xFFFFFF, inst->imageAlpha);
         }
         if (tpagBot >= 0) {
             r->vtable->drawSpritePart(r, tpagBot,
                                       (int32_t) l, (int32_t) t, (int32_t) (w - l), (int32_t) (h - t),
-                                      inst->x + l, (float) b3 - 10.0f, 1.0f, 1.0f, 0xFFFFFF, inst->imageAlpha);
+                                      inst->x + l, (float) b3 - 10.0f, 1.0f, 1.0f,
+                                      0.0f, 0.0f, 0.0f, 0xFFFFFF, inst->imageAlpha);
         }
     }
 
@@ -5471,7 +5474,8 @@ static void native_vapNew_Draw0(VMContext *ctx, Runner *runner, Instance *inst) 
         if (tpagIdx >= 0) {
             r->vtable->drawSpritePart(r, tpagIdx,
                                       0, (int32_t) ht_c, wd, (int32_t) ht_a,
-                                      inst->x, ht_b, inst->imageXscale, inst->imageYscale, 0xFFFFFF, 1.0f);
+                                      inst->x, ht_b, inst->imageXscale, inst->imageYscale,
+                                      0.0f, 0.0f, 0.0f, 0xFFFFFF, 1.0f);
         }
     }
 
@@ -5925,7 +5929,7 @@ static void native_trueLavawaver_Draw0(VMContext *ctx, Runner *runner, Instance 
                 for (int32_t f = 0; f < 8; f++) {
                     r->vtable->drawSpritePart(r, tpagIndex, 0, i, spriteW, 2,
                                               xx, base_yy + (float) (f * 40), 1.0f, 1.0f,
-                                              0xFFFFFFu, drawAlpha);
+                                              0.0f, 0.0f, 0.0f, 0xFFFFFFu, drawAlpha);
                 }
             }
         }
@@ -6315,7 +6319,7 @@ static void native_backgrounderCore_Draw0(VMContext *ctx, Runner *runner, Instan
         float xoff = (float) (GMLReal_sin(a / b) * c);
         r->vtable->drawSpritePart(r, tpagIndex, 0, i, bgW, 1,
                                   inst->x + xoff, inst->y + (float) i,
-                                  1.0f, 1.0f, 0xFFFFFFu, inst->imageAlpha);
+                                  1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFFu, inst->imageAlpha);
     }
     Instance_setSelfVar(inst, bgCoreCache.a, RValue_makeReal(a));
 }
@@ -6651,7 +6655,8 @@ static void leglineDrawShared(VMContext *ctx, Runner *runner, Instance *inst, bo
                 float dstX = right ? (float) (ibR - myx) : (float) ibL;
                 if (srcW > 0) {
                     r->vtable->drawSpritePart(r, tpagIndex, srcX, 0, srcW, (int32_t) spriteH,
-                                              dstX, rowY, 1.0f, 1.0f, 0xFFFFFFu, r->drawAlpha);
+                                              dstX, rowY, 1.0f, 1.0f,
+                                              0.0f, 0.0f, 0.0f, 0xFFFFFFu, r->drawAlpha);
                 }
             }
 
@@ -10601,7 +10606,7 @@ static void native_fogmaker_Draw0(VMContext *ctx, Runner *runner, Instance *inst
             for (int32_t i = 0; i < 13; i++) {
                 r->vtable->drawSpritePart(r, tpagIndex, src_x, 0, 80, 80,
                                           (float) (i * 80), dst_y,
-                                          1.0f, 1.0f, 0xFFFFFFu, alpha);
+                                          1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFFu, alpha);
             }
         }
     }
@@ -10679,14 +10684,14 @@ static void native_topbone_Draw0(VMContext *ctx, Runner *runner, Instance *inst)
         if (tp123 >= 0) {
             r->vtable->drawSpritePart(r, tp123, lR, tR, wR - lR, hR - tR,
                                       inst->x + (float) lR, inst->y + (float) tR,
-                                      1.0f, 1.0f, 0xFFFFFFu, 1.0f);
+                                      1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFFu, 1.0f);
         }
 
         int32_t tp124 = Renderer_resolveTPAGIndex(ctx->dataWin, 124, subimg);
         if (tp124 >= 0) {
             r->vtable->drawSpritePart(r, tp124, lR, tR, wR - lR, hR - tR,
                                       inst->x + (float) lR, ibT + 6.0f,
-                                      1.0f, 1.0f, 0xFFFFFFu, 1.0f);
+                                      1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFFu, 1.0f);
         }
     }
 
@@ -11185,7 +11190,7 @@ static void puddleDrawCustomExt(Renderer *r, DataWin *dw, Instance *puddleInst,
         if (tpagIndex >= 0) {
             r->vtable->drawSpritePart(r, tpagIndex, lR, tR, wR - lR, hR - tR,
                                       dx + (float) lR, dy + (float) tR,
-                                      xscale, yscale, 0xFFFFFFu, alpha);
+                                      xscale, yscale, 0.0f, 0.0f, 0.0f, 0xFFFFFFu, alpha);
         }
     }
 }
@@ -11608,7 +11613,7 @@ static void native_hotlandsign_Draw0(VMContext *ctx, Runner *runner, Instance *i
     if (tp1963 >= 0) {
         float a = (inactive == 1) ? 0.5f : 1.0f;
         r->vtable->drawSpritePart(r, tp1963, (int32_t) (0.0 - xaround), 0, 60, 5,
-                                  inst->x, inst->y, 8.0f, 8.0f, 0x0000FFu, a);
+                                  inst->x, inst->y, 8.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0x0000FFu, a);
     }
 
 
@@ -12512,7 +12517,7 @@ static void native_memoryheadBody_Draw0(VMContext *ctx, Runner *runner, Instance
                 float dx = (float) inst->x + (float) (sin(a / bb) * cc);
                 float dy = (float) inst->y + (float) (i * 2);
                 Renderer_drawSpritePartExt(r, sprIdx, subimg, 0, i, sw, srcH,
-                                           dx, dy, 2.0f, 2.0f, 0xFFFFFFu, alpha);
+                                           dx, dy, 2.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFFu, alpha);
             }
         }
         Instance_setSelfVar(inst, memoryheadCache.a, RValue_makeReal(a));
@@ -12880,11 +12885,11 @@ static void native_roundedge_Draw0(VMContext *ctx, Runner *runner, Instance *ins
 
         float dxR = (rwHalf + (float) wp * (float) i) - 6.0f;
         Renderer_drawSpritePartExt(r, image, subimg, srcX, srcY, srcW, srcH,
-                                   dxR, dy, (float) i, (float) i, color, alpha);
+                                   dxR, dy, (float) i, (float) i, 0.0f, 0.0f, 0.0f, color, alpha);
 
         float dxL = (rwHalf - (float) wp * (float) i) + 6.0f;
         Renderer_drawSpritePartExt(r, image, subimg, srcX, srcY, srcW, srcH,
-                                   dxL, dy, -(float) i, (float) i, color, alpha);
+                                   dxL, dy, -(float) i, (float) i, 0.0f, 0.0f, 0.0f, color, alpha);
     }
 
 
@@ -14521,16 +14526,16 @@ static void native_afinalBody_Draw0(VMContext *ctx, Runner *runner, Instance *in
     uint32_t thiscolor = nativeMakeColorHsvBGR(siner * 6.0, 200.0, 200.0);
     if (AF->thiscolor >= 0) Instance_setSelfVar(inst, AF->thiscolor, RValue_makeReal((GMLReal) thiscolor));
     r->drawColor = thiscolor;
-    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) side, 0, 276, 216, 640.0f, 0.0f, -1.0f, 1.0f, thiscolor, 0.5f);
-    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) (side + 60.0), 0, 276, 216, 640.0f, 0.0f, -1.0f, 1.0f, thiscolor,
-                               0.5f);
-    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) (side + 120.0), 0, 276, 216, 640.0f, 0.0f, -1.0f, 1.0f, thiscolor,
-                               0.5f);
-    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) side, 0, 276, 216, 0.0f, 0.0f, 1.0f, 1.0f, thiscolor, 0.5f);
-    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) (side + 60.0), 0, 276, 216, 0.0f, 0.0f, 1.0f, 1.0f, thiscolor,
-                               0.5f);
-    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) (side + 120.0), 0, 276, 216, 0.0f, 0.0f, 1.0f, 1.0f, thiscolor,
-                               0.5f);
+    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) side, 0, 276, 216, 640.0f, 0.0f, -1.0f, 1.0f, 0.0f, 0.0f, 0.0f, thiscolor, 0.5f);
+    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) (side + 60.0), 0, 276, 216, 640.0f, 0.0f, -1.0f, 1.0f,
+                               0.0f, 0.0f, 0.0f, thiscolor, 0.5f);
+    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) (side + 120.0), 0, 276, 216, 640.0f, 0.0f, -1.0f, 1.0f,
+                               0.0f, 0.0f, 0.0f, thiscolor, 0.5f);
+    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) side, 0, 276, 216, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, thiscolor, 0.5f);
+    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) (side + 60.0), 0, 276, 216, 0.0f, 0.0f, 1.0f, 1.0f,
+                               0.0f, 0.0f, 0.0f, thiscolor, 0.5f);
+    Renderer_drawSpritePartExt(r, 2470, 0, (int32_t) (side + 120.0), 0, 276, 216, 0.0f, 0.0f, 1.0f, 1.0f,
+                               0.0f, 0.0f, 0.0f, thiscolor, 0.5f);
 
 
     uint32_t blend = inst->imageBlend;
@@ -15005,7 +15010,7 @@ static void native_hgBody_Draw0(VMContext *ctx, Runner *runner, Instance *inst) 
                 float dx = (float) inst->x + (float) (sin(a_val / bb_local) * cc_local);
                 float dy = (float) inst->y + (float) (i * 2);
                 Renderer_drawSpritePartExt(r, sprIdx, subimg, 0, i, sw, srcH,
-                                           dx, dy, 2.0f, 2.0f, 0xFFFFFFu, alpha);
+                                           dx, dy, 2.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0xFFFFFFu, alpha);
             }
         }
         if (hgBodyCache.a_v >= 0) Instance_setSelfVar(inst, hgBodyCache.a_v, RValue_makeReal(a_val));
