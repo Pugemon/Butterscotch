@@ -192,6 +192,11 @@ static void build_texture_cache(DataWin *dw) {
             uint16_t *out = malloc((size_t)w * h * 2);
             for (int p = 0; p < w * h; p++) {
                 int s = p * 4;
+                if (pixels[s + 3] == 0) {
+                    pixels[s] = 0;
+                    pixels[s + 1] = 0;
+                    pixels[s + 2] = 0;
+                }
                 out[p] = pack_rgba4444(pixels[s], pixels[s + 1], pixels[s + 2], pixels[s + 3]);
             }
             FILE *outF = fopen(path, "wb");
@@ -308,32 +313,58 @@ static void push_solid_tri(CtrRenderer *ctx, float x1, float y1, float x2, float
 }
 
 static void draw_letterbox_gradient(CtrRenderer *ctx) {
-    float t = (float)g_frame * 0.025f;
-    float a = sinf(t) * 0.5f + 0.5f;
-    float b = sinf(t * 0.73f + 2.1f) * 0.5f + 0.5f;
+    float u0 = 0.f;
+    float u1 = (float)ctx->appLogicW / (float)ctx->appPotW;
+    float v0 = (float)(ctx->appPotH - ctx->appLogicH) / (float)ctx->appPotH;
+    float v1 = 1.f;
 
-    float c0[4] = {0.025f + 0.030f * a, 0.035f + 0.035f * b, 0.115f + 0.055f * a, 1.f};
-    float c1[4] = {0.105f + 0.050f * b, 0.035f + 0.020f * a, 0.145f + 0.040f * b, 1.f};
-    float c2[4] = {0.035f + 0.035f * b, 0.125f + 0.060f * a, 0.150f + 0.050f * b, 1.f};
-    float c3[4] = {0.115f + 0.055f * a, 0.075f + 0.030f * b, 0.030f + 0.030f * a, 1.f};
+    // Слегка "зумим" картинку (обрезаем края), чтобы цвет брался из центра и казался ещё более размытым
+    float zoomU = (u1 - u0) * 0.15f;
+    float zoomV = (v1 - v0) * 0.15f;
+    float texU0 = u0 + zoomU;
+    float texU1 = u1 - zoomU;
+    float texVTop = v1 - zoomV; // На 3DS верх - это v1
+    float texVBot = v0 + zoomV; // А низ - это v0
 
+    // Сначала рисуем чёрную подложку (чтобы яркие комнаты не слепили на фоне)
     float x[4] = {0.f, (float)ctx->winW, (float)ctx->winW, 0.f};
     float y[4] = {0.f, 0.f, (float)ctx->winH, (float)ctx->winH};
-    float colors[4][4] = {
-        {c0[0], c0[1], c0[2], c0[3]},
-        {c1[0], c1[1], c1[2], c1[3]},
-        {c2[0], c2[1], c2[2], c2[3]},
-        {c3[0], c3[1], c3[2], c3[3]},
-    };
-    push_quad_uvgrad(ctx, &ctx->whiteTex, x, y, .5f, .5f, .5f, .5f, colors);
+    float black[4][4] = { {0,0,0,1}, {0,0,0,1}, {0,0,0,1}, {0,0,0,1} };
+    push_quad_uvgrad(ctx, &ctx->whiteTex, x, y, .5f, .5f, .5f, .5f, black);
 
+    // Рисуем 4 слоя игры с диагональным смещением для эффекта мощного размытия (мыла)
+    float blurAlpha = 0.35f; // Прозрачность слоёв размытия
+    float offset = 14.0f;    // Сила размытия (на сколько пикселей сдвигаем)
+
+    float offsets_x[4] = {-offset, offset, -offset, offset};
+    float offsets_y[4] = {-offset, -offset, offset, offset};
+
+    for (int j = 0; j < 4; j++) {
+        float ox = offsets_x[j];
+        float oy = offsets_y[j];
+
+        float px[4] = {ox, (float)ctx->winW + ox, (float)ctx->winW + ox, ox};
+        float py[4] = {oy, oy, (float)ctx->winH + oy, (float)ctx->winH + oy};
+
+        // Добавляем градиент: верх светлее (0.45), низ темнее (0.15)
+        float c[4][4] = {
+            {0.45f, 0.45f, 0.45f, blurAlpha}, {0.45f, 0.45f, 0.45f, blurAlpha},
+            {0.15f, 0.15f, 0.15f, blurAlpha}, {0.15f, 0.15f, 0.15f, blurAlpha}
+        };
+
+        push_quad_uvgrad(ctx, &ctx->appTex, px, py, texU0, texVTop, texU1, texVBot, c);
+    }
+
+    // Плавающие белые частицы (поверх блюра)
+    float t = (float)g_frame * 0.025f;
     for (int i = 0; i < 18; i++) {
         float seed = (float)i * 15.37f;
         float px = fmodf(seed * 19.1f + t * (18.f + (float)(i % 4) * 7.f), (float)ctx->winW + 48.f) - 24.f;
         float py = fmodf(seed * 11.3f + sinf(t + seed) * 16.f, (float)ctx->winH + 32.f) - 16.f;
         float s = 1.2f + (float)(i % 3) * 0.8f;
-        float alpha = 0.08f + 0.10f * (sinf(t * 1.7f + seed) * 0.5f + 0.5f);
-        float pc[4] = {0.9f, 0.72f + 0.18f * a, 0.28f + 0.35f * b, alpha};
+
+        float alpha = 0.12f + 0.10f * (sinf(t * 1.7f + seed) * 0.5f + 0.5f);
+        float pc[4] = {1.0f, 1.0f, 1.0f, alpha};
         push_quad(ctx, &ctx->whiteTex, px, py, px + s, py, px + s, py + s, px, py + s,
                   .5f, .5f, .5f, .5f, pc);
     }
@@ -932,10 +963,13 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
             float dB = fminf(rB, (float)(c->srcY + c->height));
             if (dL >= dR || dT >= dB) continue;
 
-            float u0 = (dL - c->srcX) / (float)c->potW;
-            float v0 = (dT - c->srcY) / (float)c->potH;
-            float u1 = (dR - c->srcX) / (float)c->potW;
-            float v1 = (dB - c->srcY) / (float)c->potH;
+            float mX = (dR - dL > 1.0f) ? 0.5f : 0.0f;
+            float mY = (dB - dT > 1.0f) ? 0.5f : 0.0f;
+
+            float u0 = (dL - c->srcX + mX) / (float)c->potW;
+            float v0 = (dT - c->srcY + mY) / (float)c->potH;
+            float u1 = (dR - c->srcX - mX) / (float)c->potW;
+            float v1 = (dB - c->srcY - mY) / (float)c->potH;
 
             float tL = (dL - rL) / sw, tR = (dR - rL) / sw;
             float tT = (dT - rT) / sh, tB = (dB - rT) / sh;
