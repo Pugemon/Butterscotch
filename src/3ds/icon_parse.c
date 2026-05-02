@@ -114,7 +114,7 @@ static int decode_icon_dib_to_rgba(const uint8_t *dib, size_t dib_size, uint8_t 
                 r = src_row[x * 3 + 2];
             } else if (bpp == 16) {
                 uint16_t pix = rd16(src_row + x * 2);
-                // RGB555 default for icons; close enough for thumbnails
+                // Decode RGB555 icon pixels.
                 r = (uint8_t)(((pix >> 10) & 0x1F) * 255 / 31);
                 g = (uint8_t)(((pix >> 5) & 0x1F) * 255 / 31);
                 b = (uint8_t)(((pix >> 0) & 0x1F) * 255 / 31);
@@ -131,9 +131,7 @@ static int decode_icon_dib_to_rgba(const uint8_t *dib, size_t dib_size, uint8_t 
                 if (idx < colors) { b = palette[idx*4]; g = palette[idx*4+1]; r = palette[idx*4+2]; }
             }
 
-            // If the 32bpp XOR plane already has a real alpha channel we trust it
-            // entirely and ignore the legacy AND mask, otherwise the mask bites
-            // into anti-aliased edges.
+            // Use XOR alpha when present; otherwise apply the legacy AND mask.
             if (and_row && !(bpp == 32 && has_valid_alpha)) {
                 uint8_t mask_bit = (and_row[x / 8] >> (7 - (x % 8))) & 1;
                 if (mask_bit) a = 0;
@@ -310,7 +308,7 @@ bool extract_icon_from_exe_pe(const char *path, IconImage *out) {
     int best_score = -1;
     const int IDEAL_DIM = 76; // launcher tile size; we want the smallest icon >= this
 
-    // GameMaker Studio 1.4 sometimes hides the main icon in a non-first group, so scan everything.
+    // Some GMS 1.4 executables store the main icon outside the first group.
     for (int g = 0; g < total_groups; g++) {
         uint32_t group_name_dir = rd32(rsrc + group_type_dir + 16 + g * 8 + 4) & 0x7FFFFFFF;
         uint32_t group_lang_dir;
@@ -334,9 +332,7 @@ bool extract_icon_from_exe_pe(const char *path, IconImage *out) {
                     int bpp = rd16(e + 6);
                     uint16_t id = rd16(e + 12);
 
-                    // Strongly prefer 32bpp; among those pick the smallest dim that's >= the
-                    // launcher tile size, otherwise the largest available. Then break ties by
-                    // bpp.
+                    // Prefer 32bpp icons at launcher tile size, then the largest available.
                     int depth_bonus = 0;
                     if (bpp >= 32) depth_bonus = 200000;
                     else if (bpp >= 24) depth_bonus = 150000;

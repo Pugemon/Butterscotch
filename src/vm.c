@@ -340,6 +340,35 @@ static GMLArray* VM_arrayWriteAt(VMContext* ctx, RValue* slot, int32_t index, RV
     return arr;
 }
 
+static void putLegacyArrayValue(ArrayMapEntry** map, int32_t varId, int32_t index, RValue val) {
+    int64_t key = ((int64_t) varId << 32) | (uint32_t) index;
+    RValue copy = RValue_makeIndependent(val);
+    ptrdiff_t existing = hmgeti(*map, key);
+    if (existing >= 0) {
+        RValue_free(&(*map)[existing].value);
+        (*map)[existing].value = copy;
+    } else {
+        hmput(*map, key, copy);
+    }
+}
+
+static void syncLegacyArraySlot(ArrayMapEntry** map, int32_t varId, int32_t index, RValue* slot) {
+    if (map == nullptr || slot == nullptr || slot->type != RVALUE_ARRAY || slot->array == nullptr) return;
+    RValue* cell = GMLArray_slot(slot->array, index);
+    if (cell == nullptr) return;
+    putLegacyArrayValue(map, varId, index, *cell);
+}
+
+static void syncLegacyGlobalArraySlot(VMContext* ctx, int32_t varId, int32_t index, RValue* slot) {
+    if (ctx == nullptr || varId < 0) return;
+    syncLegacyArraySlot(&ctx->globalArrayMap, varId, index, slot);
+}
+
+static void syncLegacySelfArraySlot(Instance* inst, int32_t varId, int32_t index, RValue* slot) {
+    if (inst == nullptr || varId < 0) return;
+    syncLegacyArraySlot(&inst->selfArrayMap, varId, index, slot);
+}
+
 // Public entry point for builtins that materialise an array and return it (layer_get_all).
 // Returned RValue holds one strong ref, caller is expected to consume it (stack push / variable write).
 // Owner is left null, the first write through a variable slot will claim it.
@@ -799,6 +828,7 @@ static void writeSingleInstanceVariable(VMContext* ctx, Instance* inst, Variable
     if (access->isArray) {
         RValue* slot = IntRValueHashMap_getOrInsertUndefined(&inst->selfVars, varDef->varID);
         VM_arrayWriteAt((VMContext*) ctx, slot, access->arrayIndex, val);
+        syncLegacySelfArraySlot(inst, varDef->varID, access->arrayIndex, slot);
         return;
     }
 
@@ -1040,6 +1070,11 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
     // Array write via VM_arrayWriteAt (handles CoW fork, grow, owner stamping).
     if (access.isArray) {
         VM_arrayWriteAt(ctx, slot, access.arrayIndex, val);
+        if (instanceType == INSTANCE_GLOBAL) {
+            syncLegacyGlobalArraySlot(ctx, varDef->varID, access.arrayIndex, slot);
+        } else if (instanceType != INSTANCE_LOCAL) {
+            syncLegacySelfArraySlot(targetInstance, varDef->varID, access.arrayIndex, slot);
+        }
 #ifdef ENABLE_VM_TRACING
         const char* scopeName =
             instanceType == INSTANCE_LOCAL ? "local" :
@@ -1457,6 +1492,19 @@ static void handlePop(VMContext* ctx, uint32_t instr, uint8_t type1, uint8_t typ
             }
             if (slot != nullptr) {
                 VM_arrayWriteAt(ctx, slot, arrayIndex, val);
+                if (instanceType == INSTANCE_GLOBAL) {
+                    syncLegacyGlobalArraySlot(ctx, varDef->varID, arrayIndex, slot);
+                } else if (instanceType != INSTANCE_LOCAL) {
+                    Instance* syncInst = nullptr;
+                    if (instanceType == INSTANCE_SELF) {
+                        syncInst = (Instance*) ctx->currentInstance;
+                    } else if (instanceType == INSTANCE_OTHER && ctx->otherInstance != nullptr) {
+                        syncInst = (Instance*) ctx->otherInstance;
+                    } else if (instanceType >= 0) {
+                        syncInst = findInstanceByTarget(ctx, instanceType);
+                    }
+                    syncLegacySelfArraySlot(syncInst, varDef->varID, arrayIndex, slot);
+                }
 #ifdef ENABLE_VM_TRACING
                 bool isSelfScope = (instanceType != INSTANCE_LOCAL && instanceType != INSTANCE_GLOBAL);
                 const char* scopeName = instanceType == INSTANCE_LOCAL ? "local" : instanceType == INSTANCE_GLOBAL ? "global" : "self";
@@ -3153,6 +3201,11 @@ VMContext* VM_create(DataWin* dataWin) {
     requireMessage(16384 >= sizeof(VMContext), "VMContext exceeds PS2 scratchpad size (16 KB)");
     VMContext* ctx = (VMContext*) 0x70000000;
     memset(ctx, 0, sizeof(VMContext));
+#elif defined(PLATFORM_3DS)
+    static __attribute__((aligned(32))) uint8_t vmContextStorage[sizeof(VMContext)];
+    requireMessage(32768 >= sizeof(VMContext), "VMContext exceeds 3DS L1 data cache size (32 KB)");
+    VMContext* ctx = (VMContext*) vmContextStorage;
+    memset(ctx, 0, sizeof(VMContext));
 #else
     VMContext* ctx = safeCalloc(1, sizeof(VMContext));
 #endif
@@ -3270,6 +3323,18 @@ VMContext* VM_create(DataWin* dataWin) {
         if (0 > existing) {
             shput(ctx->codeIndexByName, (char*) codeName, (int32_t) i);
         }
+        if (strncmp(codeName, "gml_Script_", 11) == 0) {
+            const char* shortName = codeName + 11;
+            if (shgeti(ctx->codeIndexByName, (char*) shortName) < 0) {
+                shput(ctx->codeIndexByName, (char*) shortName, (int32_t) i);
+            }
+        }
+        if (strncmp(codeName, "gml_GlobalScript_", 17) == 0) {
+            const char* shortName = codeName + 17;
+            if (shgeti(ctx->codeIndexByName, (char*) shortName) < 0) {
+                shput(ctx->codeIndexByName, (char*) shortName, (int32_t) i);
+            }
+        }
     }
 
     // Build codeName -> CodeLocals* hash map
@@ -3324,6 +3389,11 @@ void VM_reset(VMContext* ctx) {
         RValue_free(&ctx->globalVars[i]);
         ctx->globalVars[i].type = RVALUE_UNDEFINED;
     }
+    repeat((int32_t) hmlen(ctx->globalArrayMap), i) {
+        RValue_free(&ctx->globalArrayMap[i].value);
+    }
+    hmfree(ctx->globalArrayMap);
+    ctx->globalArrayMap = nullptr;
 
     // Reset stack
     ctx->stack.top = 0;
@@ -4146,6 +4216,10 @@ void VM_free(VMContext* ctx) {
 
     // Free global vars array itself
     free(ctx->globalVars);
+    repeat((int32_t) hmlen(ctx->globalArrayMap), i) {
+        RValue_free(&ctx->globalArrayMap[i].value);
+    }
+    hmfree(ctx->globalArrayMap);
 
     // Free hash maps
     shfree(ctx->codeIndexByName);
@@ -4203,7 +4277,7 @@ void VM_free(VMContext* ctx) {
         ctx->codeLocalsSlotMaps = nullptr;
     }
 
-#ifndef PLATFORM_PS2
+#if !defined(PLATFORM_PS2) && !defined(PLATFORM_3DS)
     free(ctx);
 #endif
 }

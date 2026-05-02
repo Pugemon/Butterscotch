@@ -33,6 +33,7 @@ typedef struct Instance {
 
     // Per-instance self variable storage (sparse open-addressed hashmap, keyed by varID).
     IntRValueHashMap selfVars;
+    ArrayMapEntry* selfArrayMap;
 
     // Built-in instance properties
     int32_t spriteIndex;

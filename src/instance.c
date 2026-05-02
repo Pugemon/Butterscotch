@@ -8,6 +8,17 @@
 #include "utils.h"
 #include "int_rvalue_hashmap.h"
 
+static void arrayMapPutOwned(ArrayMapEntry** map, int64_t key, RValue value) {
+    RValue copy = RValue_makeIndependent(value);
+    ptrdiff_t existing = hmgeti(*map, key);
+    if (existing >= 0) {
+        RValue_free(&(*map)[existing].value);
+        (*map)[existing].value = copy;
+    } else {
+        hmput(*map, key, copy);
+    }
+}
+
 Instance* Instance_create(uint32_t instanceId, int32_t objectIndex, GMLReal x, GMLReal y) {
     Instance* inst = safeCalloc(1, sizeof(Instance));
     inst->instanceId = instanceId;
@@ -77,6 +88,10 @@ void Instance_free(Instance* instance) {
 
     // Free owned strings and decRef owned arrays in selfVars hashmap, then release the entries buffer.
     IntRValueHashMap_freeAllValues(&instance->selfVars);
+    repeat((int32_t) hmlen(instance->selfArrayMap), i) {
+        RValue_free(&instance->selfArrayMap[i].value);
+    }
+    hmfree(instance->selfArrayMap);
     arrfree(instance->collisionCells);
 
     free(instance);
@@ -132,6 +147,10 @@ void Instance_copyFields(Instance* source, Instance* destination) {
         if (entry->key != INT_RVALUE_HASHMAP_EMPTY_KEY) {
             Instance_setSelfVar(destination, entry->key, entry->value);
         }
+    }
+
+    repeat((int32_t) hmlen(source->selfArrayMap), i) {
+        arrayMapPutOwned(&destination->selfArrayMap, source->selfArrayMap[i].key, source->selfArrayMap[i].value);
     }
 }
 

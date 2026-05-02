@@ -72,6 +72,11 @@ typedef struct RValue {
 #endif
 } __attribute__((aligned(8))) RValue;
 
+typedef struct {
+    int64_t key;
+    RValue value;
+} ArrayMapEntry;
+
 // Helper to initialize .gmlStackType only on BC17+ builds
 #if IS_BC17_OR_HIGHER_ENABLED
 #  define RVALUE_INIT_GMLTYPE(t) .gmlStackType = (t)

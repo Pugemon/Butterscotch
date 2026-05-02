@@ -6,9 +6,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sys/stat.h>
 
 #include "stb_ds.h"
 #include "utils.h"
+
+#ifdef __3DS__
+#include <3ds.h>
+#define DW_BIG_ALLOC(sz) linearAlloc(sz)
+#define DW_BIG_FREE(ptr) do { if ((ptr) != nullptr) linearFree(ptr); } while (0)
+#else
+#define DW_BIG_ALLOC(sz) malloc(sz)
+#define DW_BIG_FREE(ptr) free(ptr)
+#endif
 
 // ===[ HELPERS ]===
 
@@ -1587,7 +1597,158 @@ static void parseTPAG(BinaryReader* reader, DataWin* dw) {
     free(ptrs);
 }
 
-static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, size_t chunkDataStart) {
+#define CODE_CACHE_MAGIC "CCH1"
+#define CODE_CACHE_VERSION 1u
+
+#pragma pack(push, 1)
+typedef struct {
+    char magic[4];
+    uint32_t version;
+    uint64_t srcSize;
+    uint64_t srcMtime;
+    uint32_t codeCount;
+    uint32_t blobBase;
+    uint32_t blobSize;
+    uint32_t reserved;
+} CodeCacheHeader;
+
+typedef struct {
+    uint32_t nameOff;
+    uint32_t length;
+    uint16_t localsCount;
+    uint16_t argumentsCount;
+    uint32_t bytecodeAbsoluteOffset;
+    uint32_t offset;
+} CodeCacheEntry;
+#pragma pack(pop)
+
+static bool tryLoadCodeCache(DataWin* dw, const char* cachePath) {
+    if (cachePath == nullptr || dw->filePath == nullptr) return false;
+
+    struct stat srcSt;
+    if (stat(dw->filePath, &srcSt) != 0) return false;
+
+    FILE* f = fopen(cachePath, "rb");
+    if (f == nullptr) return false;
+    setvbuf(f, nullptr, _IOFBF, 64 * 1024);
+
+    CodeCacheHeader hdr;
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1) {
+        fclose(f);
+        return false;
+    }
+
+    if (memcmp(hdr.magic, CODE_CACHE_MAGIC, 4) != 0 ||
+        hdr.version != CODE_CACHE_VERSION ||
+        hdr.srcSize != (uint64_t) srcSt.st_size ||
+        hdr.srcMtime != (uint64_t) srcSt.st_mtime) {
+        fclose(f);
+        return false;
+    }
+
+    if (hdr.codeCount == 0) {
+        fclose(f);
+        dw->code.count = 0;
+        dw->code.entries = nullptr;
+        dw->bytecodeBuffer = nullptr;
+        dw->bytecodeBufferBase = 0;
+        return true;
+    }
+
+    CodeEntry* entries = safeMalloc(hdr.codeCount * sizeof(CodeEntry));
+    CodeCacheEntry* raw = safeMalloc(hdr.codeCount * sizeof(CodeCacheEntry));
+    if (fread(raw, sizeof(CodeCacheEntry), hdr.codeCount, f) != hdr.codeCount) {
+        free(entries);
+        free(raw);
+        fclose(f);
+        return false;
+    }
+
+    repeat(hdr.codeCount, i) {
+        entries[i].name = (raw[i].nameOff == 0) ? nullptr : (const char*) (dw->strgBuffer + (raw[i].nameOff - dw->strgBufferBase));
+        entries[i].length = raw[i].length;
+        entries[i].localsCount = raw[i].localsCount;
+        entries[i].argumentsCount = raw[i].argumentsCount;
+        entries[i].bytecodeAbsoluteOffset = raw[i].bytecodeAbsoluteOffset;
+        entries[i].offset = raw[i].offset;
+    }
+    free(raw);
+
+    uint8_t* blob = DW_BIG_ALLOC(hdr.blobSize);
+    if (blob == nullptr) {
+        free(entries);
+        fclose(f);
+        return false;
+    }
+    if (fread(blob, 1, hdr.blobSize, f) != hdr.blobSize) {
+        DW_BIG_FREE(blob);
+        free(entries);
+        fclose(f);
+        return false;
+    }
+
+    fclose(f);
+    dw->code.count = hdr.codeCount;
+    dw->code.entries = entries;
+    dw->bytecodeBuffer = blob;
+    dw->bytecodeBufferBase = hdr.blobBase;
+    fprintf(stderr, "[mem] CODE bytecode: %.2f MB (cache)\n", (float) hdr.blobSize / (1024.0f * 1024.0f));
+    return true;
+}
+
+static void writeCodeCache(DataWin* dw, const char* cachePath, size_t blobSize) {
+    if (cachePath == nullptr || dw->filePath == nullptr) return;
+
+    struct stat srcSt;
+    if (stat(dw->filePath, &srcSt) != 0) return;
+
+    FILE* f = fopen(cachePath, "wb");
+    if (f == nullptr) return;
+    setvbuf(f, nullptr, _IOFBF, 256 * 1024);
+
+    CodeCacheHeader hdr = {0};
+    memcpy(hdr.magic, CODE_CACHE_MAGIC, 4);
+    hdr.version = CODE_CACHE_VERSION;
+    hdr.srcSize = (uint64_t) srcSt.st_size;
+    hdr.srcMtime = (uint64_t) srcSt.st_mtime;
+    hdr.codeCount = dw->code.count;
+    hdr.blobBase = dw->bytecodeBufferBase;
+    hdr.blobSize = (uint32_t) blobSize;
+    if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) {
+        fclose(f);
+        return;
+    }
+
+    if (dw->code.count > 0) {
+        CodeCacheEntry* raw = safeMalloc(dw->code.count * sizeof(CodeCacheEntry));
+        repeat(dw->code.count, i) {
+            const CodeEntry* e = &dw->code.entries[i];
+            raw[i].nameOff = (e->name == nullptr) ? 0 : (uint32_t) ((const uint8_t*) e->name - dw->strgBuffer + dw->strgBufferBase);
+            raw[i].length = e->length;
+            raw[i].localsCount = e->localsCount;
+            raw[i].argumentsCount = e->argumentsCount;
+            raw[i].bytecodeAbsoluteOffset = e->bytecodeAbsoluteOffset;
+            raw[i].offset = e->offset;
+        }
+        size_t wrote = fwrite(raw, sizeof(CodeCacheEntry), dw->code.count, f);
+        free(raw);
+        if (wrote != dw->code.count) {
+            fclose(f);
+            return;
+        }
+    }
+
+    if (blobSize > 0 && dw->bytecodeBuffer != nullptr) {
+        if (fwrite(dw->bytecodeBuffer, 1, blobSize, f) != blobSize) {
+            fclose(f);
+            return;
+        }
+    }
+
+    fclose(f);
+}
+
+static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, size_t chunkDataStart, DataWinParserOptions options) {
     Code* c = &dw->code;
 
     if (chunkLength == 0) {
@@ -1597,6 +1758,8 @@ static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, s
         return;
     }
 
+    if (tryLoadCodeCache(dw, options.codeCachePath)) return;
+
     // Standard pointer list at chunk start. Each entry has a relative offset
     // (bytecodeRelAddr) that points to the actual bytecode blob elsewhere in the chunk.
 
@@ -1604,7 +1767,12 @@ static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, s
     uint32_t* codePtrs = readPointerTable(reader, &codeCount);
     c->count = codeCount;
 
-    if (codeCount == 0) { free(codePtrs); c->entries = nullptr; return; }
+    if (codeCount == 0) {
+        free(codePtrs);
+        c->entries = nullptr;
+        writeCodeCache(dw, options.codeCachePath, 0);
+        return;
+    }
 
     c->entries = safeMalloc(codeCount * sizeof(CodeEntry));
     repeat(codeCount, i) {
@@ -1637,7 +1805,18 @@ static void parseCODE(BinaryReader* reader, DataWin* dw, uint32_t chunkLength, s
     size_t blobSize = chunkEnd - blobStart;
 
     dw->bytecodeBufferBase = blobStart;
-    dw->bytecodeBuffer = BinaryReader_readBytesAt(reader, blobStart, blobSize);
+    dw->bytecodeBuffer = DW_BIG_ALLOC(blobSize);
+    if (dw->bytecodeBuffer == nullptr) {
+        fprintf(stderr, "FATAL: big-alloc(%zu) for bytecodeBuffer failed\n", blobSize);
+        exit(1);
+    }
+    {
+        size_t savedPos = BinaryReader_getPosition(reader);
+        BinaryReader_seek(reader, blobStart);
+        BinaryReader_readBytes(reader, dw->bytecodeBuffer, blobSize);
+        BinaryReader_seek(reader, savedPos);
+    }
+    writeCodeCache(dw, options.codeCachePath, blobSize);
 }
 
 static void parseVARI(BinaryReader* reader, DataWin* dw, uint32_t chunkLength) {
@@ -1895,7 +2074,15 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
 
         if (options.parseStrg && memcmp(chunkName, "STRG", 4) == 0) {
             dw->strgBufferBase = chunkDataStart;
-            dw->strgBuffer = BinaryReader_readBytesAt(&reader, chunkDataStart, chunkLength);
+            dw->strgBuffer = DW_BIG_ALLOC(chunkLength);
+            if (dw->strgBuffer == nullptr) {
+                fprintf(stderr, "FATAL: big-alloc(%u) for strgBuffer failed\n", chunkLength);
+                exit(1);
+            }
+            size_t savedPos = BinaryReader_getPosition(&reader);
+            BinaryReader_seek(&reader, chunkDataStart);
+            BinaryReader_readBytes(&reader, dw->strgBuffer, chunkLength);
+            BinaryReader_seek(&reader, savedPos);
         }
 
         if ((memcmp(chunkName, "CODE", 4) == 0) && chunkLength > 0) {
@@ -2035,7 +2222,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         } else if (options.parseTpag && memcmp(chunkName, "TPAG", 4) == 0) {
             parseTPAG(&reader, dw);
         } else if (options.parseCode && memcmp(chunkName, "CODE", 4) == 0) {
-            parseCODE(&reader, dw, chunkLength, chunkDataStart);
+            parseCODE(&reader, dw, chunkLength, chunkDataStart, options);
         } else if (options.parseVari && memcmp(chunkName, "VARI", 4) == 0) {
             parseVARI(&reader, dw, chunkLength);
         } else if (options.parseFunc && memcmp(chunkName, "FUNC", 4) == 0) {
@@ -2272,8 +2459,8 @@ void DataWin_free(DataWin* dw) {
     }
 
     // Owned buffers
-    free(dw->strgBuffer);
-    free(dw->bytecodeBuffer);
+    DW_BIG_FREE(dw->strgBuffer);
+    DW_BIG_FREE(dw->bytecodeBuffer);
 
     // Close the lazy-load file handle (only open when lazyLoadRooms was enabled)
     if (dw->lazyLoadFile != nullptr) {

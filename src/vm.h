@@ -169,6 +169,7 @@ typedef struct VMContext {
     uint32_t localVarCount;
     RValue* globalVars;
     uint32_t globalVarCount;
+    ArrayMapEntry* globalArrayMap;
     struct Instance* currentInstance;
     struct Instance* otherInstance; // "other" instance for collision events
     DataWin* dataWin;

@@ -190,6 +190,7 @@ static void flush_batch(CtrRenderer *ctx) {
         ctx->batchTex   = NULL;
         return;
     }
+    GSPGPU_FlushDataCache(ctx->vbuf + ctx->batchStart, ctx->batchVerts * sizeof(CtrVertex));
     C3D_TexBind(0, ctx->batchTex);
     C3D_DrawArrays(GPU_TRIANGLES, ctx->batchStart, ctx->batchVerts);
     ctx->batchStart += ctx->batchVerts;

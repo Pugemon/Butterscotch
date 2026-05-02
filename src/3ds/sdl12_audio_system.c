@@ -105,7 +105,7 @@ static bool load_sfx(SysMixer *sm, int id, AudioEntry *ent) {
     return sm->chunks[id] != NULL;
 }
 
-//stahp the music
+// Stop the current music track.
 static void stop_other_music(SysMixer *sm, int keepId) {
     for (uint32_t i = 0; i < sm->base.dataWin->sond.count; i++) {
         if (i != keepId && sm->music[i]) {
@@ -170,7 +170,7 @@ static bool ensure_snd(SysMixer *sm, int id) {
     return sm->chunks[id] || sm->music[id];
 }
 
-// Added dynamic float array for tracking pitches if game needs them stored
+// Track per-sound pitch values.
 static float *snd_pitches;
 
 static void sys_init(AudioSystem *sys, DataWin *dw, FileSystem *fs) {

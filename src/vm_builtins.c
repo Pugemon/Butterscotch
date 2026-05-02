@@ -26,6 +26,11 @@
 
 #define MAX_BACKGROUNDS 8
 
+#ifdef PLATFORM_3DS
+extern char g_next_game_path[256];
+extern bool g_game_change_requested;
+#endif
+
 // ===[ STUB LOGGING ]===
 
 #ifdef ENABLE_VM_STUB_LOGS
@@ -3236,6 +3241,8 @@ STUB_RETURN_ZERO(steam_file_exists)
 STUB_RETURN_UNDEFINED(steam_file_write)
 STUB_RETURN_UNDEFINED(steam_file_read)
 STUB_RETURN_ZERO(steam_get_persona_name)
+STUB_RETURN_ZERO(steam_file_delete)
+STUB_RETURN_ZERO(steam_file_write_file)
 
 // ===[ Audio Built-in Functions ]===
 
@@ -4236,6 +4243,24 @@ static RValue builtinWindowHasFocus(VMContext* ctx, MAYBE_UNUSED RValue* args, M
 }
 
 // ===[ Game State Functions ]===
+#ifdef PLATFORM_3DS
+static RValue builtinGameChange(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeUndefined();
+
+    char* newGame = RValue_toString(args[0]);
+    strncpy(g_next_game_path, newGame, sizeof(g_next_game_path) - 1);
+    g_next_game_path[sizeof(g_next_game_path) - 1] = '\0';
+    g_game_change_requested = true;
+    free(newGame);
+
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner != nullptr) {
+        runner->shouldExit = true;
+    }
+    return RValue_makeUndefined();
+}
+#endif
+
 static RValue builtinGameRestart(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     ctx->runner->pendingRoom = ROOM_RESTARTGAME;
     return RValue_makeUndefined();
@@ -8576,6 +8601,129 @@ static RValue builtinGpuSetColorWriteEnable(VMContext* ctx, RValue* args, int32_
     return RValue_makeUndefined();
 }
 
+// ===[ LEGACY / 3DS COMPATIBILITY ]===
+
+STUB_RETURN_ZERO(draw_enable_alphablend)
+STUB_RETURN_UNDEFINED(draw_point_color)
+STUB_RETURN_UNDEFINED(ds_map_set_post)
+STUB_RETURN_VALUE(ini_open_from_string, 0)
+STUB_RETURN_VALUE(buffer_async_group_begin, -1)
+STUB_RETURN_UNDEFINED(buffer_async_group_option)
+STUB_RETURN_VALUE(buffer_async_group_end, -1)
+STUB_RETURN_VALUE(buffer_load_async, -1)
+STUB_RETURN_VALUE(buffer_save_async, -1)
+STUB_RETURN_VALUE(get_string_async, -1)
+STUB_RETURN_ZERO(extension_stubfunc_real)
+STUB_RETURN_UNDEFINED(action_previous_room)
+STUB_RETURN_UNDEFINED(texture_set_interpolation)
+STUB_RETURN_ZERO(sprite_prefetch)
+STUB_RETURN_VALUE(sprite_replace, -1)
+STUB_RETURN_ZERO(window_get_x)
+STUB_RETURN_ZERO(window_get_y)
+STUB_RETURN_UNDEFINED(window_set_position)
+STUB_RETURN_ZERO(os_is_paused)
+
+static RValue builtinDateCurrentDatetime(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal((GMLReal) time(nullptr) / 86400.0 + 25569.0);
+}
+
+static RValue builtinDsMapDelete(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (2 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t id = RValue_toInt32(args[0]);
+    DsMapEntry** mapPtr = dsMapGet(runner, id);
+    if (mapPtr == nullptr) return RValue_makeUndefined();
+
+    ptrdiff_t idx = getValueIndexInMap(mapPtr, args[1]);
+    if (0 <= idx) {
+        char* ownedKey = (*mapPtr)[idx].key;
+        RValue_free(&(*mapPtr)[idx].value);
+        shdel(*mapPtr, ownedKey);
+        free(ownedKey);
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtinJsonEncode(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    logStubbedFunction(ctx, "json_encode");
+    return RValue_makeOwnedString(safeStrdup("{}"));
+}
+
+static RValue builtinFileRename(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (2 > argCount) return RValue_makeBool(false);
+    char* src = RValue_toString(args[0]);
+    char* dst = RValue_toString(args[1]);
+    int rc = rename(src, dst);
+    free(src);
+    free(dst);
+    return RValue_makeBool(rc == 0);
+}
+
+static RValue builtinActionSetMotion(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (2 > argCount || ctx->currentInstance == nullptr) return RValue_makeUndefined();
+    Instance* inst = (Instance*) ctx->currentInstance;
+    inst->direction = (float) RValue_toReal(args[0]);
+    inst->speed = (float) RValue_toReal(args[1]);
+    Instance_computeComponentsFromSpeed(inst);
+    return RValue_makeUndefined();
+}
+
+static RValue builtinDrawGetpixel(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (2 > argCount) return RValue_makeReal(0.0);
+    Runner* runner = (Runner*) ctx->runner;
+    float px = (float) RValue_toReal(args[0]);
+    float py = (float) RValue_toReal(args[1]);
+    uint32_t hitColor = 0;
+    int32_t minDepth = 9999999;
+
+    int32_t snapBase = Runner_pushInstancesForTarget(runner, INSTANCE_ALL);
+    int32_t snapEnd = (int32_t) arrlen(runner->instanceSnapshots);
+    for (int32_t i = snapBase; snapEnd > i; i++) {
+        Instance* inst = runner->instanceSnapshots[i];
+        if (!inst->active || !inst->visible) continue;
+
+        InstanceBBox bbox = Collision_computeBBox(ctx->dataWin, inst);
+        if (bbox.valid && px >= bbox.left && px <= bbox.right && py >= bbox.top && py <= bbox.bottom) {
+            if (inst->depth < minDepth) {
+                minDepth = inst->depth;
+                hitColor = inst->imageBlend;
+            }
+        }
+    }
+    Runner_popInstanceSnapshot(runner, snapBase);
+    return RValue_makeReal((GMLReal) hitColor);
+}
+
+static RValue builtinSpriteCollisionMask(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (9 > argCount) return RValue_makeUndefined();
+    int32_t spriteIndex = RValue_toInt32(args[0]);
+    DataWin* dw = ctx->dataWin;
+    if (0 > spriteIndex || (uint32_t) spriteIndex >= dw->sprt.count) return RValue_makeUndefined();
+
+    Sprite* spr = &dw->sprt.sprites[spriteIndex];
+    int32_t bboxMode = RValue_toInt32(args[2]);
+    int32_t bbLeft = RValue_toInt32(args[3]);
+    int32_t bbRight = RValue_toInt32(args[4]);
+    int32_t bbTop = RValue_toInt32(args[5]);
+    int32_t bbBottom = RValue_toInt32(args[6]);
+
+    if (bboxMode == 2) {
+        spr->bboxMode = 2;
+        spr->marginLeft = bbLeft;
+        spr->marginRight = bbRight;
+        spr->marginTop = bbTop;
+        spr->marginBottom = bbBottom;
+    } else if (bboxMode == 1) {
+        spr->bboxMode = 1;
+        spr->marginLeft = 0;
+        spr->marginRight = spr->width > 0 ? (int32_t) spr->width - 1 : 0;
+        spr->marginTop = 0;
+        spr->marginBottom = spr->height > 0 ? (int32_t) spr->height - 1 : 0;
+    }
+
+    return RValue_makeUndefined();
+}
+
 // ===[ REGISTRATION ]===
 
 void VMBuiltins_registerAll(VMContext* ctx) {
@@ -8699,6 +8847,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     // OS
     VM_registerBuiltin(ctx, "os_get_language", builtinOsGetLanguage);
     VM_registerBuiltin(ctx, "os_get_region", builtinOsGetRegion);
+    VM_registerBuiltin(ctx, "os_is_paused", builtin_os_is_paused);
 
     // ds_map
     VM_registerBuiltin(ctx, "ds_map_create", builtinDsMapCreate);
@@ -8711,6 +8860,13 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "ds_map_find_next", builtinDsMapFindNext);
     VM_registerBuiltin(ctx, "ds_map_size", builtinDsMapSize);
     VM_registerBuiltin(ctx, "ds_map_destroy", builtinDsMapDestroy);
+    VM_registerBuiltin(ctx, "ds_map_delete", builtinDsMapDelete);
+    VM_registerBuiltin(ctx, "ds_map_set_post", builtin_ds_map_set_post);
+
+    VM_registerBuiltin(ctx, "date_current_datetime", builtinDateCurrentDatetime);
+    VM_registerBuiltin(ctx, "json_encode", builtinJsonEncode);
+    VM_registerBuiltin(ctx, "get_string_async", builtin_get_string_async);
+    VM_registerBuiltin(ctx, "extension_stubfunc_real", builtin_extension_stubfunc_real);
 
     // ds_list stubs
     VM_registerBuiltin(ctx, "ds_list_create", builtinDsListCreate);
@@ -8737,6 +8893,8 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "steam_file_write", builtin_steam_file_write);
     VM_registerBuiltin(ctx, "steam_file_read", builtin_steam_file_read);
     VM_registerBuiltin(ctx, "steam_get_persona_name", builtin_steam_get_persona_name);
+    VM_registerBuiltin(ctx, "steam_file_delete", builtin_steam_file_delete);
+    VM_registerBuiltin(ctx, "steam_file_write_file", builtin_steam_file_write_file);
 
     // Audio
     VM_registerBuiltin(ctx, "audio_channel_num", builtin_audioChannelNum);
@@ -8798,6 +8956,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "ini_read_string", builtinIniReadString);
     VM_registerBuiltin(ctx, "ini_read_real", builtinIniReadReal);
     VM_registerBuiltin(ctx, "ini_section_exists", builtinIniSectionExists);
+    VM_registerBuiltin(ctx, "ini_open_from_string", builtin_ini_open_from_string);
 
     // File
     VM_registerBuiltin(ctx, "file_exists", builtinFileExists);
@@ -8812,6 +8971,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "file_text_read_string", builtinFileTextReadString);
     VM_registerBuiltin(ctx, "file_text_read_real", builtinFileTextReadReal);
     VM_registerBuiltin(ctx, "file_text_readln", builtinFileTextReadln);
+    VM_registerBuiltin(ctx, "file_rename", builtinFileRename);
 
     // Keyboard
     VM_registerBuiltin(ctx, "keyboard_check", builtinKeyboardCheck);
@@ -8840,11 +9000,17 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "window_set_caption", builtinWindowSetCaption);
     VM_registerBuiltin(ctx, "window_set_size", builtin_window_set_size);
     VM_registerBuiltin(ctx, "window_center", builtin_window_center);
+    VM_registerBuiltin(ctx, "window_get_x", builtin_window_get_x);
+    VM_registerBuiltin(ctx, "window_get_y", builtin_window_get_y);
+    VM_registerBuiltin(ctx, "window_set_position", builtin_window_set_position);
     VM_registerBuiltin(ctx, "window_get_width", builtinWindowGetWidth);
     VM_registerBuiltin(ctx, "window_get_height", builtinWindowGetHeight);
     VM_registerBuiltin(ctx, "window_has_focus", builtinWindowHasFocus);
 
     // Game
+#ifdef PLATFORM_3DS
+    VM_registerBuiltin(ctx, "game_change", builtinGameChange);
+#endif
     VM_registerBuiltin(ctx, "game_restart", builtinGameRestart);
     VM_registerBuiltin(ctx, "game_end", builtinGameEnd);
     VM_registerBuiltin(ctx, "game_save", builtin_game_save);
@@ -8879,6 +9045,8 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "action_snap", builtinActionSnap);
     VM_registerBuiltin(ctx, "action_set_friction", builtinActionSetFriction);
     VM_registerBuiltin(ctx, "action_set_gravity", builtinActionSetGravity);
+    VM_registerBuiltin(ctx, "action_set_motion", builtinActionSetMotion);
+    VM_registerBuiltin(ctx, "action_previous_room", builtin_action_previous_room);
     VM_registerBuiltin(ctx, "action_set_hspeed", builtinActionSetHspeed);
     VM_registerBuiltin(ctx, "action_set_vspeed", builtinActionSetVspeed);
     VM_registerBuiltin(ctx, "event_inherited", builtinEventInherited);
@@ -8897,6 +9065,11 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "buffer_load", builtin_bufferLoad);
     VM_registerBuiltin(ctx, "buffer_save", builtin_bufferSave);
     VM_registerBuiltin(ctx, "buffer_base64_encode", builtin_buffer_base64_encode);
+    VM_registerBuiltin(ctx, "buffer_async_group_begin", builtin_buffer_async_group_begin);
+    VM_registerBuiltin(ctx, "buffer_async_group_option", builtin_buffer_async_group_option);
+    VM_registerBuiltin(ctx, "buffer_async_group_end", builtin_buffer_async_group_end);
+    VM_registerBuiltin(ctx, "buffer_load_async", builtin_buffer_load_async);
+    VM_registerBuiltin(ctx, "buffer_save_async", builtin_buffer_save_async);
 
     // PSN
     VM_registerBuiltin(ctx, "psn_init", builtin_psn_init);
@@ -8920,10 +9093,15 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "draw_clear", builtin_draw_clear);
     VM_registerBuiltin(ctx, "draw_clear_alpha", builtin_draw_clear_alpha);
     VM_registerBuiltin(ctx, "draw_healthbar", builtin_drawHealthbar);
+    VM_registerBuiltin(ctx, "draw_enable_alphablend", builtin_draw_enable_alphablend);
     VM_registerBuiltin(ctx, "draw_set_blend_mode", builtin_draw_set_blend_mode);
     VM_registerBuiltin(ctx, "draw_set_blend_mode_ext", builtinGpuSetBlendModeExt);
     VM_registerBuiltin(ctx, "draw_set_alpha_test", builtinGpuSetAlphaTestEnable);
     VM_registerBuiltin(ctx, "draw_set_alpha_test_ref_value", builtinGpuSetAlphaTestRef);
+    VM_registerBuiltin(ctx, "draw_point_color", builtin_draw_point_color);
+    VM_registerBuiltin(ctx, "draw_point_colour", builtin_draw_point_color);
+    VM_registerBuiltin(ctx, "draw_getpixel", builtinDrawGetpixel);
+    VM_registerBuiltin(ctx, "texture_set_interpolation", builtin_texture_set_interpolation);
     VM_registerBuiltin(ctx, "draw_set_color", builtin_drawSetColor);
     VM_registerBuiltin(ctx, "draw_set_alpha", builtin_drawSetAlpha);
     VM_registerBuiltin(ctx, "draw_set_font", builtin_drawSetFont);
@@ -8999,6 +9177,9 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "sprite_get_yoffset", builtin_spriteGetYOffset);
     VM_registerBuiltin(ctx, "sprite_get_name", builtin_spriteGetName);
     VM_registerBuiltin(ctx, "sprite_set_offset", builtin_spriteSetOffset);
+    VM_registerBuiltin(ctx, "sprite_prefetch", builtin_sprite_prefetch);
+    VM_registerBuiltin(ctx, "sprite_replace", builtin_sprite_replace);
+    VM_registerBuiltin(ctx, "sprite_collision_mask", builtinSpriteCollisionMask);
     VM_registerBuiltin(ctx, "sprite_create_from_surface", builtin_spriteCreateFromSurface);
     VM_registerBuiltin(ctx, "sprite_delete", builtin_spriteDelete);
 
