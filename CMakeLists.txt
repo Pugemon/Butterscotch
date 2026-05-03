@@ -407,19 +407,37 @@ elseif(PLATFORM STREQUAL "3ds")
     )
 
     target_compile_options(butterscotch PRIVATE
-        #-O3
-        #-flto
-        -marm
-        -ffast-math
-        -funroll-loops
-        -fomit-frame-pointer
-        -ffunction-sections
-        -fdata-sections
+            -mcpu=arm1176jzf-s
+            -mtune=arm1176jzf-s
+            -marm
+            -mfpu=vfpv2
+            -mfloat-abi=hard
+
+            -O2
+            -fno-strict-aliasing
+            -fno-crossjumping
+
+            -falign-functions=32
+            -falign-loops=32
+            -falign-jumps=32
+
+            -ffast-math
+            -fsingle-precision-constant
+            -fno-math-errno
+            -fno-trapping-math
+
+            -fno-exceptions
+            -fno-rtti
+            -fomit-frame-pointer
+            -ffunction-sections
+            -fdata-sections
+            -flto
     )
 
     target_link_options(butterscotch PRIVATE
-        #-flto
-        -Wl,--gc-sections
+            -flto
+            -Wl,-O2
+            -Wl,--gc-sections
     )
 
     ctr_create_3dsx(butterscotch)

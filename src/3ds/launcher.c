@@ -1,0 +1,798 @@
+﻿//
+// Created by Notebook on 03.05.2026.
+//
+#include "launcher.h"
+
+extern char g_current_cache_dir[256];
+
+extern char g_current_data_path[256];
+
+extern shaderProgram_s g_shaderProg;
+
+static int launcher_next_pow2(int x) {
+    if (x < 8) return 8;
+    x--;
+    x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16;
+    return x + 1;
+}
+
+static inline uint16_t launcher_pack_rgba4444(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    return ((r >> 4) << 12) | ((g >> 4) << 8) | ((b >> 4) << 4) | (a >> 4);
+}
+
+static inline uint32_t launcher_morton_pos(uint32_t x, uint32_t y) {
+    uint32_t r = 0;
+    r |= (x & 1u) << 0;
+    r |= (y & 1u) << 1;
+    r |= (x & 2u) << 1;
+    r |= (y & 2u) << 2;
+    r |= (x & 4u) << 2;
+    r |= (y & 4u) << 3;
+    return r;
+}
+
+static void launcher_tile_rgba4(const uint16_t *linear, uint16_t *tiled,
+                                int linW, int linH, int potW, int potH) {
+    int blocksX = potW >> 3;
+    int blocksY = potH >> 3;
+    for (int by = 0; by < blocksY; by++) {
+        for (int bx = 0; bx < blocksX; bx++) {
+            uint16_t *block = &tiled[(by * blocksX + bx) * 64];
+            for (int y = 0; y < 8; y++) {
+                for (int x = 0; x < 8; x++) {
+                    int sx = bx * 8 + x;
+                    int sy = (potH - 1) - (by * 8 + y);
+                    uint16_t px = 0;
+                    if (sx < linW && sy >= 0 && sy < linH) {
+                        px = linear[sy * linW + sx];
+                    }
+                    block[launcher_morton_pos((uint32_t)x, (uint32_t)y)] = px;
+                }
+            }
+        }
+    }
+}
+
+void free_game_icons(void) {
+    for (int i = 0; i < g_game_count; i++) {
+        if (g_games[i].icon_ready) {
+            C3D_TexDelete(&g_games[i].icon_tex);
+            memset(&g_games[i].icon_tex, 0, sizeof(g_games[i].icon_tex));
+            g_games[i].icon_ready = false;
+        }
+    }
+}
+
+static bool launcher_upload_icon(GameEntry *game, const IconImage *img) {
+    if (!game || !img || !img->pixels || img->width <= 0 || img->height <= 0) return false;
+
+    if (game->icon_ready) {
+        C3D_TexDelete(&game->icon_tex);
+        memset(&game->icon_tex, 0, sizeof(game->icon_tex));
+        game->icon_ready = false;
+    }
+
+    int potW = launcher_next_pow2(img->width);
+    int potH = launcher_next_pow2(img->height);
+    uint16_t *linear = calloc((size_t)potW * (size_t)potH, sizeof(uint16_t));
+    if (!linear) return false;
+
+    for (int y = 0; y < img->height; y++) {
+        for (int x = 0; x < img->width; x++) {
+            const uint8_t *p = &img->pixels[((size_t)y * (size_t)img->width + (size_t)x) * 4u];
+            linear[y * potW + x] = launcher_pack_rgba4444(p[0], p[1], p[2], p[3]);
+        }
+    }
+
+    if (!C3D_TexInit(&game->icon_tex, (u16)potW, (u16)potH, GPU_RGBA4)) {
+        free(linear);
+        return false;
+    }
+
+    uint16_t *tiled = linearAlloc((size_t)potW * (size_t)potH * sizeof(uint16_t));
+    if (!tiled) {
+        C3D_TexDelete(&game->icon_tex);
+        memset(&game->icon_tex, 0, sizeof(game->icon_tex));
+        free(linear);
+        return false;
+    }
+
+    launcher_tile_rgba4(linear, tiled, potW, potH, potW, potH);
+    C3D_TexLoadImage(&game->icon_tex, tiled, GPU_TEXFACE_2D, 0);
+    C3D_TexFlush(&game->icon_tex);
+    C3D_TexSetFilter(&game->icon_tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&game->icon_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+
+    linearFree(tiled);
+    free(linear);
+
+    game->icon_ready = true;
+    game->icon_w = img->width;
+    game->icon_h = img->height;
+    game->icon_pot_w = potW;
+    game->icon_pot_h = potH;
+    return true;
+}
+
+static bool launcher_has_ext(const char *name, const char *ext) {
+    size_t n = strlen(name);
+    size_t e = strlen(ext);
+    if (n < e) return false;
+    name += n - e;
+    for (size_t i = 0; i < e; i++) {
+        if (tolower((unsigned char)name[i]) != tolower((unsigned char)ext[i])) return false;
+    }
+    return true;
+}
+
+static bool launcher_find_exe(const char *dir_path, char *out_path, size_t out_size) {
+    DIR *dir = opendir(dir_path);
+    if (!dir) return false;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        if (!launcher_has_ext(ent->d_name, ".exe")) continue;
+        snprintf(out_path, out_size, "%s/%s", dir_path, ent->d_name);
+        closedir(dir);
+        return true;
+    }
+
+    closedir(dir);
+    return false;
+}
+
+static void launcher_try_load_icon(GameEntry *game, const char *game_dir) {
+    static const char *image_names[] = {
+        "icon.png", "icon.jpg", "icon.jpeg", "cover.png", "cover.jpg", "cover.jpeg"
+    };
+
+    for (size_t i = 0; i < sizeof(image_names) / sizeof(image_names[0]); i++) {
+        char image_path[256];
+        snprintf(image_path, sizeof(image_path), "%s/%s", game_dir, image_names[i]);
+        IconImage img;
+        if (load_image_from_file(image_path, &img)) {
+            bool ok = launcher_upload_icon(game, &img);
+            IconImage_free(&img);
+            if (ok) return;
+        }
+    }
+
+    if (launcher_find_exe(game_dir, game->exe_path, sizeof(game->exe_path))) {
+        IconImage img;
+        if (extract_icon_from_exe_pe(game->exe_path, &img)) {
+            bool ok = launcher_upload_icon(game, &img);
+            IconImage_free(&img);
+            if (ok) return;
+        }
+    }
+}
+
+static void launcher_gfx_flush(LauncherGfx *gfx) {
+    if (!gfx->batchVerts || !gfx->batchTex || !gfx->inFrame) {
+        gfx->batchVerts = 0;
+        gfx->batchTex = NULL;
+        return;
+    }
+    C3D_TexBind(0, gfx->batchTex);
+    C3D_DrawArrays(GPU_TRIANGLES, gfx->batchStart, gfx->batchVerts);
+    gfx->batchStart += gfx->batchVerts;
+    gfx->batchVerts = 0;
+    gfx->batchTex = NULL;
+}
+
+static LauncherVertex *launcher_gfx_reserve(LauncherGfx *gfx, uint32_t count, C3D_Tex *tex) {
+    if (gfx->batchTex && gfx->batchTex != tex) launcher_gfx_flush(gfx);
+    if (gfx->vbufHead + count > gfx->vbufCap) {
+        launcher_gfx_flush(gfx);
+        C3D_FrameSplit(0);
+        gfx->vbufHead = 0;
+        gfx->batchStart = 0;
+    }
+    gfx->batchTex = tex;
+    LauncherVertex *v = gfx->vbuf + gfx->vbufHead;
+    gfx->vbufHead += count;
+    gfx->batchVerts += count;
+    return v;
+}
+
+static void launcher_push_quad_grad(LauncherGfx *gfx, C3D_Tex *tex,
+                                    float x0, float y0, float x1, float y1,
+                                    float x2, float y2, float x3, float y3,
+                                    float u0, float v0, float u1, float v1,
+                                    const float c0[4], const float c1[4],
+                                    const float c2[4], const float c3[4]) {
+    if (!tex) tex = &gfx->whiteTex;
+    LauncherVertex *v = launcher_gfx_reserve(gfx, 6, tex);
+    v[0] = (LauncherVertex){x0, y0, 0.f, u0, v0, c0[0], c0[1], c0[2], c0[3]};
+    v[1] = (LauncherVertex){x1, y1, 0.f, u1, v0, c1[0], c1[1], c1[2], c1[3]};
+    v[2] = (LauncherVertex){x2, y2, 0.f, u1, v1, c2[0], c2[1], c2[2], c2[3]};
+    v[3] = v[0];
+    v[4] = v[2];
+    v[5] = (LauncherVertex){x3, y3, 0.f, u0, v1, c3[0], c3[1], c3[2], c3[3]};
+}
+
+static void launcher_push_quad(LauncherGfx *gfx, C3D_Tex *tex,
+                               float x, float y, float w, float h,
+                               float u0, float v0, float u1, float v1,
+                               const float col[4]) {
+    launcher_push_quad_grad(gfx, tex, x, y, x + w, y, x + w, y + h, x, y + h,
+                            u0, v0, u1, v1, col, col, col, col);
+}
+
+static void launcher_rect(LauncherGfx *gfx, float x, float y, float w, float h,
+                          float r, float g, float b, float a) {
+    float c[4] = {r, g, b, a};
+    launcher_push_quad(gfx, &gfx->whiteTex, x, y, w, h, .5f, .5f, .5f, .5f, c);
+}
+
+static const uint8_t *launcher_glyph(char ch) {
+    static const uint8_t sp[7] = {0,0,0,0,0,0,0};
+    static const uint8_t q[7]  = {0x0E,0x11,0x01,0x02,0x04,0x00,0x04};
+    static const uint8_t A[7]  = {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11};
+    static const uint8_t B[7]  = {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E};
+    static const uint8_t C[7]  = {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E};
+    static const uint8_t D[7]  = {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E};
+    static const uint8_t E[7]  = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F};
+    static const uint8_t F[7]  = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10};
+    static const uint8_t G[7]  = {0x0E,0x11,0x10,0x17,0x11,0x11,0x0E};
+    static const uint8_t H[7]  = {0x11,0x11,0x11,0x1F,0x11,0x11,0x11};
+    static const uint8_t I[7]  = {0x1F,0x04,0x04,0x04,0x04,0x04,0x1F};
+    static const uint8_t J[7]  = {0x07,0x02,0x02,0x02,0x12,0x12,0x0C};
+    static const uint8_t K[7]  = {0x11,0x12,0x14,0x18,0x14,0x12,0x11};
+    static const uint8_t L[7]  = {0x10,0x10,0x10,0x10,0x10,0x10,0x1F};
+    static const uint8_t M[7]  = {0x11,0x1B,0x15,0x15,0x11,0x11,0x11};
+    static const uint8_t N[7]  = {0x11,0x19,0x15,0x13,0x11,0x11,0x11};
+    static const uint8_t O[7]  = {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E};
+    static const uint8_t P[7]  = {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10};
+    static const uint8_t Q[7]  = {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D};
+    static const uint8_t R[7]  = {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11};
+    static const uint8_t S[7]  = {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E};
+    static const uint8_t T[7]  = {0x1F,0x04,0x04,0x04,0x04,0x04,0x04};
+    static const uint8_t U[7]  = {0x11,0x11,0x11,0x11,0x11,0x11,0x0E};
+    static const uint8_t V[7]  = {0x11,0x11,0x11,0x11,0x0A,0x0A,0x04};
+    static const uint8_t W[7]  = {0x11,0x11,0x11,0x15,0x15,0x1B,0x11};
+    static const uint8_t X[7]  = {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11};
+    static const uint8_t Y[7]  = {0x11,0x11,0x0A,0x04,0x04,0x04,0x04};
+    static const uint8_t Z[7]  = {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F};
+    static const uint8_t n0[7] = {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E};
+    static const uint8_t n1[7] = {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E};
+    static const uint8_t n2[7] = {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F};
+    static const uint8_t n3[7] = {0x1E,0x01,0x01,0x0E,0x01,0x01,0x1E};
+    static const uint8_t n4[7] = {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02};
+    static const uint8_t n5[7] = {0x1F,0x10,0x10,0x1E,0x01,0x01,0x1E};
+    static const uint8_t n6[7] = {0x0E,0x10,0x10,0x1E,0x11,0x11,0x0E};
+    static const uint8_t n7[7] = {0x1F,0x01,0x02,0x04,0x08,0x08,0x08};
+    static const uint8_t n8[7] = {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E};
+    static const uint8_t n9[7] = {0x0E,0x11,0x11,0x0F,0x01,0x01,0x0E};
+    static const uint8_t dash[7] = {0,0,0,0x1F,0,0,0};
+    static const uint8_t dot[7]  = {0,0,0,0,0,0x0C,0x0C};
+    static const uint8_t slash[7]= {0x01,0x01,0x02,0x04,0x08,0x10,0x10};
+    static const uint8_t colon[7]= {0,0x0C,0x0C,0,0x0C,0x0C,0};
+    static const uint8_t under[7]= {0,0,0,0,0,0,0x1F};
+    static const uint8_t bang[7] = {0x04,0x04,0x04,0x04,0x04,0,0x04};
+    static const uint8_t pct[7]  = {0x19,0x19,0x02,0x04,0x08,0x13,0x13};
+
+    ch = (char)toupper((unsigned char)ch);
+    switch (ch) {
+        case ' ': return sp; case '?': return q;
+        case 'A': return A; case 'B': return B; case 'C': return C; case 'D': return D;
+        case 'E': return E; case 'F': return F; case 'G': return G; case 'H': return H;
+        case 'I': return I; case 'J': return J; case 'K': return K; case 'L': return L;
+        case 'M': return M; case 'N': return N; case 'O': return O; case 'P': return P;
+        case 'Q': return Q; case 'R': return R; case 'S': return S; case 'T': return T;
+        case 'U': return U; case 'V': return V; case 'W': return W; case 'X': return X;
+        case 'Y': return Y; case 'Z': return Z;
+        case '0': return n0; case '1': return n1; case '2': return n2; case '3': return n3;
+        case '4': return n4; case '5': return n5; case '6': return n6; case '7': return n7;
+        case '8': return n8; case '9': return n9;
+        case '-': return dash; case '.': return dot; case '/': return slash; case ':': return colon;
+        case '_': return under; case '!': return bang; case '%': return pct;
+        default: return q;
+    }
+}
+
+static float launcher_text_width(const char *text, float scale) {
+    float w = 0.f;
+    for (const char *p = text; p && *p; p++) w += 6.f * scale;
+    return w > 0.f ? w - scale : 0.f;
+}
+
+static void launcher_draw_text(LauncherGfx *gfx, const char *text, float x, float y,
+                               float scale, float r, float g, float b, float a) {
+    float cx = x;
+    for (const char *p = text; p && *p; p++) {
+        const uint8_t *glyph = launcher_glyph(*p);
+        for (int row = 0; row < 7; row++) {
+            for (int col = 0; col < 5; col++) {
+                if (glyph[row] & (1u << (4 - col))) {
+                    launcher_rect(gfx, cx + col * scale, y + row * scale,
+                                  scale, scale, r, g, b, a);
+                }
+            }
+        }
+        cx += 6.f * scale;
+    }
+}
+
+static void launcher_draw_centered_text(LauncherGfx *gfx, const char *text, float centerX, float y,
+                                        float scale, float r, float g, float b, float a) {
+    float width = launcher_text_width(text, scale);
+    launcher_draw_text(gfx, text, centerX - width * 0.5f, y, scale, r, g, b, a);
+}
+
+void launcher_gfx_destroy(LauncherGfx *gfx) {
+    if (!gfx) return;
+    if (gfx->whiteTex.data) C3D_TexDelete(&gfx->whiteTex);
+    if (gfx->vbuf) linearFree(gfx->vbuf);
+    if (gfx->target) C3D_RenderTargetDelete(gfx->target);
+    memset(gfx, 0, sizeof(*gfx));
+}
+
+bool launcher_gfx_init(LauncherGfx *gfx) {
+    memset(gfx, 0, sizeof(*gfx));
+
+    gfx->target = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH16);
+    if (!gfx->target) goto fail;
+    C3D_RenderTargetSetOutput(gfx->target, GFX_TOP, GFX_LEFT, LAUNCHER_DISPLAY_TRANSFER_FLAGS);
+
+    gfx->uLoc_projection = shaderInstanceGetUniformLocation(g_shaderProg.vertexShader, "projection");
+
+    AttrInfo_Init(&gfx->attrInfo);
+    AttrInfo_AddLoader(&gfx->attrInfo, 0, GPU_FLOAT, 3);
+    AttrInfo_AddLoader(&gfx->attrInfo, 1, GPU_FLOAT, 2);
+    AttrInfo_AddLoader(&gfx->attrInfo, 2, GPU_FLOAT, 4);
+
+    gfx->vbufCap = LAUNCHER_VBUF_CAP;
+    gfx->vbuf = linearAlloc(gfx->vbufCap * sizeof(LauncherVertex));
+    if (!gfx->vbuf) goto fail;
+
+    if (!C3D_TexInit(&gfx->whiteTex, 8, 8, GPU_RGBA4)) goto fail;
+    uint16_t *white = linearAlloc(8 * 8 * sizeof(uint16_t));
+    if (!white) goto fail;
+    for (int i = 0; i < 64; i++) white[i] = 0xFFFF;
+    C3D_TexLoadImage(&gfx->whiteTex, white, GPU_TEXFACE_2D, 0);
+    C3D_TexFlush(&gfx->whiteTex);
+    C3D_TexSetFilter(&gfx->whiteTex, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexSetWrap(&gfx->whiteTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    linearFree(white);
+
+    gfx->ready = true;
+    return true;
+
+fail:
+    launcher_gfx_destroy(gfx);
+    return false;
+}
+
+static bool launcher_begin_frame(LauncherGfx *gfx) {
+    if (!gfx->ready) return false;
+    if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) return false;
+    gfx->inFrame = true;
+    gfx->vbufHead = 0;
+    gfx->batchStart = 0;
+    gfx->batchVerts = 0;
+    gfx->batchTex = NULL;
+
+    C3D_FrameDrawOn(gfx->target);
+    C3D_BindProgram(&g_shaderProg);
+    C3D_SetAttrInfo(&gfx->attrInfo);
+
+    C3D_BufInfo *buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, gfx->vbuf, sizeof(LauncherVertex), 3, 0x210);
+
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+    C3D_DepthTest(false, GPU_GEQUAL, GPU_WRITE_ALL);
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                   GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
+                   GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
+
+    C3D_RenderTargetClear(gfx->target, C3D_CLEAR_ALL, 0x070914FF, 0);
+    C3D_SetViewport(0, 0, 240, 400);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+
+    C3D_Mtx proj;
+    Mtx_Identity(&proj);
+    Mtx_OrthoTilt(&proj, 0.f, (float)LAUNCHER_W, (float)LAUNCHER_H, 0.f, -1.f, 1.f, true);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, gfx->uLoc_projection, &proj);
+    return true;
+}
+
+static void launcher_end_frame(LauncherGfx *gfx) {
+    launcher_gfx_flush(gfx);
+    C3D_FrameEnd(0);
+    gfx->inFrame = false;
+}
+
+static u64 g_launcher_t0_ms = 0;
+static float launcher_anim_seconds(void) {
+    if (g_launcher_t0_ms == 0) g_launcher_t0_ms = osGetTime();
+    return (float)(osGetTime() - g_launcher_t0_ms) * 0.001f;
+}
+
+static void launcher_draw_background(LauncherGfx *gfx, float t) {
+    float warm = 0.5f + 0.5f * sinf(t * 0.35f);
+    float deep = 0.5f + 0.5f * sinf(t * 0.27f + 1.1f);
+    float top[4] = {0.135f + 0.045f * warm, 0.075f + 0.020f * deep, 0.205f + 0.055f * warm, 1.f};
+    float mid[4] = {0.075f + 0.030f * deep, 0.055f + 0.020f * warm, 0.165f + 0.040f * deep, 1.f};
+    float bot[4] = {0.015f,                  0.020f + 0.010f * warm, 0.055f + 0.020f * deep, 1.f};
+
+    launcher_push_quad_grad(gfx, &gfx->whiteTex,
+                            0, 0, LAUNCHER_W, 0, LAUNCHER_W, LAUNCHER_H * 0.55f, 0, LAUNCHER_H * 0.55f,
+                            .5f, .5f, .5f, .5f, top, top, mid, mid);
+    launcher_push_quad_grad(gfx, &gfx->whiteTex,
+                            0, LAUNCHER_H * 0.55f, LAUNCHER_W, LAUNCHER_H * 0.55f,
+                            LAUNCHER_W, LAUNCHER_H, 0, LAUNCHER_H,
+                            .5f, .5f, .5f, .5f, mid, mid, bot, bot);
+
+    for (int i = 0; i < 6; i++) {
+        float band_y = fmodf(t * 8.f + (float)i * 67.f, (float)LAUNCHER_H + 80.f) - 40.f;
+        float a = 0.030f + 0.020f * sinf(t * 0.6f + (float)i);
+        launcher_push_quad(gfx, &gfx->whiteTex,
+                           -20.f, band_y, LAUNCHER_W + 40.f, 18.f,
+                           .5f, .5f, .5f, .5f,
+                           (float[4]){1.0f, 0.78f, 0.36f, a});
+    }
+
+    for (int i = 0; i < 64; i++) {
+        float seed = (float)i * 12.91f;
+        float orbit = 18.f + (float)(i % 5) * 9.f;
+        float ang = t * (0.18f + (float)(i & 3) * 0.07f) + seed;
+        float baseX = fmodf(seed * 17.3f, (float)LAUNCHER_W);
+        float baseY = fmodf(seed * 11.7f + t * (3.f + (float)(i % 4) * 1.2f),
+                            (float)LAUNCHER_H + 40.f) - 20.f;
+        float x = baseX + cosf(ang) * orbit;
+        float y = baseY + sinf(ang * 1.3f) * orbit * 0.45f;
+        float s = 1.4f + (float)(i % 6) * 0.55f;
+        float a = 0.16f + (sinf(t * 1.4f + seed) + 1.f) * 0.10f;
+        int hue = i % 3;
+        float r = (hue == 0) ? 0.97f : (hue == 1 ? 0.38f : 0.94f);
+        float g = (hue == 0) ? 0.72f : (hue == 1 ? 0.84f : 0.46f);
+        float b = (hue == 0) ? 0.24f : (hue == 1 ? 1.00f : 0.90f);
+        launcher_rect(gfx, x, y, s, s, r, g, b, a);
+    }
+
+    launcher_rect(gfx, 0, 0,   LAUNCHER_W, 26, 0.040f, 0.035f, 0.085f, 0.92f);
+    launcher_rect(gfx, 0, 26,  LAUNCHER_W, 1,  1.00f,  0.74f,  0.24f,  0.95f);
+    launcher_rect(gfx, 0, 27,  LAUNCHER_W, 1,  0.55f,  0.30f,  0.10f,  0.55f);
+    launcher_rect(gfx, 0, 215, LAUNCHER_W, 25, 0.030f, 0.028f, 0.065f, 0.93f);
+    launcher_rect(gfx, 0, 215, LAUNCHER_W, 1,  1.00f,  0.74f,  0.24f,  0.95f);
+    launcher_rect(gfx, 0, 216, LAUNCHER_W, 1,  0.55f,  0.30f,  0.10f,  0.55f);
+
+    float titlePulse = 0.85f + 0.15f * (0.5f + 0.5f * sinf(t * 1.6f));
+    launcher_draw_text(gfx, "BUTTERSCOTCH", 10, 9, 1.35f,
+                       1.f, 0.78f * titlePulse, 0.28f * titlePulse, 1.f);
+}
+
+static void launcher_draw_scrollbar(LauncherGfx *gfx, float cam_y, float max_y) {
+    if (max_y <= 0.f) return;
+    float trackX = 392.f, trackY = 34.f, trackW = 4.f, trackH = 174.f;
+    launcher_rect(gfx, trackX, trackY, trackW, trackH, 0.08f, 0.07f, 0.14f, 0.75f);
+    float thumbH = trackH * (trackH / (trackH + max_y));
+    if (thumbH < 12.f) thumbH = 12.f;
+    float thumbY = trackY + (trackH - thumbH) * (cam_y / max_y);
+    launcher_rect(gfx, trackX, thumbY, trackW, thumbH, 1.0f, 0.74f, 0.25f, 1.f);
+}
+
+static void launcher_draw_icon_or_placeholder(LauncherGfx *gfx, const GameEntry *game,
+                                              float x, float y, float size, int index) {
+    if (game->icon_ready) {
+        float u1 = (float)game->icon_w / (float)game->icon_pot_w;
+        float v1 = (float)game->icon_h / (float)game->icon_pot_h;
+        launcher_push_quad(gfx, (C3D_Tex *)&game->icon_tex, x, y, size, size, 0.f, 0.f, u1, v1,
+                           (float[4]){1.f, 1.f, 1.f, 1.f});
+        return;
+    }
+
+    static const float colors[6][3] = {
+        {0.34f, 0.64f, 1.00f}, {0.42f, 0.86f, 0.46f}, {0.98f, 0.36f, 0.36f},
+        {0.94f, 0.76f, 0.26f}, {0.82f, 0.42f, 0.95f}, {0.36f, 0.88f, 0.86f}
+    };
+    const float *c = colors[index % 6];
+    launcher_rect(gfx, x, y, size, size, c[0] * 0.35f, c[1] * 0.35f, c[2] * 0.35f, 1.f);
+    for (int yy = 0; yy < 8; yy++) {
+        for (int xx = 0; xx < 8; xx++) {
+            if (((xx + yy) & 1) == 0) {
+                launcher_rect(gfx, x + xx * size / 8.f, y + yy * size / 8.f,
+                              size / 8.f, size / 8.f, c[0], c[1], c[2], 0.22f);
+            }
+        }
+    }
+    char initial[2] = {game->name[0] ? game->name[0] : '?', '\0'};
+    launcher_draw_centered_text(gfx, initial, x + size * 0.5f, y + size * 0.34f,
+                                4.4f, 1.f, 1.f, 1.f, 0.90f);
+}
+
+static void launcher_render(LauncherGfx *gfx, int selected, float t, float cam_y, float select_anim) {
+    if (!launcher_begin_frame(gfx)) return;
+
+    const float tileSize = 76.f;
+    const float gapX = 88.f;
+    const float gapY = 92.f;
+    const float gridX = 30.f;
+    const float gridY = 36.f;
+    const int cols = 4;
+    const float visibleH = (float)LAUNCHER_H - gridY - 28.f;
+    int rows = (g_game_count + cols - 1) / cols;
+    float maxY = rows * gapY - visibleH;
+    if (maxY < 0.f) maxY = 0.f;
+
+    launcher_draw_background(gfx, t);
+
+    float anim = 1.f - select_anim;
+    float ease = 1.f - anim * anim * anim;
+    (void)ease;
+
+    for (int i = 0; i < g_game_count; i++) {
+        int col = i % cols;
+        int row = i / cols;
+        float x = gridX + (float)col * gapX;
+        float y = gridY + (float)row * gapY - cam_y;
+        if (y < -tileSize - 12.f || y > (float)LAUNCHER_H + 12.f) continue;
+
+        bool sel = (i == selected);
+
+        launcher_rect(gfx, x + 4, y + 5, tileSize, tileSize, 0.f, 0.f, 0.f, 0.30f);
+
+        if (sel) {
+            float breath = 0.5f + 0.5f * sinf(t * 2.4f);
+            float halo = 4.f + breath * 3.f + (1.f - select_anim) * 6.f;
+            launcher_rect(gfx, x - 8 - halo, y - 8 - halo,
+                          tileSize + 16 + halo * 2, tileSize + 16 + halo * 2,
+                          1.0f, 0.72f, 0.22f, 0.10f + 0.10f * breath);
+            launcher_rect(gfx, x - 4 - halo * 0.5f, y - 4 - halo * 0.5f,
+                          tileSize + 8 + halo, tileSize + 8 + halo,
+                          1.0f, 0.78f, 0.28f, 0.20f + 0.10f * breath);
+            launcher_rect(gfx, x - 3, y - 3, tileSize + 6, tileSize + 6,
+                          1.0f, 0.82f, 0.32f, 1.f);
+            launcher_rect(gfx, x - 2, y - 2, tileSize + 4, tileSize + 4,
+                          1.0f, 0.62f, 0.16f, 1.f);
+        } else {
+            launcher_rect(gfx, x - 2, y - 2, tileSize + 4, tileSize + 4,
+                          0.17f, 0.14f, 0.28f, 0.82f);
+            launcher_rect(gfx, x - 1, y - 1, tileSize + 2, tileSize + 2,
+                          0.05f, 0.04f, 0.10f, 0.85f);
+        }
+
+        launcher_rect(gfx, x, y, tileSize, tileSize, 0.065f, 0.055f, 0.12f, 1.f);
+        launcher_draw_icon_or_placeholder(gfx, &g_games[i], x + 6, y + 6, tileSize - 12, i);
+
+        if (sel) {
+            float gleam = 0.18f + 0.10f * (0.5f + 0.5f * sinf(t * 3.1f));
+            launcher_rect(gfx, x, y, tileSize, 2.f, 1.0f, 0.94f, 0.62f, gleam);
+        }
+    }
+
+    launcher_draw_scrollbar(gfx, cam_y, maxY);
+
+    char title[48];
+    snprintf(title, sizeof(title), "%.36s", g_games[selected].name);
+    float scale = 2.0f;
+    float width = launcher_text_width(title, scale);
+    if (width > 360.f) scale *= 360.f / width;
+    launcher_draw_centered_text(gfx, title, 200.f, 224.f, scale, 1.f, 0.90f, 0.56f, 1.f);
+
+    launcher_end_frame(gfx);
+}
+
+void launcher_render_loading(LauncherGfx *gfx, const char *gameName, const char *stage,
+                                    int page, int total, float percent) {
+    if (!gfx || !gfx->ready || !launcher_begin_frame(gfx)) return;
+    if (percent < 0.f)   percent = 0.f;
+    if (percent > 100.f) percent = 100.f;
+
+    float t = launcher_anim_seconds();
+
+    launcher_draw_background(gfx, t);
+    launcher_draw_centered_text(gfx, "BUTTERSCOTCH", 200.f, 48.f, 2.0f, 1.f, 0.80f, 0.34f, 1.f);
+
+    char title[48];
+    snprintf(title, sizeof(title), "%.36s", gameName ? gameName : "GAME");
+    float titleScale = 1.8f;
+    float titleW = launcher_text_width(title, titleScale);
+    if (titleW > 350.f) titleScale *= 350.f / titleW;
+    launcher_draw_centered_text(gfx, title, 200.f, 82.f, titleScale, 0.72f, 0.88f, 1.f, 0.95f);
+
+    char stageText[64];
+    int dots = ((int)(t * 2.5f)) % 4;
+    snprintf(stageText, sizeof(stageText), "%s%s",
+             stage ? stage : "LOADING",
+             (dots == 0) ? "" : (dots == 1 ? "." : (dots == 2 ? ".." : "...")));
+    launcher_draw_centered_text(gfx, stageText, 200.f, 112.f, 1.55f, 1.f, 1.f, 1.f, 0.95f);
+
+    float barX = 42.f, barY = 148.f, barW = 316.f, barH = 14.f;
+    launcher_rect(gfx, barX - 2, barY - 2, barW + 4, barH + 4, 0.06f, 0.055f, 0.10f, 0.95f);
+    launcher_rect(gfx, barX, barY, barW, barH, 0.12f, 0.11f, 0.18f, 1.f);
+
+    float fillW = barW * (percent / 100.f);
+    if (fillW > 0.f) {
+        launcher_rect(gfx, barX, barY, fillW, barH, 1.f, 0.69f, 0.18f, 1.f);
+        float shimmerX = barX + fmodf(t * 80.f, fillW + 60.f) - 30.f;
+        for (int i = 0; i < 6; i++) {
+            float sx = shimmerX + (float)i * 4.f;
+            if (sx < barX || sx + 3.f > barX + fillW) continue;
+            float a = 0.30f - (float)i * 0.04f;
+            launcher_rect(gfx, sx, barY, 3.f, barH, 1.f, 0.96f, 0.74f, a);
+        }
+        launcher_rect(gfx, barX, barY, fillW, 1.f, 1.f, 0.96f, 0.66f, 0.85f);
+    }
+
+    char status[48];
+    snprintf(status, sizeof(status), "%d%%", (int)(percent + 0.5f));
+    launcher_draw_centered_text(gfx, status, 200.f, 174.f, 1.7f, 1.f, 0.86f, 0.40f, 1.f);
+
+    if (total > 0) {
+        char pageText[48];
+        snprintf(pageText, sizeof(pageText), "PAGE %d / %d", page, total);
+        launcher_draw_centered_text(gfx, pageText, 200.f, 198.f, 1.25f, 0.70f, 0.86f, 1.f, 0.88f);
+    }
+
+    launcher_end_frame(gfx);
+}
+
+void launcher_cache_progress(uint32_t pageIndex, uint32_t pageCount, const char *pagePath, void *user) {
+    (void)pagePath;
+    LoadingScreenState *state = (LoadingScreenState *)user;
+    if (!state || !state->gfx) return;
+    float cachePct = pageCount ? ((float)pageIndex / (float)pageCount) * 100.f : 100.f;
+    float overall = state->basePercent + (cachePct / 100.f) * state->spanPercent;
+    int page = pageCount ? (int)pageIndex + 1 : 0;
+    if (page > (int)pageCount) page = (int)pageCount;
+    launcher_render_loading(state->gfx, state->gameName, "BUILDING TEXTURE CACHE", page, (int)pageCount, overall);
+}
+
+void launcher_datawin_progress(const char *chunkName, int chunkIndex, int totalChunks,
+                                      DataWin *dw, void *user) {
+    (void)dw;
+    LoadingScreenState *state = (LoadingScreenState *)user;
+    if (!state || !state->gfx) return;
+    float parsePct = (totalChunks > 0) ? ((float)chunkIndex / (float)totalChunks) * 100.f : 100.f;
+    float overall = state->basePercent + (parsePct / 100.f) * state->spanPercent;
+    char stage[40];
+    snprintf(stage, sizeof(stage), "PARSING %.4s", chunkName ? chunkName : "DATA");
+    launcher_render_loading(state->gfx, state->gameName, stage,
+                            chunkIndex + 1, totalChunks, overall);
+}
+
+void resolve_new_game_path(const char *request, char *out_path) {
+    printf("Try resolve path: %s\n", request);
+    if (strncmp(request, "sdmc:/", 6) == 0) {
+        strncpy(out_path, request, 255);
+        return;
+    }
+    char base_dir[256];
+    char *slash = strrchr(g_current_data_path, '/');
+    size_t baselen = slash ? (size_t)(slash - g_current_data_path) : 0;
+    if (baselen >= sizeof(base_dir)) baselen = sizeof(base_dir) - 1;
+    memcpy(base_dir, g_current_data_path, baselen);
+    base_dir[baselen] = '\0';
+
+    char test_path[512];
+    snprintf(test_path, sizeof(test_path), "%s/%s/data.win", base_dir, request);
+    FILE *f = fopen(test_path, "rb");
+    if (f) { fclose(f); strncpy(out_path, test_path, 255); return; }
+
+    snprintf(test_path, sizeof(test_path), "%s/%s/data.win", BASE_DIR, request);
+    f = fopen(test_path, "rb");
+    if (f) { fclose(f); strncpy(out_path, test_path, 255); return; }
+
+    snprintf(test_path, sizeof(test_path), "%s/%s", BASE_DIR, request);
+    strncpy(out_path, test_path, 255);
+}
+
+static void scan_games(void) {
+    free_game_icons();
+    memset(g_games, 0, sizeof(g_games));
+    g_game_count = 0;
+    DIR *dir = opendir(BASE_DIR);
+    if (!dir) { mkdir(BASE_DIR, 0777); return; }
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL && g_game_count < MAX_GAMES) {
+        if (ent->d_name[0] == '.') continue;
+        char path[256];
+        snprintf(path, sizeof(path), "%s/%s", BASE_DIR, ent->d_name);
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+        if (!S_ISDIR(st.st_mode)) continue;
+
+        char win_path[256];
+        snprintf(win_path, sizeof(win_path), "%s/data.win", path);
+        FILE *f = fopen(win_path, "rb");
+        if (!f) continue;
+        fclose(f);
+
+        strncpy(g_games[g_game_count].name, ent->d_name, 63);
+        g_games[g_game_count].name[63] = '\0';
+        strncpy(g_games[g_game_count].path, win_path, 255);
+        g_games[g_game_count].path[255] = '\0';
+        launcher_try_load_icon(&g_games[g_game_count], path);
+        g_game_count++;
+    }
+    closedir(dir);
+}
+
+int run_launcher_menu(LauncherGfx *gfx) {
+    scan_games();
+    bool gfx_ready = (gfx && gfx->ready);
+
+    if (g_game_count == 0) {
+        consoleClear();
+        printf("\x1b[2;1H Butterscotch 3DS \n");
+        printf("\x1b[15;5H No games found.\n");
+        printf("\x1b[16;3H Place folders with data.win\n");
+        printf("\x1b[17;5H into %s\n", BASE_DIR);
+        printf("\x1b[28;5H [START] -- quit");
+        while (aptMainLoop()) {
+            hidScanInput();
+            if (hidKeysDown() & KEY_START) return -1;
+            if (gfx_ready && launcher_begin_frame(gfx)) {
+                float t = launcher_anim_seconds();
+                launcher_draw_background(gfx, t);
+                launcher_draw_centered_text(gfx, "NO GAMES FOUND", 200.f, 98.f, 2.25f, 1.f, 0.86f, 0.34f, 1.f);
+                launcher_draw_centered_text(gfx, "SDMC:/3DS/BUTTERSCOTCH", 200.f, 132.f, 1.45f, 0.70f, 0.86f, 1.f, 0.9f);
+                launcher_end_frame(gfx);
+            }
+            gspWaitForVBlank();
+        }
+        return -1;
+    }
+
+    int selected = 0;
+    int last_render = -1;
+    float cam_y = 0.f;
+    float select_anim = 1.f;
+
+    const float tile_gap_y = 92.f;
+    const float grid_y = 36.f;
+    const float visible_h = (float)LAUNCHER_H - grid_y - 28.f;
+    const int cols = 4;
+
+    while (aptMainLoop()) {
+        hidScanInput();
+        u32 kDown = hidKeysDown();
+
+        if (kDown & KEY_START) return -1;
+        if (kDown & (KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT)) { selected++; select_anim = 0.f; }
+        if (kDown & (KEY_LEFT  | KEY_DLEFT  | KEY_CPAD_LEFT))  { selected--; select_anim = 0.f; }
+        if (kDown & (KEY_DOWN  | KEY_DDOWN  | KEY_CPAD_DOWN))  { selected += cols; select_anim = 0.f; }
+        if (kDown & (KEY_UP    | KEY_DUP    | KEY_CPAD_UP))    { selected -= cols; select_anim = 0.f; }
+        if (kDown & KEY_R)                                     { selected += cols * 2; select_anim = 0.f; }
+        if (kDown & KEY_L)                                     { selected -= cols * 2; select_anim = 0.f; }
+        if (selected < 0)              selected = 0;
+        if (selected >= g_game_count)  selected = g_game_count - 1;
+        if (kDown & KEY_A) return selected;
+
+        int sel_row = selected / cols;
+        float target_y = (float)sel_row * tile_gap_y - visible_h * 0.40f;
+        int max_rows = (g_game_count + cols - 1) / cols;
+        float max_y = (float)max_rows * tile_gap_y - visible_h;
+        if (max_y < 0.f) max_y = 0.f;
+        if (target_y < 0.f) target_y = 0.f;
+        if (target_y > max_y) target_y = max_y;
+        cam_y += (target_y - cam_y) * 0.28f;
+        select_anim += (1.f - select_anim) * 0.22f;
+
+        if (gfx_ready) launcher_render(gfx, selected, launcher_anim_seconds(), cam_y, select_anim);
+
+        if (selected != last_render) {
+            consoleClear();
+            printf("\x1b[1;1H\x1b[44;37;1m         Butterscotch Launcher          \x1b[0m\n\n");
+            printf("  \x1b[36mGame %d / %d\x1b[0m\n\n", selected + 1, g_game_count);
+            printf("  \x1b[36mTitle:\x1b[0m \x1b[32;1m%.36s\x1b[0m\n", g_games[selected].name);
+            printf("\n  \x1b[36mPath:\x1b[0m %.40s\n", g_games[selected].path);
+            if (g_games[selected].exe_path[0]) {
+                printf("\n  \x1b[36mIcon:\x1b[0m %.40s\n", g_games[selected].exe_path);
+            }
+            printf("\x1b[28;1H\x1b[47;30m  [A] Launch   [D-Pad] Move   [L/R] Page   [START] Quit  \x1b[0m");
+            last_render = selected;
+        }
+        gspWaitForVBlank();
+    }
+    return -1;
+}
