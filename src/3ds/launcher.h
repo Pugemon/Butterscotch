@@ -1,49 +1,86 @@
-﻿//
+//
 // Created by Notebook on 03.05.2026.
 //
 
 #ifndef BUTTERSCOTCH_LAUNCHER_H
 #define BUTTERSCOTCH_LAUNCHER_H
+
 #include <3ds.h>
 #include <citro3d.h>
-#include <SDL/SDL.h>
+#include <stdbool.h>
+#include <stdint.h>
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <dirent.h>
-#include <math.h>
-#include <ctype.h>
-
-#include "icon_parse.h"
 #include "data_win.h"
 
-#define BASE_DIR  "sdmc:/3ds/butterscotch"
+#define LAUNCHER_TOP_W   400
+#define LAUNCHER_TOP_H   240
+#define LAUNCHER_BOT_W   320
+#define LAUNCHER_BOT_H   240
 
-#define MAX_GAMES 64
-
+#define LAUNCHER_MAX_GAMES 64
 
 typedef struct {
-    char name[64];
-    char path[256];
-    char exe_path[256];
-    bool icon_ready;
-    int icon_w, icon_h;
-    int icon_pot_w, icon_pot_h;
+    char    name[64];
+    char    path[256];
+    char    exe_path[256];
+    bool    icon_ready;
+    int     icon_w, icon_h;
+    int     icon_pot_w, icon_pot_h;
     C3D_Tex icon_tex;
-} GameEntry;
+} LauncherGameEntry;
 
-static GameEntry g_games[MAX_GAMES];
-static int       g_game_count = 0;
+typedef enum {
+    LAUNCHER_GAME_SCREEN_TOP    = 0,
+    LAUNCHER_GAME_SCREEN_BOTTOM = 1
+} LauncherGameScreen;
 
-#define LAUNCHER_W 400
-#define LAUNCHER_H 240
-#define LAUNCHER_VBUF_CAP (8192 * 3)
-#define LAUNCHER_DISPLAY_TRANSFER_FLAGS \
-(GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | \
-GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
-GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+typedef enum {
+    LAUNCHER_BACKDROP_GRADIENT = 0,
+    LAUNCHER_BACKDROP_BLUR,
+    LAUNCHER_BACKDROP_BLACK,
+    LAUNCHER_BACKDROP_STRETCH,
+} LauncherBackdropMode;
+
+typedef struct {
+    char  id[12];
+    char  display[20];
+
+    // Background gradient (used by launcher and renderer letterbox)
+    float bg_top[3];
+    float bg_mid[3];
+    float bg_bot[3];
+
+    // Accent colour (title bar, scrollbar thumb, selected halo)
+    float accent[3];
+    float accent_dim[3];
+
+    // Three particle hues
+    float particle_a[3];
+    float particle_b[3];
+    float particle_c[3];
+
+    // Text colours
+    float text_main[3];
+    float text_title[3];
+    float text_subtle[3];
+
+    // Side decoration intensity (letterbox blur multiplier for renderer)
+    float side_blur_alpha;
+    float side_particle_alpha;
+} LauncherTheme;
+
+#define LAUNCHER_SETTINGS_VERSION 2u
+
+typedef struct {
+    uint32_t           magic;
+    uint32_t           version;
+    int                theme_index;
+    LauncherGameScreen game_screen;
+    int                show_side_particles;
+    int                show_side_blur;
+    LauncherBackdropMode backdrop_mode;
+    int                _reserved[7];
+} LauncherSettings;
 
 typedef struct {
     float x, y, z;
@@ -53,43 +90,81 @@ typedef struct {
 
 typedef struct {
     C3D_RenderTarget *target;
-    int uLoc_projection;
-    C3D_AttrInfo attrInfo;
-    C3D_Tex whiteTex;
-    LauncherVertex *vbuf;
-    uint32_t vbufCap;
-    uint32_t vbufHead;
-    uint32_t batchStart;
-    uint32_t batchVerts;
-    C3D_Tex *batchTex;
-    bool ready;
-    bool inFrame;
-} LauncherGfx;
+    int               logicalW;
+    int               logicalH;
+    bool              owns;
+    bool              ready;
+} LauncherScreen;
 
 typedef struct {
-    LauncherGfx *gfx;
-    const char *gameName;
-    float basePercent;
-    float spanPercent;
-} LoadingScreenState;
+    int              uLoc_projection;
+    C3D_AttrInfo     attrInfo;
+    C3D_Tex          whiteTex;
+    LauncherVertex  *vbuf;
+    uint32_t         vbufCap;
+    uint32_t         vbufHead;
+    uint32_t         batchStart;
+    uint32_t         batchVerts;
+    C3D_Tex         *batchTex;
 
-int run_launcher_menu(LauncherGfx *gfx);
+    LauncherScreen   topScreen;
+    LauncherScreen   bottomScreen;
+
+    LauncherScreen  *currentScreen;
+
+    bool             ready;
+    bool             inFrame;
+} LauncherGfx;
+
+typedef enum {
+    LAUNCHER_PAUSE_RESUME = 0,
+    LAUNCHER_PAUSE_QUIT_TO_LAUNCHER,
+    LAUNCHER_PAUSE_QUIT_APP
+} LauncherPauseAction;
+
+// ---- Theme/settings public API ----------------------------------------------
+
+const LauncherTheme *launcher_theme_at(int index);
+int                  launcher_theme_count(void);
+const LauncherTheme *launcher_current_theme(void);
+const LauncherSettings *launcher_get_settings(void);
+void                 launcher_apply_theme_index(int index);
+void                 launcher_apply_settings(const LauncherSettings *s);
+void                 launcher_save_settings(void);
+void                 launcher_load_settings(void);
+
+// ---- Library bootstrap ------------------------------------------------------
 
 bool launcher_gfx_init(LauncherGfx *gfx);
-
+bool launcher_gfx_init_borrowed(LauncherGfx *gfx,
+                                C3D_RenderTarget *topTarget, int topW, int topH,
+                                C3D_RenderTarget *bottomTarget, int bottomW, int bottomH);
 void launcher_gfx_destroy(LauncherGfx *gfx);
 
-//Progress statesments
+// ---- Game-list helpers ------------------------------------------------------
+
+void launcher_scan_games(void);
+int  launcher_game_count(void);
+const LauncherGameEntry *launcher_game(int index);
+void launcher_free_game_icons(void);
+
+// ---- Top-level screens ------------------------------------------------------
+
+// Returns selected game index, or -1 to quit.
+int  launcher_run_menu(LauncherGfx *gfx);
+
+// Loading screen rendered on top + bottom.
 void launcher_render_loading(LauncherGfx *gfx, const char *gameName, const char *stage,
-                                    int page, int total, float percent);
+                             int page, int total, float percent);
 
-void launcher_datawin_progress(const char *chunkName, int chunkIndex, int totalChunks,
-                                      DataWin *dw, void *user);
+// In-game pause menu. Borrowed gfx that draws on whatever target is active.
+LauncherPauseAction launcher_run_pause(LauncherGfx *gfx);
 
-void launcher_cache_progress(uint32_t pageIndex, uint32_t pageCount, const char *pagePath, void *user);
+// ---- Helpers used by main and ctr_renderer ----------------------------------
 
-//Utils
-void resolve_new_game_path(const char *request, char *out_path);
+float launcher_anim_seconds(void);
 
-void free_game_icons(void);
+// Path resolution copied from main; placed here because launcher owns the menu state.
+void launcher_resolve_new_game_path(const char *request, char *out_path, size_t out_size);
+
 #endif //BUTTERSCOTCH_LAUNCHER_H

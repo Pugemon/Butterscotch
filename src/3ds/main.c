@@ -6,36 +6,33 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <dirent.h>
 #include <math.h>
-#include <ctype.h>
+#include <malloc.h>
 
-#include "icon_parse.h"
 #include "data_win.h"
 #include "vm.h"
 #include "runner.h"
 #include "runner_keyboard.h"
 #include "ctr_renderer.h"
+#include "ctr_texture_cache.h"
 #include "ctr_file_system.h"
 #include "sdl12_audio_system.h"
 #include "render2d_shader_shbin.h"
 #include "launcher.h"
-u32 __ctru_heap_size        = 35 * 1024 * 1024;
-u32 __ctru_linear_heap_size = 25 * 1024 * 1024;
+
+u32 __ctru_heap_size        = 30 * 1024 * 1024;
+u32 __ctru_linear_heap_size = 30 * 1024 * 1024;
 u32 __stacksize__           = 64 * 1024;
 
+#define BASE_DIR  "sdmc:/3ds/butterscotch"
 char g_current_data_path[256];
-
 char g_current_cache_dir[256];
 
-char g_next_game_path[256] = "";
+DVLB_s          *g_vshaderDvlb = NULL;
+shaderProgram_s  g_shaderProg;
 
-bool g_game_change_requested = false;
-
-//Shaders
-DVLB_s *g_vshaderDvlb = NULL;
-
-shaderProgram_s g_shaderProg;
+char  g_next_game_path[256] = "";
+bool  g_game_change_requested = false;
 
 static void map_key(RunnerKeyboardState *kb, u32 down, u32 up, u32 held, u32 mask, int gml) {
     if (down & mask)             RunnerKeyboard_onKeyDown(kb, gml);
@@ -49,17 +46,48 @@ static void setup_logging(void) {
     setvbuf(stderr, NULL, _IONBF, 0);
 }
 
-#include <malloc.h>
-void printMemoryStats() {
+static void printMemoryStats(void) {
     struct mallinfo mi = mallinfo();
-
     u32 linearFree = linearSpaceFree();
+    float heapUsedMB   = (float)mi.uordblks / 1024.0f / 1024.0f;
+    float linearFreeMB = (float)linearFree  / 1024.0f / 1024.0f;
+    printf("[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n", heapUsedMB, linearFreeMB);
+}
 
-    float heapUsedMB = (float)mi.uordblks / 1024.0f / 1024.0f;
-    float linearFreeMB = (float)linearFree / 1024.0f / 1024.0f;
+typedef struct {
+    LauncherGfx *gfx;
+    const char  *gameName;
+    float        basePercent;
+    float        spanPercent;
+} LoadingScreenState;
 
-    printf("[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n",
-           heapUsedMB, linearFreeMB);
+static void cache_progress_cb(uint32_t pageIndex, uint32_t pageCount, const char *pagePath, void *user) {
+    (void)pagePath;
+    LoadingScreenState *state = (LoadingScreenState *)user;
+    if (!state || !state->gfx) return;
+    float cachePct = pageCount ? ((float)pageIndex / (float)pageCount) * 100.f : 100.f;
+    float overall  = state->basePercent + (cachePct / 100.f) * state->spanPercent;
+    int page = pageCount ? (int)pageIndex + 1 : 0;
+    if (page > (int)pageCount) page = (int)pageCount;
+    launcher_render_loading(state->gfx, state->gameName, "BUILDING TEXTURE CACHE",
+                            page, (int)pageCount, overall);
+}
+
+static void datawin_progress_cb(const char *chunkName, int chunkIndex, int totalChunks,
+                                DataWin *dw, void *user) {
+    (void)dw;
+    LoadingScreenState *state = (LoadingScreenState *)user;
+    if (!state || !state->gfx) return;
+    float parsePct = (totalChunks > 0) ? ((float)chunkIndex / (float)totalChunks) * 100.f : 100.f;
+    float overall  = state->basePercent + (parsePct / 100.f) * state->spanPercent;
+    char stage[40];
+    snprintf(stage, sizeof(stage), "PARSING %.4s", chunkName ? chunkName : "DATA");
+    launcher_render_loading(state->gfx, state->gameName, stage,
+                            chunkIndex + 1, totalChunks, overall);
+}
+
+static bool atlas_index_is_current(const char *path) {
+    return CtrTextureCache_indexIsCurrentPath(path);
 }
 
 int main(int argc, char **argv) {
@@ -70,11 +98,7 @@ int main(int argc, char **argv) {
     gfxInitDefault();
     gfxSet3D(false);
 
-    PrintConsole bottomConsole;
-    consoleInit(GFX_BOTTOM, &bottomConsole);
-
     APT_SetAppCpuTimeLimit(30);
-
     osSetSpeedupEnable(1);
 
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE)) {
@@ -90,10 +114,13 @@ int main(int argc, char **argv) {
     LauncherGfx gfx;
     bool gfx_ready = launcher_gfx_init(&gfx);
 
-    int selected_game = run_launcher_menu(&gfx);
+    // Load saved theme/layout before the menu draws.
+    launcher_load_settings();
+
+    int selected_game = launcher_run_menu(&gfx);
     if (selected_game < 0) {
         if (gfx_ready) launcher_gfx_destroy(&gfx);
-        free_game_icons();
+        launcher_free_game_icons();
 
         shaderProgramFree(&g_shaderProg);
         DVLB_Free(g_vshaderDvlb);
@@ -104,7 +131,7 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    strncpy(g_current_data_path, g_games[selected_game].path, 255);
+    strncpy(g_current_data_path, launcher_game(selected_game)->path, 255);
     g_current_data_path[255] = '\0';
 
     bool keep_playing = true;
@@ -126,28 +153,26 @@ int main(int argc, char **argv) {
         snprintf(code_cache_path, sizeof(code_cache_path), "%s/code.cache", g_current_cache_dir);
 
         char cache_flag_path[256];
-        snprintf(cache_flag_path, sizeof(cache_flag_path), "%s/cache_ready.flag", g_current_cache_dir);
+        snprintf(cache_flag_path, sizeof(cache_flag_path), "%s/%s", g_current_cache_dir, CTR_TEXTURE_CACHE_READY_FLAG);
+        char atlas_index_path[256];
+        snprintf(atlas_index_path, sizeof(atlas_index_path), "%s/atlas.bin", g_current_cache_dir);
 
-        consoleClear();
         const char *display_name = strrchr(base_game_dir, '/');
         display_name = display_name ? display_name + 1 : base_game_dir;
-        printf("\x1b[10;5H\x1b[32mLoading %s...\x1b[0m\n", display_name);
+        printf("Loading %s...\n", display_name);
 
-        free_game_icons();
+        launcher_free_game_icons();
 
-        if (gfx_ready) {
-            launcher_render_loading(&gfx, display_name, "PREPARING", 0, 0, 2.f);
-        }
+        if (gfx_ready) launcher_render_loading(&gfx, display_name, "PREPARING", 0, 0, 2.f);
 
         FILE *flag = fopen(cache_flag_path, "r");
-        bool cached = flag != NULL;
+        bool cached = atlas_index_is_current(atlas_index_path);
         if (flag) fclose(flag);
 
         if (!cached) {
-            printf("\n\nGenerating texture cache...\nThis may take a minute.");
-            if (gfx_ready) {
-                launcher_render_loading(&gfx, display_name, "READING TEXTURE TABLE", 0, 0, 4.f);
-            }
+            printf("\nGenerating texture cache...\nThis may take a minute.");
+            if (gfx_ready) launcher_render_loading(&gfx, display_name, "READING TEXTURE TABLE", 0, 0, 4.f);
+
             LoadingScreenState prePassState = {
                 .gfx = gfx_ready ? &gfx : NULL,
                 .gameName = display_name,
@@ -155,8 +180,11 @@ int main(int argc, char **argv) {
                 .spanPercent = 4.f
             };
             DataWinParserOptions opt = {
-                .parseGen8=1, .parseTpag=1, .parseTxtr=1, .skipTextureBlobData=1,
-                .progressCallback = gfx_ready ? launcher_datawin_progress : NULL,
+                .parseGen8=1, .parseSprt=1, .parseBgnd=1, .parseFont=1,
+                .parseTpag=1, .parseTxtr=1, .parseStrg=1,
+                .skipLoadingPreciseMasksForNonPreciseSprites=1,
+                .skipTextureBlobData=1,
+                .progressCallback = gfx_ready ? datawin_progress_cb : NULL,
                 .progressCallbackUserData = &prePassState
             };
             DataWin *dw = DataWin_parse(g_current_data_path, opt);
@@ -167,13 +195,13 @@ int main(int argc, char **argv) {
                     .basePercent = 8.f,
                     .spanPercent = 76.f
                 };
-                CtrRenderer_setCacheProgressCallback(gfx_ready ? launcher_cache_progress : NULL, &cacheState);
+                CtrRenderer_setCacheProgressCallback(gfx_ready ? cache_progress_cb : NULL, &cacheState);
                 CtrRenderer_prepareTextureCache(dw);
                 CtrRenderer_setCacheProgressCallback(NULL, NULL);
                 DataWin_free(dw);
             }
             flag = fopen(cache_flag_path, "r");
-            cached = flag != NULL;
+            cached = atlas_index_is_current(atlas_index_path);
             if (flag) fclose(flag);
         }
 
@@ -201,7 +229,7 @@ int main(int argc, char **argv) {
 
             .lazyLoadRooms=0,
             .codeCachePath=code_cache_path,
-            .progressCallback = gfx_ready ? launcher_datawin_progress : NULL,
+            .progressCallback = gfx_ready ? datawin_progress_cb : NULL,
             .progressCallbackUserData = &fullParseState
         };
 
@@ -226,6 +254,7 @@ int main(int argc, char **argv) {
             launcher_render_loading(&gfx, display_name, "LAUNCHING GAME!", 0, 0, 100.f);
         }
 
+        // Tear down the launcher's owned targets — CtrRenderer takes over the screens.
         if (gfx_ready) { launcher_gfx_destroy(&gfx); gfx_ready = false; }
 
         VMContext      *vm  = VM_create(dw);
@@ -239,15 +268,39 @@ int main(int argc, char **argv) {
 
         Runner_initFirstRoom(run);
 
+        // Make sure the renderer reflects whatever theme/screen the user picked.
+        launcher_apply_settings(launcher_get_settings());
+
+        bool quit_to_launcher = false;
+
         while (aptMainLoop() && !run->shouldExit) {
             u64 t_start = osGetTime();
             hidScanInput();
             u32 d = hidKeysDown(), u = hidKeysUp(), h = hidKeysHeld();
 
+            // SELECT+START+A is now the pause chord (used to be hard-quit).
             if ((h & KEY_START) && (h & KEY_SELECT) && (h & KEY_A)) {
-                printf("Ret to launcher\n");
-                g_game_change_requested = false;
-                run->shouldExit = true;
+                LauncherGfx pauseGfx;
+                bool pauseReady = launcher_gfx_init_borrowed(
+                    &pauseGfx,
+                    CtrRenderer_getTopTarget(ren),    LAUNCHER_TOP_W, LAUNCHER_TOP_H,
+                    CtrRenderer_getBottomTarget(ren), LAUNCHER_BOT_W, LAUNCHER_BOT_H);
+
+                LauncherPauseAction action = LAUNCHER_PAUSE_RESUME;
+                if (pauseReady) {
+                    action = launcher_run_pause(&pauseGfx);
+                    launcher_gfx_destroy(&pauseGfx);
+                }
+                // Apply any layout/theme tweaks the user made.
+                launcher_apply_settings(launcher_get_settings());
+
+                if (action == LAUNCHER_PAUSE_QUIT_TO_LAUNCHER) {
+                    quit_to_launcher = true;
+                    g_game_change_requested = false;
+                    run->shouldExit = true;
+                    break;
+                }
+                continue; // resume — don't process input from the chord this frame
             }
 
             RunnerKeyboard_beginFrame(run->keyboard);
@@ -261,7 +314,7 @@ int main(int argc, char **argv) {
             map_key(run->keyboard, d, u, h, KEY_Y,          VK_SHIFT);
             map_key(run->keyboard, d, u, h, KEY_L,          VK_ENTER);
             map_key(run->keyboard, d, u, h, KEY_R,          VK_SPACE);
-            map_key(run->keyboard, d, u, h, KEY_SELECT,     VK_ESCAPE);
+            //map_key(run->keyboard, d, u, h, KEY_SELECT,     VK_ESCAPE);
 
             Runner_step(run);
             if (run->audioSystem)
@@ -284,7 +337,8 @@ int main(int argc, char **argv) {
                 if (maxR > 0 && maxB > 0) { gw = maxR; gh = maxB; }
             }
 
-            ren->vtable->beginFrame(ren, gw, gh, 400, 240);
+            int winW = (launcher_get_settings()->game_screen == LAUNCHER_GAME_SCREEN_BOTTOM) ? 320 : 400;
+            ren->vtable->beginFrame(ren, gw, gh, winW, 240);
             if (run->drawBackgroundColor) {
                 ren->vtable->clearTarget(ren, run->backgroundColor, 1.f);
             }
@@ -329,9 +383,7 @@ int main(int argc, char **argv) {
 
             run->viewCurrent = 0;
             ren->vtable->endFrame(ren);
-            if (frameCounter % 60 == 0) {
-                printMemoryStats();
-            }
+            if (frameCounter % 60 == 0) printMemoryStats();
             frameCounter++;
 
             while (osGetTime() - t_start < 33) gspWaitForVBlank();
@@ -347,21 +399,21 @@ int main(int argc, char **argv) {
 
         if (!gfx_ready) gfx_ready = launcher_gfx_init(&gfx);
 
-        if (g_game_change_requested) {
-            resolve_new_game_path(g_next_game_path, g_current_data_path);
+        if (g_game_change_requested && !quit_to_launcher) {
+            launcher_resolve_new_game_path(g_next_game_path, g_current_data_path, sizeof(g_current_data_path));
         } else {
-            int new_selection = run_launcher_menu(&gfx);
+            int new_selection = launcher_run_menu(&gfx);
             if (new_selection < 0) {
                 keep_playing = false;
             } else {
-                strncpy(g_current_data_path, g_games[new_selection].path, 255);
+                strncpy(g_current_data_path, launcher_game(new_selection)->path, 255);
                 g_current_data_path[255] = '\0';
             }
         }
     }
 
     if (gfx_ready) launcher_gfx_destroy(&gfx);
-    free_game_icons();
+    launcher_free_game_icons();
 
     shaderProgramFree(&g_shaderProg);
     DVLB_Free(g_vshaderDvlb);

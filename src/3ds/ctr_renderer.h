@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define CTR_REPACK_ATLAS_SIZE   512
 #define CTR_MAX_CHUNKS_X        4
 #define CTR_MAX_CHUNKS_Y        4
 #define CTR_TARGET_STACK_DEPTH  8
@@ -27,6 +28,29 @@ typedef struct {
 } CtrPage;
 
 typedef struct {
+    bool     loaded;
+    bool     keepResident;
+    int      width, height;
+    int      potW,  potH;
+    uint32_t fileOffset;
+    C3D_Tex  tex;
+    uint32_t lastFrame;
+} CtrSourcePage;
+
+typedef struct {
+    bool     valid;
+    uint32_t segmentStart;
+    uint32_t segmentCount;
+} CtrCachedTpag;
+
+typedef struct {
+    uint32_t atlasIndex;
+    uint16_t sourceX, sourceY;
+    uint16_t width, height;
+    uint16_t atlasX, atlasY;
+} CtrCachedSegment;
+
+typedef struct {
     bool              used;
     int               width, height;
     int               potW,  potH;
@@ -42,7 +66,7 @@ typedef struct {
     C3D_Mtx           projection;
 } CtrTargetState;
 
-typedef struct {
+typedef struct CtrRenderer {
     Renderer base;
 
     // Citro3D shader pipeline
@@ -72,6 +96,14 @@ typedef struct {
     uint32_t          pageCount;
     uint32_t          originalTpagCount;
     uint32_t          originalSpriteCount;
+    CtrSourcePage    *sourcePages;
+    uint32_t          sourcePageCount;
+    uint32_t          repackBasePageId;
+    uint32_t          repackPageCount;
+    CtrCachedTpag    *cacheItems;
+    uint32_t          cacheItemCount;
+    CtrCachedSegment *cacheSegments;
+    uint32_t          cacheSegmentCount;
 
     // Game surfaces
     CtrSurface       *surfaces;
@@ -113,3 +145,30 @@ void CtrRenderer_setCacheProgressCallback(CtrRendererCacheProgressFn callback, v
 void CtrRenderer_prepareTextureCache(DataWin *dw);
 
 void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx);
+
+// ---- Live appearance / layout controls --------------------------------------
+
+typedef enum {
+    CTR_GAME_SCREEN_TOP    = 0,
+    CTR_GAME_SCREEN_BOTTOM = 1
+} CtrGameScreen;
+
+typedef enum {
+    CTR_BACKDROP_GRADIENT = 0,
+    CTR_BACKDROP_BLUR,
+    CTR_BACKDROP_BLACK,
+    CTR_BACKDROP_STRETCH,
+} CtrBackdropMode;
+
+void CtrRenderer_setGameScreen(CtrGameScreen which);
+CtrGameScreen CtrRenderer_getGameScreen(void);
+void CtrRenderer_setBackdropMode(CtrBackdropMode mode);
+CtrBackdropMode CtrRenderer_getBackdropMode(void);
+
+void CtrRenderer_setLetterboxTheme(float topR, float topG, float topB,
+                                   float botR, float botG, float botB,
+                                   float accentR, float accentG, float accentB,
+                                   float blurAlpha, float particleAlpha);
+
+C3D_RenderTarget *CtrRenderer_getTopTarget(Renderer *ren);
+C3D_RenderTarget *CtrRenderer_getBottomTarget(Renderer *ren);

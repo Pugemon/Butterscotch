@@ -13,6 +13,7 @@
 
 #include "stb_image.h"
 #include "image_decoder.h"
+#include "ctr_texture_cache.h"
 #include "utils.h"
 
 #include "render2d_shader_shbin.h"
@@ -24,11 +25,16 @@ extern shaderProgram_s g_shaderProg;
 
 #define BATCH_QUAD_CAP        2048
 #define BATCH_VERT_CAP        (BATCH_QUAD_CAP * 6)
-#define ATLAS_MAGIC           0x534C5441
+#define ATLAS_MAGIC           0x534C5441u  // 'ATLS'
+#define ATLAS_TILED_MAGIC     0x544C5441u  // 'ATLT'
+#define REPACK_MAGIC          0x4B415052u  // 'RPAK'
+#define REPACK_VERSION        2u
+#define CACHE_READY_FLAG      "cache_ready_v5.flag"
+#define REPACK_INDEX_FILE     "atlas.bin"
 #define MAX_RR_SEGMENTS       64
 #define MAX_RR_POINTS         (MAX_RR_SEGMENTS * 4 + 1)
-#define LINEAR_LOW            (1024u * 1024u)
-#define LINEAR_SAFE           (2u * 1024u * 1024u)
+#define LINEAR_LOW            (6u * 1024u * 1024u)
+#define LINEAR_SAFE           (8u * 1024u * 1024u)
 #define DISPLAY_TRANSFER_FLAGS \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | \
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
@@ -37,6 +43,62 @@ extern shaderProgram_s g_shaderProg;
 #define MAX_GC_TARGETS 64
 static C3D_RenderTarget* g_gc_targets[MAX_GC_TARGETS];
 static int g_gc_target_count = 0;
+
+// ---- Live theme + screen layout (driven by launcher) -----------------------
+
+static CtrGameScreen g_ctr_game_screen = CTR_GAME_SCREEN_TOP;
+static CtrBackdropMode g_ctr_backdrop_mode = CTR_BACKDROP_GRADIENT;
+
+static struct {
+    float bgTop[3];
+    float bgBot[3];
+    float accent[3];
+    float blurAlpha;
+    float particleAlpha;
+} g_letterbox = {
+    .bgTop = {0.18f, 0.10f, 0.26f},
+    .bgBot = {0.02f, 0.03f, 0.08f},
+    .accent = {1.0f, 0.74f, 0.24f},
+    .blurAlpha = 0.35f,
+    .particleAlpha = 1.0f,
+};
+
+void CtrRenderer_setGameScreen(CtrGameScreen which) {
+    if (which != CTR_GAME_SCREEN_TOP && which != CTR_GAME_SCREEN_BOTTOM) return;
+    g_ctr_game_screen = which;
+}
+
+CtrGameScreen CtrRenderer_getGameScreen(void) { return g_ctr_game_screen; }
+
+void CtrRenderer_setBackdropMode(CtrBackdropMode mode) {
+    int value = (int)mode;
+    if (value < (int)CTR_BACKDROP_GRADIENT || value > (int)CTR_BACKDROP_STRETCH)
+        mode = CTR_BACKDROP_GRADIENT;
+    g_ctr_backdrop_mode = mode;
+}
+
+CtrBackdropMode CtrRenderer_getBackdropMode(void) { return g_ctr_backdrop_mode; }
+
+void CtrRenderer_setLetterboxTheme(float topR, float topG, float topB,
+                                   float botR, float botG, float botB,
+                                   float accentR, float accentG, float accentB,
+                                   float blurAlpha, float particleAlpha) {
+    g_letterbox.bgTop[0] = topR; g_letterbox.bgTop[1] = topG; g_letterbox.bgTop[2] = topB;
+    g_letterbox.bgBot[0] = botR; g_letterbox.bgBot[1] = botG; g_letterbox.bgBot[2] = botB;
+    g_letterbox.accent[0] = accentR; g_letterbox.accent[1] = accentG; g_letterbox.accent[2] = accentB;
+    if (blurAlpha     < 0.f) blurAlpha     = 0.f;
+    if (particleAlpha < 0.f) particleAlpha = 0.f;
+    g_letterbox.blurAlpha = blurAlpha;
+    g_letterbox.particleAlpha = particleAlpha;
+}
+
+C3D_RenderTarget *CtrRenderer_getTopTarget(Renderer *ren) {
+    return ren ? ((CtrRenderer *)ren)->topTarget : NULL;
+}
+
+C3D_RenderTarget *CtrRenderer_getBottomTarget(Renderer *ren) {
+    return ren ? ((CtrRenderer *)ren)->bottomTarget : NULL;
+}
 
 static void safe_delete_target(CtrRenderer *ctx, C3D_RenderTarget *target) {
     if (!target) return;
@@ -73,6 +135,27 @@ typedef struct {
 } AtlasHeader;
 
 typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t tpagCount;
+    uint32_t basePageId;
+    uint32_t atlasCount;
+    uint32_t atlasSize;
+} RepackHeader;
+
+typedef struct {
+    uint32_t flags;
+    uint32_t pageId;
+    uint16_t sourceX, sourceY;
+    uint16_t sourceWidth, sourceHeight;
+    uint16_t targetX, targetY;
+    uint16_t targetWidth, targetHeight;
+    uint16_t boundingWidth, boundingHeight;
+} RepackMapEntry;
+
+#define REPACK_ENTRY_VALID 1u
+
+typedef struct {
     float    x, y, z;
     float    u, v;
     float    r, g, b, a;
@@ -85,6 +168,7 @@ static void *g_cacheProgressUser = NULL;
 void CtrRenderer_setCacheProgressCallback(CtrRendererCacheProgressFn callback, void *user) {
     g_cacheProgressCallback = callback;
     g_cacheProgressUser = user;
+    CtrTextureCache_setProgressCallback((CtrTextureCacheProgressFn)callback, user);
 }
 
 static inline uint16_t pack_rgba4444(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -154,75 +238,858 @@ static void tile_rgba4(const uint16_t *linear, uint16_t *tiled,
     }
 }
 
-// Texture cache
+// Texture cache / local repack.
+//
+// data.win is never modified. First launch creates:
+//   atlas.bin           - TPAG remap table (old TPAG index -> new page/x/y)
+//   page_<id>.atlas     - linear RGBA4444 atlas pages, ATLS header + pixels
+//
+// Repacked pages start at dw->txtr.count, so old source page ids remain usable
+// as a fallback for oversized TPAGs that cannot fit into a 512x512 atlas.
+
+static void page_meta_path(char *out, size_t outSize, int pageId) {
+    snprintf(out, outSize, "%s/page_%d.atlas", g_current_cache_dir, pageId);
+}
+
+static void repack_index_path(char *out, size_t outSize) {
+    snprintf(out, outSize, "%s/%s", g_current_cache_dir, REPACK_INDEX_FILE);
+}
+
+static bool repack_index_is_valid(DataWin *dw) {
+    if (!dw) return false;
+    char path[256];
+    repack_index_path(path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+
+    RepackHeader hdr;
+    bool ok = fread(&hdr, sizeof(hdr), 1, f) == 1 &&
+              hdr.magic == REPACK_MAGIC &&
+              hdr.version == REPACK_VERSION &&
+              hdr.atlasSize == CTR_REPACK_ATLAS_SIZE &&
+              hdr.tpagCount <= dw->tpag.count &&
+              hdr.atlasCount < 32768u &&
+              hdr.basePageId + hdr.atlasCount <= 32767u;
+    fclose(f);
+
+    if (ok && hdr.atlasCount > 0) {
+        char pagePath[256];
+        page_meta_path(pagePath, sizeof(pagePath), (int)hdr.basePageId);
+        FILE *p = fopen(pagePath, "rb");
+        ok = (p != NULL);
+        if (p) fclose(p);
+    }
+    return ok;
+}
+
+static void ensure_cache_ready_flag(void) {
+    char flagFile[256];
+    snprintf(flagFile, sizeof(flagFile), "%s/%s", g_current_cache_dir, CACHE_READY_FLAG);
+    FILE *f = fopen(flagFile, "w");
+    if (f) { fputs("READY", f); fclose(f); }
+}
+
+static void remove_if_exists(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fclose(f);
+    remove(path);
+}
+
+static void remove_legacy_tile_files(int pageId) {
+    char path[256];
+    for (int cy = 0; cy < CTR_MAX_CHUNKS_Y; cy++) {
+        for (int cx = 0; cx < CTR_MAX_CHUNKS_X; cx++) {
+            snprintf(path, sizeof(path), "%s/page_%d_%d_%d.atlas",
+                     g_current_cache_dir, pageId, cx, cy);
+            remove_if_exists(path);
+        }
+    }
+}
+
+static bool write_one_page_legacy(int pageId, const uint8_t *pixels, int w, int h) {
+    if (!pixels || w <= 0 || h <= 0) return false;
+
+    char path[256], tmpPath[256];
+    page_meta_path(path, sizeof(path), pageId);
+    snprintf(tmpPath, sizeof(tmpPath), "%s/page_%d.tmp", g_current_cache_dir, pageId);
+    remove_if_exists(tmpPath);
+    remove_legacy_tile_files(pageId);
+
+    FILE *outF = fopen(tmpPath, "wb");
+    if (!outF) return false;
+    setvbuf(outF, NULL, _IOFBF, 256 * 1024);
+
+    bool ok = true;
+    AtlasHeader hdr = { ATLAS_MAGIC, (uint32_t)w, (uint32_t)h };
+    if (fwrite(&hdr, sizeof(hdr), 1, outF) != 1) ok = false;
+
+    uint16_t *row = malloc((size_t)w * sizeof(uint16_t));
+    if (!row) ok = false;
+    for (int y = 0; ok && y < h; y++) {
+        const uint8_t *src = pixels + (size_t)y * (size_t)w * 4u;
+        for (int x = 0; x < w; x++) {
+            uint8_t r = src[x * 4 + 0];
+            uint8_t g = src[x * 4 + 1];
+            uint8_t b = src[x * 4 + 2];
+            uint8_t a = src[x * 4 + 3];
+            if (a == 0) { r = 0; g = 0; b = 0; }
+            row[x] = pack_rgba4444(r, g, b, a);
+        }
+        if (fwrite(row, sizeof(uint16_t), (size_t)w, outF) != (size_t)w) ok = false;
+    }
+    free(row);
+    fclose(outF);
+
+    if (ok && rename(tmpPath, path) != 0) {
+        remove_if_exists(path);
+        ok = (rename(tmpPath, path) == 0);
+    }
+    if (!ok) remove_if_exists(tmpPath);
+    return ok;
+}
+
+typedef struct {
+    uint32_t tpagIndex;
+    uint32_t groupId;
+    int srcPage;
+    int srcX, srcY;
+    int w, h;
+    int atlasId;
+    int dstX, dstY;
+} RepackImage;
+
+typedef struct {
+    uint32_t groupId;
+    uint32_t start;
+    uint32_t count;
+    uint64_t area;
+} RepackGroup;
+
+typedef struct {
+    int x, y, w, h;
+} PackRect;
+
+#define MAX_FREE_RECTS 512
+
+typedef struct {
+    PackRect rects[MAX_FREE_RECTS];
+    int count;
+} MaxRectsPacker;
+
+typedef struct {
+    MaxRectsPacker packer;
+} RepackAtlas;
+
+static RepackImage *g_sort_images = NULL;
+
+static int cmp_image_group(const void *a, const void *b) {
+    const RepackImage *ia = &g_sort_images[*(const uint32_t *)a];
+    const RepackImage *ib = &g_sort_images[*(const uint32_t *)b];
+    if (ia->groupId < ib->groupId) return -1;
+    if (ia->groupId > ib->groupId) return 1;
+    return 0;
+}
+
+static int cmp_group_area_desc(const void *a, const void *b) {
+    const RepackGroup *ga = (const RepackGroup *)a;
+    const RepackGroup *gb = (const RepackGroup *)b;
+    if (ga->area < gb->area) return 1;
+    if (ga->area > gb->area) return -1;
+    return 0;
+}
+
+static int cmp_image_size_desc(const void *a, const void *b) {
+    const RepackImage *ia = &g_sort_images[*(const uint32_t *)a];
+    const RepackImage *ib = &g_sort_images[*(const uint32_t *)b];
+    int ma = ia->w > ia->h ? ia->w : ia->h;
+    int mb = ib->w > ib->h ? ib->w : ib->h;
+    if (ma != mb) return mb - ma;
+    return (ib->w * ib->h) - (ia->w * ia->h);
+}
+
+static void packer_init(MaxRectsPacker *p) {
+    p->count = 1;
+    p->rects[0] = (PackRect){0, 0, CTR_REPACK_ATLAS_SIZE, CTR_REPACK_ATLAS_SIZE};
+}
+
+static bool pack_rects_overlap(PackRect a, PackRect b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x &&
+           a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+static bool pack_rect_contains(PackRect outer, PackRect inner) {
+    return outer.x <= inner.x && outer.y <= inner.y &&
+           outer.x + outer.w >= inner.x + inner.w &&
+           outer.y + outer.h >= inner.y + inner.h;
+}
+
+static void packer_add_free(MaxRectsPacker *p, PackRect r) {
+    if (r.w <= 0 || r.h <= 0 || p->count >= MAX_FREE_RECTS) return;
+    p->rects[p->count++] = r;
+}
+
+static void packer_split(MaxRectsPacker *p, PackRect used) {
+    for (int i = 0; i < p->count;) {
+        PackRect freeR = p->rects[i];
+        if (!pack_rects_overlap(freeR, used)) {
+            i++;
+            continue;
+        }
+
+        p->rects[i] = p->rects[--p->count];
+        if (freeR.x < used.x) {
+            packer_add_free(p, (PackRect){freeR.x, freeR.y, used.x - freeR.x, freeR.h});
+        }
+        if (freeR.x + freeR.w > used.x + used.w) {
+            packer_add_free(p, (PackRect){used.x + used.w, freeR.y,
+                                          freeR.x + freeR.w - used.x - used.w, freeR.h});
+        }
+        if (freeR.y < used.y) {
+            packer_add_free(p, (PackRect){freeR.x, freeR.y, freeR.w, used.y - freeR.y});
+        }
+        if (freeR.y + freeR.h > used.y + used.h) {
+            packer_add_free(p, (PackRect){freeR.x, used.y + used.h, freeR.w,
+                                          freeR.y + freeR.h - used.y - used.h});
+        }
+    }
+}
+
+static void packer_prune(MaxRectsPacker *p) {
+    for (int i = 0; i < p->count; i++) {
+        for (int j = 0; j < p->count; j++) {
+            if (i == j) continue;
+            if (pack_rect_contains(p->rects[j], p->rects[i])) {
+                p->rects[i] = p->rects[--p->count];
+                i--;
+                break;
+            }
+        }
+    }
+}
+
+static bool packer_insert(MaxRectsPacker *p, int w, int h, int *outX, int *outY) {
+    int best = -1;
+    int bestShort = 0x7fffffff;
+    int bestLong = 0x7fffffff;
+    for (int i = 0; i < p->count; i++) {
+        PackRect r = p->rects[i];
+        if (r.w < w || r.h < h) continue;
+        int leftoverH = r.w - w;
+        int leftoverV = r.h - h;
+        int shortSide = leftoverH < leftoverV ? leftoverH : leftoverV;
+        int longSide  = leftoverH > leftoverV ? leftoverH : leftoverV;
+        if (shortSide < bestShort || (shortSide == bestShort && longSide < bestLong)) {
+            best = i;
+            bestShort = shortSide;
+            bestLong = longSide;
+        }
+    }
+    if (best < 0) return false;
+
+    PackRect placed = { p->rects[best].x, p->rects[best].y, w, h };
+    *outX = placed.x;
+    *outY = placed.y;
+    packer_split(p, placed);
+    packer_prune(p);
+    return true;
+}
+
+static bool add_repack_image(RepackImage **images, uint32_t *count, uint32_t *cap,
+                             RepackImage img) {
+    if (*count >= *cap) {
+        uint32_t next = *cap ? (*cap * 2u) : 256u;
+        RepackImage *grown = realloc(*images, (size_t)next * sizeof(RepackImage));
+        if (!grown) return false;
+        *images = grown;
+        *cap = next;
+    }
+    (*images)[(*count)++] = img;
+    return true;
+}
+
+static uint32_t pack_repack_images(RepackImage *images, uint32_t imageCount) {
+    if (!images || imageCount == 0) return 0;
+
+    uint32_t *order = malloc((size_t)imageCount * sizeof(uint32_t));
+    if (!order) return 0;
+    for (uint32_t i = 0; i < imageCount; i++) order[i] = i;
+
+    g_sort_images = images;
+    qsort(order, imageCount, sizeof(uint32_t), cmp_image_group);
+
+    RepackGroup *groups = NULL;
+    uint32_t groupCount = 0;
+    uint32_t groupCap = 0;
+    for (uint32_t at = 0; at < imageCount;) {
+        uint32_t start = at;
+        uint32_t groupId = images[order[at]].groupId;
+        uint64_t area = 0;
+        while (at < imageCount && images[order[at]].groupId == groupId) {
+            RepackImage *img = &images[order[at]];
+            area += (uint64_t)img->w * (uint64_t)img->h;
+            at++;
+        }
+        if (groupCount >= groupCap) {
+            uint32_t next = groupCap ? groupCap * 2u : 128u;
+            RepackGroup *grown = realloc(groups, (size_t)next * sizeof(RepackGroup));
+            if (!grown) { free(groups); free(order); return 0; }
+            groups = grown;
+            groupCap = next;
+        }
+        groups[groupCount++] = (RepackGroup){ groupId, start, at - start, area };
+    }
+    qsort(groups, groupCount, sizeof(RepackGroup), cmp_group_area_desc);
+
+    RepackAtlas *atlases = NULL;
+    uint32_t atlasCount = 0;
+    uint32_t atlasCap = 0;
+
+    for (uint32_t g = 0; g < groupCount; g++) {
+        RepackGroup *grp = &groups[g];
+        uint32_t *idx = malloc((size_t)grp->count * sizeof(uint32_t));
+        int *tryX = malloc((size_t)grp->count * sizeof(int));
+        int *tryY = malloc((size_t)grp->count * sizeof(int));
+        if (!idx || !tryX || !tryY) {
+            free(idx); free(tryX); free(tryY);
+            continue;
+        }
+        for (uint32_t i = 0; i < grp->count; i++) idx[i] = order[grp->start + i];
+        qsort(idx, grp->count, sizeof(uint32_t), cmp_image_size_desc);
+
+        bool placedGroup = false;
+        for (uint32_t a = 0; a < atlasCount && !placedGroup; a++) {
+            MaxRectsPacker clone = atlases[a].packer;
+            bool allFit = true;
+            for (uint32_t i = 0; i < grp->count; i++) {
+                RepackImage *img = &images[idx[i]];
+                if (!packer_insert(&clone, img->w, img->h, &tryX[i], &tryY[i])) {
+                    allFit = false;
+                    break;
+                }
+            }
+            if (allFit) {
+                atlases[a].packer = clone;
+                for (uint32_t i = 0; i < grp->count; i++) {
+                    RepackImage *img = &images[idx[i]];
+                    img->atlasId = (int)a;
+                    img->dstX = tryX[i];
+                    img->dstY = tryY[i];
+                }
+                placedGroup = true;
+            }
+        }
+
+        if (!placedGroup) {
+            bool *remaining = calloc(grp->count, sizeof(bool));
+            if (remaining) {
+                for (uint32_t i = 0; i < grp->count; i++) remaining[i] = true;
+                uint32_t left = grp->count;
+                while (left > 0) {
+                    if (atlasCount >= atlasCap) {
+                        uint32_t next = atlasCap ? atlasCap * 2u : 32u;
+                        RepackAtlas *grown = realloc(atlases, (size_t)next * sizeof(RepackAtlas));
+                        if (!grown) break;
+                        atlases = grown;
+                        atlasCap = next;
+                    }
+                    uint32_t atlasId = atlasCount++;
+                    packer_init(&atlases[atlasId].packer);
+                    bool any = false;
+                    for (uint32_t i = 0; i < grp->count; i++) {
+                        if (!remaining[i]) continue;
+                        RepackImage *img = &images[idx[i]];
+                        int px, py;
+                        if (packer_insert(&atlases[atlasId].packer, img->w, img->h, &px, &py)) {
+                            img->atlasId = (int)atlasId;
+                            img->dstX = px;
+                            img->dstY = py;
+                            remaining[i] = false;
+                            left--;
+                            any = true;
+                        }
+                    }
+                    if (!any) break;
+                }
+                free(remaining);
+            }
+        }
+
+        free(idx);
+        free(tryX);
+        free(tryY);
+    }
+
+    free(atlases);
+    free(groups);
+    free(order);
+    g_sort_images = NULL;
+    return atlasCount;
+}
+
+static bool init_empty_repack_page(uint32_t pageId) {
+    char path[256], tmpPath[256];
+    page_meta_path(path, sizeof(path), (int)pageId);
+    snprintf(tmpPath, sizeof(tmpPath), "%s/page_%lu.tmp",
+             g_current_cache_dir, (unsigned long)pageId);
+    remove_if_exists(tmpPath);
+
+    FILE *f = fopen(tmpPath, "wb");
+    if (!f) return false;
+    setvbuf(f, NULL, _IOFBF, 64 * 1024);
+
+    bool ok = true;
+    AtlasHeader hdr = { ATLAS_MAGIC, CTR_REPACK_ATLAS_SIZE, CTR_REPACK_ATLAS_SIZE };
+    if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) ok = false;
+
+    uint16_t *zero = calloc(CTR_REPACK_ATLAS_SIZE, sizeof(uint16_t));
+    if (!zero) ok = false;
+    for (int y = 0; ok && y < CTR_REPACK_ATLAS_SIZE; y++) {
+        if (fwrite(zero, sizeof(uint16_t), CTR_REPACK_ATLAS_SIZE, f) != CTR_REPACK_ATLAS_SIZE) {
+            ok = false;
+        }
+    }
+    free(zero);
+    fclose(f);
+
+    if (ok && rename(tmpPath, path) != 0) {
+        remove_if_exists(path);
+        ok = (rename(tmpPath, path) == 0);
+    }
+    if (!ok) remove_if_exists(tmpPath);
+    return ok;
+}
+
+static bool finalize_repack_page_tiled(uint32_t pageId) {
+    char path[256], tmpPath[256];
+    page_meta_path(path, sizeof(path), (int)pageId);
+    snprintf(tmpPath, sizeof(tmpPath), "%s/page_%lu.tiled.tmp",
+             g_current_cache_dir, (unsigned long)pageId);
+
+    FILE *in = fopen(path, "rb");
+    if (!in) return false;
+
+    AtlasHeader hdr;
+    bool ok = fread(&hdr, sizeof(hdr), 1, in) == 1 &&
+              hdr.magic == ATLAS_MAGIC &&
+              hdr.w > 0 && hdr.h > 0 &&
+              hdr.w <= CTR_REPACK_ATLAS_SIZE &&
+              hdr.h <= CTR_REPACK_ATLAS_SIZE;
+    int w = ok ? (int)hdr.w : 0;
+    int h = ok ? (int)hdr.h : 0;
+    uint16_t *linear = NULL;
+    uint16_t *tiled = NULL;
+    if (ok) {
+        linear = calloc((size_t)w * (size_t)h, sizeof(uint16_t));
+        tiled = malloc((size_t)w * (size_t)h * sizeof(uint16_t));
+        ok = (linear != NULL && tiled != NULL);
+    }
+    if (ok) {
+        ok = fread(linear, sizeof(uint16_t), (size_t)w * (size_t)h, in) ==
+             (size_t)w * (size_t)h;
+    }
+    fclose(in);
+
+    if (ok) {
+        tile_rgba4(linear, tiled, w, h, w, h);
+        remove_if_exists(tmpPath);
+        FILE *out = fopen(tmpPath, "wb");
+        ok = (out != NULL);
+        if (ok) {
+            AtlasHeader outHdr = { ATLAS_TILED_MAGIC, (uint32_t)w, (uint32_t)h };
+            ok = fwrite(&outHdr, sizeof(outHdr), 1, out) == 1 &&
+                 fwrite(tiled, sizeof(uint16_t), (size_t)w * (size_t)h, out) ==
+                 (size_t)w * (size_t)h;
+            fclose(out);
+        }
+        if (ok && rename(tmpPath, path) != 0) {
+            remove_if_exists(path);
+            ok = (rename(tmpPath, path) == 0);
+        }
+    }
+
+    if (!ok) remove_if_exists(tmpPath);
+    free(linear);
+    free(tiled);
+    return ok;
+}
+
+static bool blit_repack_image(const RepackImage *img, const uint8_t *srcPixels,
+                              int srcW, int srcH, uint32_t basePageId) {
+    if (!img || !srcPixels) return false;
+    if (img->srcX < 0 || img->srcY < 0 || img->dstX < 0 || img->dstY < 0) return false;
+    if (img->srcX + img->w > srcW || img->srcY + img->h > srcH) return false;
+    if (img->dstX + img->w > CTR_REPACK_ATLAS_SIZE || img->dstY + img->h > CTR_REPACK_ATLAS_SIZE) return false;
+
+    char path[256];
+    page_meta_path(path, sizeof(path), (int)(basePageId + (uint32_t)img->atlasId));
+    FILE *f = fopen(path, "r+b");
+    if (!f) return false;
+    setvbuf(f, NULL, _IOFBF, 32 * 1024);
+
+    uint16_t *row = malloc((size_t)img->w * sizeof(uint16_t));
+    bool ok = (row != NULL);
+    for (int y = 0; ok && y < img->h; y++) {
+        const uint8_t *src = srcPixels + (((size_t)(img->srcY + y) * (size_t)srcW + (size_t)img->srcX) * 4u);
+        for (int x = 0; x < img->w; x++) {
+            uint8_t r = src[x * 4 + 0];
+            uint8_t g = src[x * 4 + 1];
+            uint8_t b = src[x * 4 + 2];
+            uint8_t a = src[x * 4 + 3];
+            if (a == 0) { r = 0; g = 0; b = 0; }
+            row[x] = pack_rgba4444(r, g, b, a);
+        }
+        long off = (long)sizeof(AtlasHeader) +
+                   (((long)(img->dstY + y) * CTR_REPACK_ATLAS_SIZE + img->dstX) * 2L);
+        if (fseek(f, off, SEEK_SET) != 0 ||
+            fwrite(row, sizeof(uint16_t), (size_t)img->w, f) != (size_t)img->w) {
+            ok = false;
+        }
+    }
+    free(row);
+    fclose(f);
+    return ok;
+}
+
+static bool write_repack_index(const RepackMapEntry *entries, uint32_t tpagCount,
+                               uint32_t basePageId, uint32_t atlasCount) {
+    char path[256], tmpPath[256];
+    repack_index_path(path, sizeof(path));
+    snprintf(tmpPath, sizeof(tmpPath), "%s/atlas.tmp", g_current_cache_dir);
+    remove_if_exists(tmpPath);
+
+    FILE *f = fopen(tmpPath, "wb");
+    RepackHeader hdr = {
+        REPACK_MAGIC, REPACK_VERSION, tpagCount, basePageId,
+        atlasCount, CTR_REPACK_ATLAS_SIZE
+    };
+    bool ok = false;
+    if (f) {
+        ok = true;
+        if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) ok = false;
+        if (ok && fwrite(entries, 1, (size_t)tpagCount * sizeof(RepackMapEntry), f) !=
+                  (size_t)tpagCount * sizeof(RepackMapEntry)) ok = false;
+        fclose(f);
+    }
+
+    if (ok && rename(tmpPath, path) != 0) {
+        remove_if_exists(path);
+        ok = (rename(tmpPath, path) == 0);
+    }
+    if (!ok) remove_if_exists(tmpPath);
+    if (!ok) {
+        FILE *direct = fopen(path, "wb");
+        if (!direct) return false;
+        RepackHeader hdr = {
+            REPACK_MAGIC, REPACK_VERSION, tpagCount, basePageId,
+            atlasCount, CTR_REPACK_ATLAS_SIZE
+        };
+        size_t bytes = (size_t)tpagCount * sizeof(RepackMapEntry);
+        ok = fwrite(&hdr, sizeof(hdr), 1, direct) == 1 &&
+             fwrite(entries, 1, bytes, direct) == bytes;
+        fclose(direct);
+        if (!ok) remove_if_exists(path);
+    }
+    return ok;
+}
+
+static void assign_asset_groups(DataWin *dw, uint32_t *groupIds, uint32_t *nextGroup) {
+    for (uint32_t s = 0; s < dw->sprt.count; s++) {
+        Sprite *spr = &dw->sprt.sprites[s];
+        uint32_t group = (*nextGroup)++;
+        for (uint32_t f = 0; f < spr->textureCount; f++) {
+            int32_t tpag = spr->tpagIndices ? spr->tpagIndices[f] : -1;
+            if (tpag >= 0 && (uint32_t)tpag < dw->tpag.count && groupIds[tpag] == 0) {
+                groupIds[tpag] = group;
+            }
+        }
+    }
+    for (uint32_t b = 0; b < dw->bgnd.count; b++) {
+        int32_t tpag = dw->bgnd.backgrounds[b].tpagIndex;
+        if (tpag >= 0 && (uint32_t)tpag < dw->tpag.count && groupIds[tpag] == 0) {
+            groupIds[tpag] = (*nextGroup)++;
+        }
+    }
+    for (uint32_t f = 0; f < dw->font.count; f++) {
+        int32_t tpag = dw->font.fonts[f].tpagIndex;
+        if (tpag >= 0 && (uint32_t)tpag < dw->tpag.count && groupIds[tpag] == 0) {
+            groupIds[tpag] = (*nextGroup)++;
+        }
+    }
+}
 
 static void build_texture_cache(DataWin *dw) {
     if (!dw) return;
     char flagFile[256];
-    snprintf(flagFile, sizeof(flagFile), "%s/cache_ready.flag", g_current_cache_dir);
+    snprintf(flagFile, sizeof(flagFile), "%s/%s", g_current_cache_dir, CACHE_READY_FLAG);
+
+    if (repack_index_is_valid(dw)) {
+        FILE *ready = fopen(flagFile, "r");
+        if (ready) fclose(ready);
+        else ensure_cache_ready_flag();
+        return;
+    }
 
     FILE *f = fopen(flagFile, "r");
-    if (f) { fclose(f); return; }
+    if (f) {
+        fclose(f);
+        remove_if_exists(flagFile);
+    }
 
     FILE *dwFile = dw->filePath ? fopen(dw->filePath, "rb") : NULL;
     if (dwFile) setvbuf(dwFile, NULL, _IOFBF, 256 * 1024);
 
-    for (uint32_t i = 0; i < dw->txtr.count; i++) {
-        char path[256];
-        snprintf(path, sizeof(path), "%s/page_%u.atlas", g_current_cache_dir, i);
+    bool ok = (dwFile != NULL);
+    uint32_t basePageId = dw->txtr.count;
+    RepackMapEntry *entries = calloc(dw->tpag.count, sizeof(RepackMapEntry));
+    uint32_t *groupIds = calloc(dw->tpag.count ? dw->tpag.count : 1, sizeof(uint32_t));
+    bool *fallbackPages = calloc(dw->txtr.count ? dw->txtr.count : 1, sizeof(bool));
+    RepackImage *images = NULL;
+    uint32_t imageCount = 0;
+    uint32_t imageCap = 0;
+    if (!entries || !groupIds || !fallbackPages) ok = false;
+
+    uint32_t nextGroup = 1;
+    if (ok) assign_asset_groups(dw, groupIds, &nextGroup);
+
+    if (ok) {
+        for (uint32_t i = 0; i < dw->tpag.count; i++) {
+            TexturePageItem *item = &dw->tpag.items[i];
+            if (item->texturePageId < 0 || (uint32_t)item->texturePageId >= dw->txtr.count) continue;
+            int w = item->sourceWidth;
+            int h = item->sourceHeight;
+            if (w <= 0 || h <= 0) continue;
+            if (w > CTR_REPACK_ATLAS_SIZE || h > CTR_REPACK_ATLAS_SIZE) {
+                fallbackPages[item->texturePageId] = true;
+                continue;
+            }
+            uint32_t group = groupIds[i] ? groupIds[i] : nextGroup++;
+            RepackImage img = {
+                .tpagIndex = i,
+                .groupId = group,
+                .srcPage = item->texturePageId,
+                .srcX = item->sourceX,
+                .srcY = item->sourceY,
+                .w = w,
+                .h = h,
+                .atlasId = -1,
+                .dstX = 0,
+                .dstY = 0,
+            };
+            if (!add_repack_image(&images, &imageCount, &imageCap, img)) {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    uint32_t atlasCount = ok ? pack_repack_images(images, imageCount) : 0;
+    if (ok && imageCount > 0 && atlasCount == 0) ok = false;
+    if (ok && basePageId + atlasCount > 32767u) ok = false;
+    if (ok) {
+        for (uint32_t i = 0; i < imageCount; i++) {
+            if (images[i].atlasId < 0 && images[i].srcPage >= 0 &&
+                (uint32_t)images[i].srcPage < dw->txtr.count) {
+                fallbackPages[images[i].srcPage] = true;
+            }
+        }
+    }
+
+    if (ok) {
+        for (uint32_t a = 0; a < atlasCount; a++) {
+            if (!init_empty_repack_page(basePageId + a)) ok = false;
+        }
+    }
+
+    if (ok) {
+        for (uint32_t i = 0; i < imageCount; i++) {
+            RepackImage *img = &images[i];
+            if (img->atlasId < 0) continue;
+            TexturePageItem *old = &dw->tpag.items[img->tpagIndex];
+            entries[img->tpagIndex] = (RepackMapEntry){
+                .flags = REPACK_ENTRY_VALID,
+                .pageId = basePageId + (uint32_t)img->atlasId,
+                .sourceX = (uint16_t)img->dstX,
+                .sourceY = (uint16_t)img->dstY,
+                .sourceWidth = old->sourceWidth,
+                .sourceHeight = old->sourceHeight,
+                .targetX = old->targetX,
+                .targetY = old->targetY,
+                .targetWidth = old->targetWidth,
+                .targetHeight = old->targetHeight,
+                .boundingWidth = old->boundingWidth,
+                .boundingHeight = old->boundingHeight,
+            };
+        }
+    }
+
+    for (uint32_t p = 0; ok && p < dw->txtr.count; p++) {
+        char progressPath[256];
+        page_meta_path(progressPath, sizeof(progressPath), (int)p);
         if (g_cacheProgressCallback) {
-            g_cacheProgressCallback(i, dw->txtr.count, path, g_cacheProgressUser);
+            g_cacheProgressCallback(p, dw->txtr.count, progressPath, g_cacheProgressUser);
         }
 
-        FILE *check = fopen(path, "r");
-        if (check) { fclose(check); continue; }
+        bool needed = fallbackPages[p];
+        for (uint32_t i = 0; !needed && i < imageCount; i++) {
+            if (images[i].srcPage == (int)p) needed = true;
+        }
+        if (!needed) {
+            char oldPath[256];
+            page_meta_path(oldPath, sizeof(oldPath), (int)p);
+            remove_if_exists(oldPath);
+            remove_legacy_tile_files((int)p);
+            continue;
+        }
 
-        Texture *t = &dw->txtr.textures[i];
-        if (!t->blobSize) continue;
-
+        Texture *t = &dw->txtr.textures[p];
+        if (!t->blobSize) {
+            fprintf(stderr, "CTR cache: TXTR page %lu has no embedded blob\n", (unsigned long)p);
+            ok = false;
+            continue;
+        }
         uint8_t *blob = read_blob(dwFile, t->blobOffset, t->blobSize);
-        if (!blob) continue;
+        if (!blob) {
+            fprintf(stderr, "CTR cache: failed to read TXTR page %lu blob\n", (unsigned long)p);
+            ok = false;
+            continue;
+        }
 
         int w, h;
         uint8_t *pixels = ImageDecoder_decodeToRgba(
             blob, t->blobSize, DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0), &w, &h);
         free(blob);
+        if (!pixels) {
+            fprintf(stderr, "CTR cache: failed to decode TXTR page %lu\n", (unsigned long)p);
+            ok = false;
+            continue;
+        }
 
-        if (pixels) {
-            uint16_t *out = malloc((size_t)w * h * 2);
-            for (int p = 0; p < w * h; p++) {
-                int s = p * 4;
-                if (pixels[s + 3] == 0) {
-                    pixels[s] = 0;
-                    pixels[s + 1] = 0;
-                    pixels[s + 2] = 0;
-                }
-                out[p] = pack_rgba4444(pixels[s], pixels[s + 1], pixels[s + 2], pixels[s + 3]);
+        if (fallbackPages[p] && !write_one_page_legacy((int)p, pixels, w, h)) {
+            fprintf(stderr, "CTR cache: failed to write legacy page %lu\n", (unsigned long)p);
+            ok = false;
+        }
+        for (uint32_t i = 0; ok && i < imageCount; i++) {
+            if (images[i].srcPage != (int)p) continue;
+            if (images[i].atlasId < 0) continue;
+            if (!blit_repack_image(&images[i], pixels, w, h, basePageId)) {
+                fprintf(stderr, "CTR cache: failed to blit TPAG %lu from source page %lu\n",
+                        (unsigned long)images[i].tpagIndex, (unsigned long)p);
+                ok = false;
             }
-            FILE *outF = fopen(path, "wb");
-            if (outF) {
-                setvbuf(outF, NULL, _IOFBF, 256 * 1024);
-                AtlasHeader hdr = {ATLAS_MAGIC, (uint32_t)w, (uint32_t)h};
-                fwrite(&hdr, sizeof(hdr), 1, outF);
-                fwrite(out, 1, (size_t)w * h * 2, outF);
-                fclose(outF);
-            }
-            free(out);
-            free(pixels);
+        }
+        ImageDecoder_freeRgba(pixels);
+        if (ok && !fallbackPages[p]) {
+            char oldPath[256];
+            page_meta_path(oldPath, sizeof(oldPath), (int)p);
+            remove_if_exists(oldPath);
+            remove_legacy_tile_files((int)p);
         }
     }
+
+    if (ok) {
+        for (uint32_t a = 0; a < atlasCount; a++) {
+            if (!finalize_repack_page_tiled(basePageId + a)) {
+                fprintf(stderr, "CTR cache: failed to finalize repack atlas %lu\n",
+                        (unsigned long)(basePageId + a));
+                ok = false;
+                break;
+            }
+        }
+    }
+
     if (dwFile) fclose(dwFile);
 
     if (g_cacheProgressCallback) {
         g_cacheProgressCallback(dw->txtr.count, dw->txtr.count, NULL, g_cacheProgressUser);
     }
 
-    FILE *outFlag = fopen(flagFile, "w");
-    if (outFlag) { fputs("READY", outFlag); fclose(outFlag); }
+    if (ok) {
+        if (write_repack_index(entries, dw->tpag.count, basePageId, atlasCount) &&
+            repack_index_is_valid(dw)) {
+            ensure_cache_ready_flag();
+        } else {
+            fprintf(stderr, "CTR cache: failed to write %s\n", REPACK_INDEX_FILE);
+        }
+    } else {
+        fprintf(stderr, "CTR cache: build failed before index commit\n");
+    }
+
+    free(images);
+    free(entries);
+    free(groupIds);
+    free(fallbackPages);
+
+    char oldFlag[256];
+    snprintf(oldFlag, sizeof(oldFlag), "%s/cache_ready.flag", g_current_cache_dir);
+    remove_if_exists(oldFlag);
+    snprintf(oldFlag, sizeof(oldFlag), "%s/cache_ready_v2.flag", g_current_cache_dir);
+    remove_if_exists(oldFlag);
+    snprintf(oldFlag, sizeof(oldFlag), "%s/cache_ready_v3.flag", g_current_cache_dir);
+    remove_if_exists(oldFlag);
+    snprintf(oldFlag, sizeof(oldFlag), "%s/cache_ready_v4.flag", g_current_cache_dir);
+    remove_if_exists(oldFlag);
 }
 
 void CtrRenderer_prepareTextureCache(DataWin *dw) {
-    build_texture_cache(dw);
+    CtrTextureCache_prepare(dw);
+}
+
+static bool apply_repack_index(CtrRenderer *ctx, DataWin *dw) {
+    if (!ctx || !dw) return false;
+
+    char path[256];
+    repack_index_path(path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+
+    RepackHeader hdr;
+    bool ok = false;
+    if (fread(&hdr, sizeof(hdr), 1, f) == 1 &&
+        hdr.magic == REPACK_MAGIC &&
+        hdr.version == REPACK_VERSION &&
+        hdr.atlasSize == CTR_REPACK_ATLAS_SIZE &&
+        hdr.tpagCount <= dw->tpag.count &&
+        hdr.atlasCount < 32768u &&
+        hdr.basePageId + hdr.atlasCount <= 32767u) {
+        RepackMapEntry *entries = malloc((size_t)hdr.tpagCount * sizeof(RepackMapEntry));
+        if (entries && fread(entries, sizeof(RepackMapEntry), hdr.tpagCount, f) == hdr.tpagCount) {
+            ctx->repackBasePageId = hdr.basePageId;
+            ctx->repackPageCount = hdr.atlasCount;
+            ctx->sourcePageCount = hdr.atlasCount;
+            ctx->sourcePages = calloc(ctx->sourcePageCount ? ctx->sourcePageCount : 1,
+                                      sizeof(CtrSourcePage));
+            ok = (ctx->sourcePages != NULL || ctx->sourcePageCount == 0);
+
+            if (ok) {
+                for (uint32_t i = 0; i < hdr.tpagCount; i++) {
+                    RepackMapEntry *e = &entries[i];
+                    if ((e->flags & REPACK_ENTRY_VALID) == 0) continue;
+                    if (e->pageId < hdr.basePageId ||
+                        e->pageId >= hdr.basePageId + hdr.atlasCount ||
+                        e->pageId > 32767u) {
+                        continue;
+                    }
+                    TexturePageItem *item = &dw->tpag.items[i];
+                    item->texturePageId = (int16_t)e->pageId;
+                    item->sourceX = e->sourceX;
+                    item->sourceY = e->sourceY;
+                    item->sourceWidth = e->sourceWidth;
+                    item->sourceHeight = e->sourceHeight;
+                    item->targetX = e->targetX;
+                    item->targetY = e->targetY;
+                    item->targetWidth = e->targetWidth;
+                    item->targetHeight = e->targetHeight;
+                    item->boundingWidth = e->boundingWidth;
+                    item->boundingHeight = e->boundingHeight;
+                }
+            }
+        }
+        free(entries);
+    }
+
+    fclose(f);
+    return ok;
 }
 
 // Vertex batching
@@ -312,61 +1179,84 @@ static void push_solid_tri(CtrRenderer *ctx, float x1, float y1, float x2, float
     v[2] = (CtrVertex){x3, y3, 0, .5f, .5f, c3[0], c3[1], c3[2], c3[3]};
 }
 
-static void draw_letterbox_gradient(CtrRenderer *ctx) {
+static void draw_letterbox_backdrop(CtrRenderer *ctx) {
+    if (g_ctr_backdrop_mode == CTR_BACKDROP_BLACK) {
+        float x[4] = {0.f, (float)ctx->winW, (float)ctx->winW, 0.f};
+        float y[4] = {0.f, 0.f, (float)ctx->winH, (float)ctx->winH};
+        float bg[4][4] = {
+            {0.f, 0.f, 0.f, 1.f}, {0.f, 0.f, 0.f, 1.f},
+            {0.f, 0.f, 0.f, 1.f}, {0.f, 0.f, 0.f, 1.f}
+        };
+        push_quad_uvgrad(ctx, &ctx->whiteTex, x, y, .5f, .5f, .5f, .5f, bg);
+        return;
+    }
+
     float u0 = 0.f;
     float u1 = (float)ctx->appLogicW / (float)ctx->appPotW;
     float v0 = (float)(ctx->appPotH - ctx->appLogicH) / (float)ctx->appPotH;
     float v1 = 1.f;
 
-    // Слегка "зумим" картинку (обрезаем края), чтобы цвет брался из центра и казался ещё более размытым
     float zoomU = (u1 - u0) * 0.15f;
     float zoomV = (v1 - v0) * 0.15f;
     float texU0 = u0 + zoomU;
     float texU1 = u1 - zoomU;
-    float texVTop = v1 - zoomV; // На 3DS верх - это v1
-    float texVBot = v0 + zoomV; // А низ - это v0
+    float texVTop = v1 - zoomV;
+    float texVBot = v0 + zoomV;
 
-    // Сначала рисуем чёрную подложку (чтобы яркие комнаты не слепили на фоне)
     float x[4] = {0.f, (float)ctx->winW, (float)ctx->winW, 0.f};
     float y[4] = {0.f, 0.f, (float)ctx->winH, (float)ctx->winH};
-    float black[4][4] = { {0,0,0,1}, {0,0,0,1}, {0,0,0,1}, {0,0,0,1} };
-    push_quad_uvgrad(ctx, &ctx->whiteTex, x, y, .5f, .5f, .5f, .5f, black);
+    float bgTopR = g_letterbox.bgTop[0];
+    float bgTopG = g_letterbox.bgTop[1];
+    float bgTopB = g_letterbox.bgTop[2];
+    float bgBotR = g_letterbox.bgBot[0];
+    float bgBotG = g_letterbox.bgBot[1];
+    float bgBotB = g_letterbox.bgBot[2];
+    float bg[4][4] = {
+        {bgTopR, bgTopG, bgTopB, 1.f}, {bgTopR, bgTopG, bgTopB, 1.f},
+        {bgBotR, bgBotG, bgBotB, 1.f}, {bgBotR, bgBotG, bgBotB, 1.f}
+    };
+    push_quad_uvgrad(ctx, &ctx->whiteTex, x, y, .5f, .5f, .5f, .5f, bg);
 
-    // Рисуем 4 слоя игры с диагональным смещением для эффекта мощного размытия (мыла)
-    float blurAlpha = 0.35f; // Прозрачность слоёв размытия
-    float offset = 14.0f;    // Сила размытия (на сколько пикселей сдвигаем)
+    if (g_ctr_backdrop_mode == CTR_BACKDROP_BLUR && g_letterbox.blurAlpha > 0.001f) {
+        float blurAlpha = g_letterbox.blurAlpha;
+        float offset = 14.0f;
 
-    float offsets_x[4] = {-offset, offset, -offset, offset};
-    float offsets_y[4] = {-offset, -offset, offset, offset};
+        float offsets_x[4] = {-offset, offset, -offset, offset};
+        float offsets_y[4] = {-offset, -offset, offset, offset};
 
-    for (int j = 0; j < 4; j++) {
-        float ox = offsets_x[j];
-        float oy = offsets_y[j];
+        for (int j = 0; j < 4; j++) {
+            float ox = offsets_x[j];
+            float oy = offsets_y[j];
 
-        float px[4] = {ox, (float)ctx->winW + ox, (float)ctx->winW + ox, ox};
-        float py[4] = {oy, oy, (float)ctx->winH + oy, (float)ctx->winH + oy};
+            float px[4] = {ox, (float)ctx->winW + ox, (float)ctx->winW + ox, ox};
+            float py[4] = {oy, oy, (float)ctx->winH + oy, (float)ctx->winH + oy};
 
-        // Добавляем градиент: верх светлее (0.45), низ темнее (0.15)
-        float c[4][4] = {
-            {0.45f, 0.45f, 0.45f, blurAlpha}, {0.45f, 0.45f, 0.45f, blurAlpha},
-            {0.15f, 0.15f, 0.15f, blurAlpha}, {0.15f, 0.15f, 0.15f, blurAlpha}
-        };
+            float c[4][4] = {
+                {0.45f, 0.45f, 0.45f, blurAlpha}, {0.45f, 0.45f, 0.45f, blurAlpha},
+                {0.15f, 0.15f, 0.15f, blurAlpha}, {0.15f, 0.15f, 0.15f, blurAlpha}
+            };
 
-        push_quad_uvgrad(ctx, &ctx->appTex, px, py, texU0, texVTop, texU1, texVBot, c);
+            push_quad_uvgrad(ctx, &ctx->appTex, px, py, texU0, texVTop, texU1, texVBot, c);
+        }
     }
 
-    // Плавающие белые частицы (поверх блюра)
-    float t = (float)g_frame * 0.025f;
-    for (int i = 0; i < 18; i++) {
-        float seed = (float)i * 15.37f;
-        float px = fmodf(seed * 19.1f + t * (18.f + (float)(i % 4) * 7.f), (float)ctx->winW + 48.f) - 24.f;
-        float py = fmodf(seed * 11.3f + sinf(t + seed) * 16.f, (float)ctx->winH + 32.f) - 16.f;
-        float s = 1.2f + (float)(i % 3) * 0.8f;
+    if (g_letterbox.particleAlpha > 0.001f) {
+        float t = (float)g_frame * 0.025f;
+        float aR = g_letterbox.accent[0];
+        float aG = g_letterbox.accent[1];
+        float aB = g_letterbox.accent[2];
+        for (int i = 0; i < 18; i++) {
+            float seed = (float)i * 15.37f;
+            float px = fmodf(seed * 19.1f + t * (18.f + (float)(i % 4) * 7.f), (float)ctx->winW + 48.f) - 24.f;
+            float py = fmodf(seed * 11.3f + sinf(t + seed) * 16.f, (float)ctx->winH + 32.f) - 16.f;
+            float s = 1.2f + (float)(i % 3) * 0.8f;
 
-        float alpha = 0.12f + 0.10f * (sinf(t * 1.7f + seed) * 0.5f + 0.5f);
-        float pc[4] = {1.0f, 1.0f, 1.0f, alpha};
-        push_quad(ctx, &ctx->whiteTex, px, py, px + s, py, px + s, py + s, px, py + s,
-                  .5f, .5f, .5f, .5f, pc);
+            float alpha = g_letterbox.particleAlpha *
+                          (0.12f + 0.10f * (sinf(t * 1.7f + seed) * 0.5f + 0.5f));
+            float pc[4] = {aR, aG, aB, alpha};
+            push_quad(ctx, &ctx->whiteTex, px, py, px + s, py, px + s, py + s, px, py + s,
+                      .5f, .5f, .5f, .5f, pc);
+        }
     }
 }
 
@@ -402,17 +1292,20 @@ static void free_old_pages(CtrRenderer *ctx) {
         for (int cx = 0; cx < ctx->pages[victim].chunksX; cx++) {
             for (int cy = 0; cy < ctx->pages[victim].chunksY; cy++) {
                 CtrAtlasChunk *ch = &ctx->pages[victim].chunks[cx][cy];
-                if (ch->valid) { C3D_TexDelete(&ch->tex); ch->valid = false; }
+                if (ch->valid) {
+                    C3D_TexDelete(&ch->tex);
+                    ch->valid = false;
+                }
             }
         }
         ctx->pages[victim].loaded = false;
-        ctx->pages[victim].chunksX = 0;
-        ctx->pages[victim].chunksY = 0;
         evicted++;
     }
 }
 
-static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *f, int aw, int ah) {
+static void extract_legacy_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id,
+                                     FILE *f, int aw, int ah) {
+    enum { LEGACY_CHUNK_SIZE = 1024 };
     TexturePageItem *item = &dw->tpag.items[id];
     int w = item->sourceWidth  > 0 ? item->sourceWidth  : 1;
     int h = item->sourceHeight > 0 ? item->sourceHeight : 1;
@@ -420,29 +1313,35 @@ static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *
     CtrPage *page = &ctx->pages[id];
     page->origW = w;
     page->origH = h;
-    page->chunksX = (int)fminf((float)((w + 1023) / 1024), CTR_MAX_CHUNKS_X);
-    page->chunksY = (int)fminf((float)((h + 1023) / 1024), CTR_MAX_CHUNKS_Y);
+    page->chunksX = (int)fminf((float)((w + LEGACY_CHUNK_SIZE - 1) / LEGACY_CHUNK_SIZE),
+                               (float)CTR_MAX_CHUNKS_X);
+    page->chunksY = (int)fminf((float)((h + LEGACY_CHUNK_SIZE - 1) / LEGACY_CHUNK_SIZE),
+                               (float)CTR_MAX_CHUNKS_Y);
     bool complete = true;
 
     for (int cy = 0; cy < page->chunksY; cy++) {
         for (int cx = 0; cx < page->chunksX; cx++) {
             CtrAtlasChunk *chunk = &page->chunks[cx][cy];
-            chunk->valid  = false;
-            chunk->srcX   = cx * 1024;
-            chunk->srcY   = cy * 1024;
-            chunk->width  = (int)fminf((float)(w - chunk->srcX), 1024.f);
-            chunk->height = (int)fminf((float)(h - chunk->srcY), 1024.f);
+            memset(chunk, 0, sizeof(*chunk));
+            chunk->srcX   = cx * LEGACY_CHUNK_SIZE;
+            chunk->srcY   = cy * LEGACY_CHUNK_SIZE;
+            chunk->width  = (int)fminf((float)(w - chunk->srcX), (float)LEGACY_CHUNK_SIZE);
+            chunk->height = (int)fminf((float)(h - chunk->srcY), (float)LEGACY_CHUNK_SIZE);
             chunk->potW   = next_pow2(chunk->width);
             chunk->potH   = next_pow2(chunk->height);
 
-            uint16_t *linear = calloc((size_t)chunk->potW * chunk->potH, 2);
+            uint16_t *linear = calloc((size_t)chunk->potW * chunk->potH, sizeof(uint16_t));
             if (!linear) { complete = false; continue; }
+
             for (int y = 0; y < chunk->height; y++) {
                 int sy = item->sourceY + chunk->srcY + y;
-                if (sy < 0 || sy >= ah) continue;
-                fseek(f, sizeof(AtlasHeader) +
-                      ((long)sy * aw + item->sourceX + chunk->srcX) * 2, SEEK_SET);
-                fread(&linear[y * chunk->potW], 2, (size_t)chunk->width, f);
+                int sx = item->sourceX + chunk->srcX;
+                if (sy < 0 || sy >= ah || sx < 0 || sx >= aw) continue;
+                int readable = chunk->width;
+                if (sx + readable > aw) readable = aw - sx;
+                if (readable <= 0) continue;
+                fseek(f, sizeof(AtlasHeader) + ((long)sy * aw + sx) * 2, SEEK_SET);
+                fread(&linear[y * chunk->potW], sizeof(uint16_t), (size_t)readable, f);
             }
 
             if (!C3D_TexInit(&chunk->tex, (u16)chunk->potW, (u16)chunk->potH, GPU_RGBA4)) {
@@ -451,10 +1350,10 @@ static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *
                 continue;
             }
             C3D_TexSetFilter(&chunk->tex, GPU_LINEAR, GPU_NEAREST);
-            C3D_TexSetWrap  (&chunk->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+            C3D_TexSetWrap(&chunk->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-            uint32_t tiled_size = (uint32_t)chunk->potW * chunk->potH * 2;
-            uint16_t *tiled = linearAlloc(tiled_size);
+            uint32_t tiledSize = (uint32_t)chunk->potW * (uint32_t)chunk->potH * 2u;
+            uint16_t *tiled = linearAlloc(tiledSize);
             if (!tiled) {
                 free(linear);
                 C3D_TexDelete(&chunk->tex);
@@ -470,14 +1369,13 @@ static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *
             chunk->valid = true;
         }
     }
+
     if (!complete) {
         for (int cx = 0; cx < page->chunksX; cx++) {
             for (int cy = 0; cy < page->chunksY; cy++) {
                 CtrAtlasChunk *chunk = &page->chunks[cx][cy];
-                if (chunk->valid) {
-                    C3D_TexDelete(&chunk->tex);
-                    chunk->valid = false;
-                }
+                if (chunk->valid) C3D_TexDelete(&chunk->tex);
+                memset(chunk, 0, sizeof(*chunk));
             }
         }
         page->loaded = false;
@@ -490,21 +1388,139 @@ static void extract_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id, FILE *
 
 static __attribute__((aligned(8))) char dyn_buf[64 * 1024];
 
+static bool is_repacked_page(const CtrRenderer *ctx, int pageId) {
+    return ctx->repackPageCount > 0 &&
+           pageId >= (int)ctx->repackBasePageId &&
+           pageId < (int)(ctx->repackBasePageId + ctx->repackPageCount);
+}
+
+static CtrSourcePage *get_source_page(CtrRenderer *ctx, int pageId) {
+    if (!is_repacked_page(ctx, pageId)) return NULL;
+    uint32_t idx = (uint32_t)pageId - ctx->repackBasePageId;
+    if (idx >= ctx->sourcePageCount) return NULL;
+    return &ctx->sourcePages[idx];
+}
+
+static void free_old_source_pages(CtrRenderer *ctx) {
+    if (!ctx->sourcePages || linearSpaceFree() >= LINEAR_LOW) return;
+    bool flushed = false;
+    int evicted = 0;
+
+    while (evicted < 16 && linearSpaceFree() < LINEAR_SAFE) {
+        uint32_t oldest = UINT32_MAX;
+        int victim = -1;
+        for (uint32_t i = 0; i < ctx->sourcePageCount; i++) {
+            CtrSourcePage *p = &ctx->sourcePages[i];
+            if (!p->loaded || p->keepResident || p->lastFrame >= g_frame) continue;
+            if (p->lastFrame < oldest) {
+                oldest = p->lastFrame;
+                victim = (int)i;
+            }
+        }
+        if (victim < 0) break;
+        if (!flushed) { flush_batch(ctx); flushed = true; }
+        C3D_TexDelete(&ctx->sourcePages[victim].tex);
+        memset(&ctx->sourcePages[victim].tex, 0, sizeof(ctx->sourcePages[victim].tex));
+        ctx->sourcePages[victim].loaded = false;
+        evicted++;
+    }
+}
+
+static void unload_nonresident_source_pages(CtrRenderer *ctx) {
+    if (!ctx || !ctx->sourcePages) return;
+    bool flushed = false;
+    uint32_t evicted = 0;
+    for (uint32_t i = 0; i < ctx->sourcePageCount; i++) {
+        CtrSourcePage *p = &ctx->sourcePages[i];
+        if (!p->loaded || p->keepResident) continue;
+        if (!flushed) { flush_batch(ctx); flushed = true; }
+        C3D_TexDelete(&p->tex);
+        memset(&p->tex, 0, sizeof(p->tex));
+        p->loaded = false;
+        evicted++;
+    }
+    if (evicted > 0) {
+        fprintf(stderr, "CTR cache: evicted %lu stale atlas textures before room preload\n",
+                (unsigned long)evicted);
+    }
+}
+
+static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
+    CtrSourcePage *page = get_source_page(ctx, pageId);
+    if (!page) return false;
+    if (page->loaded) return true;
+    if (page->fileOffset == 0) return false;
+
+    free_old_source_pages(ctx);
+
+    char path[256];
+    CtrTextureCache_indexPath(path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    setvbuf(f, dyn_buf, _IOFBF, sizeof(dyn_buf));
+
+    uint32_t tiledSize = CTR_TEXTURE_CACHE_ATLAS_SIZE * CTR_TEXTURE_CACHE_ATLAS_SIZE * 2u;
+    uint16_t *tiled = linearAlloc(tiledSize);
+    bool ok = tiled &&
+              fseek(f, (long)page->fileOffset, SEEK_SET) == 0 &&
+              fread(tiled, 1, tiledSize, f) == tiledSize;
+    // Атласы держим в линейной памяти, VRAM оставляем под surface render-target'ы
+    // и appTex (иначе VRAM забивается атласами и сюрфейсы не аллоцируются).
+    bool texOk = ok && C3D_TexInit(&page->tex,
+                                   (u16)CTR_TEXTURE_CACHE_ATLAS_SIZE,
+                                   (u16)CTR_TEXTURE_CACHE_ATLAS_SIZE,
+                                   GPU_RGBA4);
+    if (ok && texOk) {
+        C3D_TexLoadImage(&page->tex, tiled, GPU_TEXFACE_2D, 0);
+        C3D_TexFlush(&page->tex);
+        C3D_TexSetFilter(&page->tex, GPU_LINEAR, GPU_NEAREST);
+        C3D_TexSetWrap(&page->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        page->width = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+        page->height = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+        page->potW = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+        page->potH = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+        page->loaded = true;
+    } else {
+        ok = false;
+    }
+    if (tiled) linearFree(tiled);
+
+    fclose(f);
+    return ok;
+}
+
 static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx) {
-    if (idx < 0 || (uint32_t)idx >= ctx->pageCount || ctx->pages[idx].loaded) return;
+    if (idx < 0 || (uint32_t)idx >= ctx->pageCount) return;
+
+    int pageIdSigned = dw->tpag.items[idx].texturePageId;
+    if (is_repacked_page(ctx, pageIdSigned)) {
+        load_source_page_dyn(ctx, pageIdSigned);
+        return;
+    }
+
+    CtrPage *page = &ctx->pages[idx];
+    if (page->loaded) return;
+
     free_old_pages(ctx);
 
-    uint32_t pageId = (uint32_t)dw->tpag.items[idx].texturePageId;
+    if (pageIdSigned < 0) return;
+    uint32_t pageId = (uint32_t)pageIdSigned;
     char path[256];
-    snprintf(path, sizeof(path), "%s/page_%u.atlas", g_current_cache_dir, pageId);
+    page_meta_path(path, sizeof(path), (int)pageId);
 
     FILE *f = fopen(path, "rb");
     if (!f) return;
     setvbuf(f, dyn_buf, _IOFBF, sizeof(dyn_buf));
 
-    AtlasHeader hdr;
-    if (fread(&hdr, sizeof(hdr), 1, f) == 1 && hdr.magic == ATLAS_MAGIC) {
-        extract_page_file(ctx, dw, (uint32_t)idx, f, hdr.w, hdr.h);
+    uint32_t magic = 0;
+    if (fread(&magic, sizeof(magic), 1, f) == 1) {
+        fseek(f, 0, SEEK_SET);
+        if (magic == ATLAS_MAGIC) {
+            AtlasHeader hdr;
+            if (fread(&hdr, sizeof(hdr), 1, f) == 1 && hdr.magic == ATLAS_MAGIC) {
+                extract_legacy_page_file(ctx, dw, (uint32_t)idx, f, (int)hdr.w, (int)hdr.h);
+            }
+        }
     }
     fclose(f);
 }
@@ -654,7 +1670,9 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
 
 static void bind_target(CtrRenderer *ctx, C3D_RenderTarget *tgt) {
     if (!ctx->inFrame) return;
+    bool switchingTarget = ctx->activeTarget && ctx->activeTarget != tgt;
     flush_batch(ctx);
+    if (switchingTarget) C3D_FrameSplit(0);
     C3D_FrameDrawOn(tgt);
     ctx->activeTarget = tgt;
     rebind_state(ctx);
@@ -719,15 +1737,24 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
             C3D_RenderTargetSetOutput(ctx->topTarget, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
         }
     }
-
-    ctx->pageCount = dw->tpag.count;
-    ctx->pages     = calloc(ctx->pageCount, sizeof(CtrPage));
+    if (!ctx->bottomTarget) {
+        ctx->bottomTarget = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH16);
+        if (ctx->bottomTarget) {
+            C3D_RenderTargetSetOutput(ctx->bottomTarget, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+        }
+    }
 
     ctx->originalTpagCount   = dw->tpag.count;
     ctx->originalSpriteCount = dw->sprt.count;
 
+    CtrTextureCache_prepare(dw);
+    CtrTextureCache_apply(ctx, dw);
+
+    ctx->pageCount = dw->tpag.count;
+    ctx->pages     = calloc(ctx->pageCount, sizeof(CtrPage));
+
     if (!ctx->vbuf) {
-        ctx->vbufCap = BATCH_VERT_CAP * 4;
+        ctx->vbufCap = BATCH_VERT_CAP;
         ctx->vbuf    = linearAlloc(ctx->vbufCap * sizeof(CtrVertex));
         ctx->vbufHead   = 0;
         ctx->batchStart = 0;
@@ -748,7 +1775,6 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
         }
     }
 
-    build_texture_cache(dw);
 }
 
 static void ctr_destroy(Renderer *ren) {
@@ -775,6 +1801,21 @@ static void ctr_destroy(Renderer *ren) {
     free(ctx->pages);
     ctx->pages = NULL;
 
+    for (uint32_t i = 0; i < ctx->sourcePageCount; i++) {
+        if (ctx->sourcePages[i].loaded) {
+            C3D_TexDelete(&ctx->sourcePages[i].tex);
+        }
+    }
+    free(ctx->sourcePages);
+    ctx->sourcePages = NULL;
+    free(ctx->cacheItems);
+    ctx->cacheItems = NULL;
+    ctx->cacheItemCount = 0;
+    free(ctx->cacheSegments);
+    ctx->cacheSegments = NULL;
+    ctx->cacheSegmentCount = 0;
+    ctx->sourcePageCount = 0;
+
     if (ctx->whiteTex.data) C3D_TexDelete(&ctx->whiteTex);
 
     if (ctx->vbuf) { linearFree(ctx->vbuf); ctx->vbuf = NULL; }
@@ -792,6 +1833,10 @@ static void ctr_destroy(Renderer *ren) {
 static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, int32_t wh) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
     gc_clear_targets();
+    if (gw < 1) gw = 1;
+    if (gh < 1) gh = 1;
+    if (ww < 1) ww = 1;
+    if (wh < 1) wh = 1;
     ctx->winW  = ww;
     ctx->winH  = wh;
     ctx->gameW = gw;
@@ -830,44 +1875,89 @@ static void ctr_end_frame(Renderer *ren) {
 
     if (!ctx->inFrame) return;
 
-    if (ctx->appReady && ctx->topTarget) {
-        C3D_FrameDrawOn(ctx->topTarget);
-        ctx->activeTarget = ctx->topTarget;
-        rebind_state(ctx);
+    if (ctx->appReady) {
+        C3D_RenderTarget *primary = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM)
+                                        ? ctx->bottomTarget : ctx->topTarget;
+        C3D_RenderTarget *secondary = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM)
+                                          ? ctx->topTarget : ctx->bottomTarget;
+        int primaryW = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM) ? 320 : 400;
+        int primaryH = 240;
+        int secondaryW = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM) ? 400 : 320;
 
-        C3D_RenderTargetClear(ctx->topTarget, C3D_CLEAR_ALL, 0x050711FF, 0);
-        C3D_SetViewport(0, 0, 240, 400);
-        disable_scissor(ctx);
+        if (secondary) {
+            C3D_FrameDrawOn(secondary);
+            ctx->activeTarget = secondary;
+            rebind_state(ctx);
 
-        C3D_Mtx proj;
-        make_ortho_top(&proj, (float)ctx->winW, (float)ctx->winH);
-        apply_projection(ctx, &proj);
+            C3D_RenderTargetClear(secondary, C3D_CLEAR_ALL, 0x050711FF, 0);
+            C3D_SetViewport(0, 0, 240, (u32)secondaryW);
+            disable_scissor(ctx);
 
-        draw_letterbox_gradient(ctx);
+            C3D_Mtx projS;
+            make_ortho_top(&projS, (float)secondaryW, (float)primaryH);
+            apply_projection(ctx, &projS);
 
-        int drawW, drawH;
-        if ((ctx->gameW * ctx->winH) / ctx->gameH < ctx->winW) {
-            drawW = (ctx->gameW * ctx->winH) / ctx->gameH;
-            drawH = ctx->winH;
-        } else {
-            drawW = ctx->winW;
-            drawH = (ctx->gameH * ctx->winW) / ctx->gameW;
+            int savedWinW = ctx->winW;
+            int savedWinH = ctx->winH;
+            ctx->winW = secondaryW;
+            ctx->winH = primaryH;
+            draw_letterbox_backdrop(ctx);
+            ctx->winW = savedWinW;
+            ctx->winH = savedWinH;
+            flush_batch(ctx);
         }
-        int drawX = (ctx->winW - drawW) / 2;
-        int drawY = (ctx->winH - drawH) / 2;
 
-        float u1 = (float)ctx->appLogicW / (float)ctx->appPotW;
-        float v0 = (float)(ctx->appPotH - ctx->appLogicH) / (float)ctx->appPotH;
-        float v1 = 1.f;
-        float white[4] = {1.f, 1.f, 1.f, 1.f};
+        if (primary) {
+            C3D_FrameDrawOn(primary);
+            ctx->activeTarget = primary;
+            rebind_state(ctx);
 
-        push_quad(ctx, &ctx->appTex,
-                  (float)drawX,           (float)drawY,
-                  (float)(drawX + drawW), (float)drawY,
-                  (float)(drawX + drawW), (float)(drawY + drawH),
-                  (float)drawX,           (float)(drawY + drawH),
-                  0.f, v1, u1, v0, white);
-        flush_batch(ctx);
+            C3D_RenderTargetClear(primary, C3D_CLEAR_ALL, 0x050711FF, 0);
+            C3D_SetViewport(0, 0, 240, (u32)primaryW);
+            disable_scissor(ctx);
+
+            // Override winW/winH so letterbox + scaling fit the chosen screen.
+            int savedWinW = ctx->winW;
+            int savedWinH = ctx->winH;
+            ctx->winW = primaryW;
+            ctx->winH = primaryH;
+
+            C3D_Mtx proj;
+            make_ortho_top(&proj, (float)ctx->winW, (float)ctx->winH);
+            apply_projection(ctx, &proj);
+
+            draw_letterbox_backdrop(ctx);
+
+            int drawW, drawH;
+            if (g_ctr_backdrop_mode == CTR_BACKDROP_STRETCH) {
+                drawW = ctx->winW;
+                drawH = ctx->winH;
+            } else if ((ctx->gameW * ctx->winH) / ctx->gameH < ctx->winW) {
+                drawW = (ctx->gameW * ctx->winH) / ctx->gameH;
+                drawH = ctx->winH;
+            } else {
+                drawW = ctx->winW;
+                drawH = (ctx->gameH * ctx->winW) / ctx->gameW;
+            }
+            int drawX = (ctx->winW - drawW) / 2;
+            int drawY = (ctx->winH - drawH) / 2;
+
+            float u1 = (float)ctx->appLogicW / (float)ctx->appPotW;
+            float v0 = (float)(ctx->appPotH - ctx->appLogicH) / (float)ctx->appPotH;
+            float v1 = 1.f;
+            float white[4] = {1.f, 1.f, 1.f, 1.f};
+
+            push_quad(ctx, &ctx->appTex,
+                      (float)drawX,           (float)drawY,
+                      (float)(drawX + drawW), (float)drawY,
+                      (float)(drawX + drawW), (float)(drawY + drawH),
+                      (float)drawX,           (float)(drawY + drawH),
+                      0.f, v1, u1, v0, white);
+            flush_batch(ctx);
+
+            ctx->winW = savedWinW;
+            ctx->winH = savedWinH;
+        }
     }
 
     C3D_FrameEnd(0);
@@ -938,12 +2028,125 @@ static void ctr_end_gui(Renderer *ren) {
 
 // Region drawing
 
+static bool cache_item_available(CtrRenderer *ctx, uint32_t id) {
+    return ctx->cacheItems &&
+           id < ctx->cacheItemCount &&
+           ctx->cacheItems[id].valid &&
+           ctx->cacheItems[id].segmentStart + ctx->cacheItems[id].segmentCount <= ctx->cacheSegmentCount;
+}
+
+static bool draw_cached_region(CtrRenderer *ctx, uint32_t id,
+                               float sx, float sy, float sw, float sh,
+                               float x0, float y0, float x1, float y1,
+                               float x2, float y2, float x3, float y3,
+                               const float col[4]) {
+    if (!cache_item_available(ctx, id) || sw <= 0 || sh <= 0) return false;
+
+    CtrCachedTpag *entry = &ctx->cacheItems[id];
+    float rL = sx;
+    float rT = sy;
+    float rR = sx + sw;
+    float rB = sy + sh;
+    bool drew = false;
+
+    for (uint32_t i = 0; i < entry->segmentCount; i++) {
+        CtrCachedSegment *seg = &ctx->cacheSegments[entry->segmentStart + i];
+        float sL = (float)seg->sourceX;
+        float sT = (float)seg->sourceY;
+        float sR = sL + (float)seg->width;
+        float sB = sT + (float)seg->height;
+        float dL = fmaxf(rL, sL);
+        float dT = fmaxf(rT, sT);
+        float dR = fminf(rR, sR);
+        float dB = fminf(rB, sB);
+        if (dL >= dR || dT >= dB) continue;
+
+        int pageId = (int)(ctx->repackBasePageId + seg->atlasIndex);
+        if (!load_source_page_dyn(ctx, pageId)) continue;
+        CtrSourcePage *src = get_source_page(ctx, pageId);
+        if (!src || !src->loaded) continue;
+
+        float mX = (dR - dL > 1.0f) ? 0.5f : 0.0f;
+        float mY = (dB - dT > 1.0f) ? 0.5f : 0.0f;
+        float u0 = ((float)seg->atlasX + (dL - sL) + mX) / (float)src->potW;
+        float v0 = ((float)seg->atlasY + (dT - sT) + mY) / (float)src->potH;
+        float u1 = ((float)seg->atlasX + (dR - sL) - mX) / (float)src->potW;
+        float v1 = ((float)seg->atlasY + (dB - sT) - mY) / (float)src->potH;
+
+        float tL = (dL - rL) / sw, tR = (dR - rL) / sw;
+        float tT = (dT - rT) / sh, tB = (dB - rT) / sh;
+
+        float topX0 = x0 + (x1 - x0) * tL, topY0 = y0 + (y1 - y0) * tL;
+        float topX1 = x0 + (x1 - x0) * tR, topY1 = y0 + (y1 - y0) * tR;
+        float botX0 = x3 + (x2 - x3) * tL, botY0 = y3 + (y2 - y3) * tL;
+        float botX1 = x3 + (x2 - x3) * tR, botY1 = y3 + (y2 - y3) * tR;
+
+        push_quad(ctx, &src->tex,
+                  topX0 + (botX0 - topX0) * tT, topY0 + (botY0 - topY0) * tT,
+                  topX1 + (botX1 - topX1) * tT, topY1 + (botY1 - topY1) * tT,
+                  topX1 + (botX1 - topX1) * tB, topY1 + (botY1 - topY1) * tB,
+                  topX0 + (botX0 - topX0) * tB, topY0 + (botY0 - topY0) * tB,
+                  u0, v0, u1, v1, col);
+        src->lastFrame = g_frame;
+        drew = true;
+    }
+
+    return drew;
+}
+
 static void draw_region(CtrRenderer *ctx, uint32_t id,
                         float sx, float sy, float sw, float sh,
                         float x0, float y0, float x1, float y1,
                         float x2, float y2, float x3, float y3,
                         const float col[4]) {
     if (id >= ctx->pageCount) return;
+    if (id < ctx->originalTpagCount) {
+        draw_cached_region(ctx, id, sx, sy, sw, sh,
+                           x0, y0, x1, y1, x2, y2, x3, y3, col);
+        return;
+    }
+    TexturePageItem *item = &ctx->base.dataWin->tpag.items[id];
+
+    if (is_repacked_page(ctx, item->texturePageId)) {
+        if (!load_source_page_dyn(ctx, item->texturePageId)) return;
+        CtrSourcePage *src = get_source_page(ctx, item->texturePageId);
+        if (!src || !src->loaded || sw <= 0 || sh <= 0) return;
+
+        float rL = sx;
+        float rT = sy;
+        float rR = sx + sw;
+        float rB = sy + sh;
+        float dL = fmaxf(rL, 0.f);
+        float dT = fmaxf(rT, 0.f);
+        float dR = fminf(rR, (float)item->sourceWidth);
+        float dB = fminf(rB, (float)item->sourceHeight);
+        if (dL >= dR || dT >= dB) return;
+
+        float mX = (dR - dL > 1.0f) ? 0.5f : 0.0f;
+        float mY = (dB - dT > 1.0f) ? 0.5f : 0.0f;
+        float u0 = ((float)item->sourceX + dL + mX) / (float)src->potW;
+        float v0 = ((float)item->sourceY + dT + mY) / (float)src->potH;
+        float u1 = ((float)item->sourceX + dR - mX) / (float)src->potW;
+        float v1 = ((float)item->sourceY + dB - mY) / (float)src->potH;
+
+        float tL = (dL - rL) / sw, tR = (dR - rL) / sw;
+        float tT = (dT - rT) / sh, tB = (dB - rT) / sh;
+
+        float topX0 = x0 + (x1 - x0) * tL, topY0 = y0 + (y1 - y0) * tL;
+        float topX1 = x0 + (x1 - x0) * tR, topY1 = y0 + (y1 - y0) * tR;
+        float botX0 = x3 + (x2 - x3) * tL, botY0 = y3 + (y2 - y3) * tL;
+        float botX1 = x3 + (x2 - x3) * tR, botY1 = y3 + (y2 - y3) * tR;
+
+        push_quad(ctx, &src->tex,
+                  topX0 + (botX0 - topX0) * tT, topY0 + (botY0 - topY0) * tT,
+                  topX1 + (botX1 - topX1) * tT, topY1 + (botY1 - topY1) * tT,
+                  topX1 + (botX1 - topX1) * tB, topY1 + (botY1 - topY1) * tB,
+                  topX0 + (botX0 - topX0) * tB, topY0 + (botY0 - topY0) * tB,
+                  u0, v0, u1, v1, col);
+        src->lastFrame = g_frame;
+        return;
+    }
+
     if (!ctx->pages[id].loaded) load_page_dyn(ctx, ctx->base.dataWin, (int32_t)id);
     if (!ctx->pages[id].loaded || sw <= 0 || sh <= 0) return;
 
@@ -1297,13 +2500,16 @@ static void ctr_draw_text(Renderer *ren, const char *txt, float x, float y,
     CtrRenderer *ctx = (CtrRenderer *)ren;
     DataWin *dw = ren->dataWin;
     int fidx = ren->drawFont;
-    if (fidx < 0 || fidx >= dw->font.count) return;
+    if (fidx < 0 || (uint32_t)fidx >= dw->font.count) return;
 
     Font *font = &dw->font.fonts[fidx];
     if (font->tpagIndex < 0 || (uint32_t)font->tpagIndex >= ctx->pageCount) return;
 
-    if (!ctx->pages[font->tpagIndex].loaded) load_page_dyn(ctx, dw, font->tpagIndex);
-    if (!ctx->pages[font->tpagIndex].loaded) return;
+    if ((uint32_t)font->tpagIndex < ctx->originalTpagCount) {
+        if (!cache_item_available(ctx, (uint32_t)font->tpagIndex)) return;
+    } else {
+        if (!ctx->pages[font->tpagIndex].loaded) return;
+    }
 
     float rgb[4]; col2fv(ren->drawColor, ren->drawAlpha, rgb);
     if (rgb[3] <= 0.f) return;
@@ -1374,7 +2580,16 @@ static void ctr_draw_text_c(Renderer *ren, const char *t, float x, float y,
 // Room cache
 
 static void mark_res(CtrRenderer *ctx, int id) {
-    if (id >= 0 && (uint32_t)id < ctx->pageCount) ctx->pages[id].keepResident = true;
+    if (id < 0 || (uint32_t)id >= ctx->pageCount) return;
+    ctx->pages[id].keepResident = true;
+    if ((uint32_t)id < ctx->originalTpagCount && cache_item_available(ctx, (uint32_t)id)) {
+        CtrCachedTpag *entry = &ctx->cacheItems[id];
+        for (uint32_t i = 0; i < entry->segmentCount; i++) {
+            CtrCachedSegment *seg = &ctx->cacheSegments[entry->segmentStart + i];
+            if (seg->atlasIndex < ctx->sourcePageCount)
+                ctx->sourcePages[seg->atlasIndex].keepResident = true;
+        }
+    }
 }
 
 static void mark_spr(CtrRenderer *ctx, DataWin *dw, int id) {
@@ -1387,8 +2602,94 @@ static void mark_bg(CtrRenderer *ctx, DataWin *dw, int id) {
     if (id >= 0 && (uint32_t)id < dw->bgnd.count) mark_res(ctx, dw->bgnd.backgrounds[id].tpagIndex);
 }
 
+static void mark_tile(CtrRenderer *ctx, DataWin *dw, const RoomTile *tile) {
+    if (!tile) return;
+    if (tile->useSpriteDefinition) {
+        mark_spr(ctx, dw, tile->backgroundDefinition);
+    } else {
+        mark_bg(ctx, dw, tile->backgroundDefinition);
+    }
+}
+
+static void mark_obj_and_parents(CtrRenderer *ctx, DataWin *dw, int id) {
+    int guard = 0;
+    while (id >= 0 && (uint32_t)id < dw->objt.count && guard++ < 64) {
+        GameObject *obj = &dw->objt.objects[id];
+        mark_spr(ctx, dw, obj->spriteId);
+        id = obj->parentId;
+    }
+}
+
+static void mark_room_layer(CtrRenderer *ctx, DataWin *dw, const RoomLayer *layer) {
+    if (!layer || !layer->visible) return;
+    switch (layer->type) {
+        case RoomLayerType_Assets:
+            if (layer->assetsData) {
+                for (uint32_t i = 0; i < layer->assetsData->legacyTileCount; i++)
+                    mark_tile(ctx, dw, &layer->assetsData->legacyTiles[i]);
+                for (uint32_t i = 0; i < layer->assetsData->spriteCount; i++)
+                    mark_spr(ctx, dw, layer->assetsData->sprites[i].spriteIndex);
+            }
+            break;
+        case RoomLayerType_Background:
+            if (layer->backgroundData && layer->backgroundData->visible)
+                mark_spr(ctx, dw, layer->backgroundData->spriteIndex);
+            break;
+        case RoomLayerType_Tiles:
+            if (layer->tilesData)
+                mark_bg(ctx, dw, layer->tilesData->backgroundIndex);
+            break;
+        default:
+            break;
+    }
+}
+
+static void load_marked_room_pages(CtrRenderer *ctx, DataWin *dw) {
+    bool *sourceLoadMap = NULL;
+    if (ctx->sourcePageCount > 0)
+        sourceLoadMap = calloc(ctx->sourcePageCount, sizeof(bool));
+    uint32_t markedTpagCount = 0;
+    uint32_t dynamicLoadCount = 0;
+
+    for (uint32_t i = 0; i < ctx->pageCount; i++) {
+        if (!ctx->pages[i].keepResident) continue;
+        markedTpagCount++;
+        if (i < ctx->originalTpagCount && sourceLoadMap && cache_item_available(ctx, i)) {
+            CtrCachedTpag *entry = &ctx->cacheItems[i];
+            for (uint32_t s = 0; s < entry->segmentCount; s++) {
+                CtrCachedSegment *seg = &ctx->cacheSegments[entry->segmentStart + s];
+                if (seg->atlasIndex < ctx->sourcePageCount) sourceLoadMap[seg->atlasIndex] = true;
+            }
+        } else if (i >= ctx->originalTpagCount) {
+            load_page_dyn(ctx, dw, (int32_t)i);
+            dynamicLoadCount++;
+        }
+    }
+
+    if (sourceLoadMap) {
+        uint32_t sourceNeedCount = 0;
+        uint32_t sourceLoadedCount = 0;
+        for (uint32_t i = 0; i < ctx->sourcePageCount; i++) {
+            if (!sourceLoadMap[i]) continue;
+            sourceNeedCount++;
+            if (load_source_page_dyn(ctx, (int32_t)(ctx->repackBasePageId + i)))
+                sourceLoadedCount++;
+        }
+        fprintf(stderr,
+                "CTR cache: room preload %lu TPAGs -> %lu/%lu atlas textures, %lu dynamic; linear free %.2f MB\n",
+                (unsigned long)markedTpagCount,
+                (unsigned long)sourceLoadedCount,
+                (unsigned long)sourceNeedCount,
+                (unsigned long)dynamicLoadCount,
+                (double)linearSpaceFree() / (1024.0 * 1024.0));
+        free(sourceLoadMap);
+    }
+}
+
 void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx) {
-    mark_spr((CtrRenderer *)ren, ren->dataWin, sprIdx);
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+    mark_spr(ctx, ren->dataWin, sprIdx);
+    load_marked_room_pages(ctx, ren->dataWin);
 }
 
 static void ctr_on_room(Renderer *ren, int32_t rm) {
@@ -1399,53 +2700,25 @@ static void ctr_on_room(Renderer *ren, int32_t rm) {
 
     for (uint32_t i = 0; i < ctx->originalTpagCount && i < ctx->pageCount; i++)
         ctx->pages[i].keepResident = false;
-    for (uint32_t i = 0; i < dw->font.count; i++)
-        mark_res(ctx, dw->font.fonts[i].tpagIndex);
+    for (uint32_t i = 0; i < ctx->sourcePageCount; i++)
+        ctx->sourcePages[i].keepResident = false;
 
     if (room->backgrounds) {
         for (int i = 0; i < 8; i++)
             if (room->backgrounds[i].enabled)
                 mark_bg(ctx, dw, room->backgrounds[i].backgroundDefinition);
     }
-    for (uint32_t i = 0; i < room->tileCount; i++) {
-        int id = room->tiles[i].backgroundDefinition;
-        if (room->tiles[i].useSpriteDefinition) mark_spr(ctx, dw, id);
-        else mark_bg(ctx, dw, id);
-    }
+    for (uint32_t i = 0; i < room->tileCount; i++)
+        mark_tile(ctx, dw, &room->tiles[i]);
+    for (uint32_t i = 0; i < room->layerCount; i++)
+        mark_room_layer(ctx, dw, &room->layers[i]);
     for (uint32_t i = 0; i < room->gameObjectCount; i++) {
         int id = room->gameObjects[i].objectDefinition;
-        if (id >= 0 && (uint32_t)id < dw->objt.count) {
-            mark_spr(ctx, dw, dw->objt.objects[id].spriteId);
-            int p = dw->objt.objects[id].parentId;
-            if (p >= 0 && (uint32_t)p < dw->objt.count)
-                mark_spr(ctx, dw, dw->objt.objects[p].spriteId);
-        }
+        mark_obj_and_parents(ctx, dw, id);
     }
 
-    bool loadMap[256] = {0};
-    for (uint32_t i = 0; i < ctx->pageCount; i++) {
-        if (ctx->pages[i].keepResident && !ctx->pages[i].loaded)
-            loadMap[dw->tpag.items[i].texturePageId & 0xFF] = true;
-    }
-
-    for (int p = 0; p < 256; p++) {
-        if (!loadMap[p]) continue;
-        char path[256];
-        snprintf(path, sizeof(path), "%s/page_%d.atlas", g_current_cache_dir, p);
-        FILE *f = fopen(path, "rb");
-        if (!f) continue;
-        setvbuf(f, dyn_buf, _IOFBF, sizeof(dyn_buf));
-
-        AtlasHeader hdr;
-        if (fread(&hdr, sizeof(hdr), 1, f) == 1 && hdr.magic == ATLAS_MAGIC) {
-            for (uint32_t i = 0; i < ctx->pageCount; i++) {
-                if (dw->tpag.items[i].texturePageId == (int)p &&
-                    ctx->pages[i].keepResident && !ctx->pages[i].loaded)
-                    extract_page_file(ctx, dw, i, f, hdr.w, hdr.h);
-            }
-        }
-        fclose(f);
-    }
+    unload_nonresident_source_pages(ctx);
+    load_marked_room_pages(ctx, dw);
 }
 
 // Surface API

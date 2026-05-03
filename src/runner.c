@@ -1042,6 +1042,10 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         DataWin_loadRoomPayload(dataWin, roomIndex);
     }
 
+    if (runner->renderer != nullptr && runner->renderer->vtable->onRoomChanged != nullptr) {
+        runner->renderer->vtable->onRoomChanged(runner->renderer, roomIndex);
+    }
+
     SavedRoomState* savedState = &runner->savedRoomStates[roomIndex];
 
     runner->currentRoom = room;
