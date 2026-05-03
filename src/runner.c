@@ -1031,6 +1031,158 @@ static void copyRoomViewToRuntimeView(RoomView* roomView, RuntimeView* runtimeVi
     runtimeView->viewAngle = 0;
 }
 
+static char asciiLower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+static bool asciiEndsWithIgnoreCase(const char* text, const char* suffix) {
+    if (text == nullptr || suffix == nullptr) return false;
+    size_t textLen = strlen(text);
+    size_t suffixLen = strlen(suffix);
+    if (textLen < suffixLen) return false;
+    const char* start = text + textLen - suffixLen;
+    for (size_t i = 0; i < suffixLen; i++) {
+        if (asciiLower(start[i]) != asciiLower(suffix[i])) return false;
+    }
+    return true;
+}
+
+static bool spriteVarNameLooksLikeSpriteRef(const char* name) {
+    if (name == nullptr) return false;
+    size_t len = strlen(name);
+    if (len == 7 && asciiEndsWithIgnoreCase(name, "sprite")) {
+        char dir = asciiLower(name[0]);
+        return dir == 'd' || dir == 'r' || dir == 'u' || dir == 'l';
+    }
+    return false;
+}
+
+static bool varIdLooksLikeSpriteRef(DataWin* dataWin, int32_t varID) {
+    repeat(dataWin->vari.variableCount, i) {
+        Variable* var = &dataWin->vari.variables[i];
+        if (var->varID == varID && spriteVarNameLooksLikeSpriteRef(var->name)) return true;
+    }
+    return false;
+}
+
+static bool isMaincharaInstance(DataWin* dataWin, Instance* inst) {
+    if (inst == nullptr || inst->objectIndex < 0 ||
+        (uint32_t)inst->objectIndex >= dataWin->objt.count) {
+        return false;
+    }
+    const char* name = dataWin->objt.objects[inst->objectIndex].name;
+    return name != nullptr && strcmp(name, "obj_mainchara") == 0;
+}
+
+static bool queueSpriteIndexOnce(DataWin* dataWin, bool* seen, int32_t** spriteQueue,
+                                 int32_t spriteIndex) {
+    if (spriteIndex < 0 || (uint32_t)spriteIndex >= dataWin->sprt.count) return false;
+    if (seen != nullptr && seen[spriteIndex]) return false;
+
+    if (seen != nullptr) seen[spriteIndex] = true;
+    arrput(*spriteQueue, spriteIndex);
+    return true;
+}
+
+static bool rvalueToLikelySpriteIndex(RValue value, int32_t* outSpriteIndex) {
+    GMLReal n;
+    switch (value.type) {
+        case RVALUE_REAL:
+            n = value.real;
+            if (GMLReal_fabs(n - GMLReal_round(n)) > 0.001) return false;
+            *outSpriteIndex = (int32_t)GMLReal_round(n);
+            return true;
+        case RVALUE_INT32:
+#ifndef NO_RVALUE_INT64
+        case RVALUE_INT64:
+#endif
+            *outSpriteIndex = RValue_toInt32(value);
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void queueSpriteRefsFromValue(DataWin* dataWin, bool* seen, int32_t** spriteQueue,
+                                     RValue value) {
+    int32_t spriteIndex = -1;
+    if (rvalueToLikelySpriteIndex(value, &spriteIndex)) {
+        queueSpriteIndexOnce(dataWin, seen, spriteQueue, spriteIndex);
+        return;
+    }
+
+    if (value.type != RVALUE_ARRAY || value.array == nullptr) return;
+    GMLArray* arr = value.array;
+    for (int32_t row = 0; row < arr->rowCount; row++) {
+        GMLArrayRow* r = &arr->rows[row];
+        for (int32_t col = 0; col < r->length; col++) {
+            if (rvalueToLikelySpriteIndex(r->data[col], &spriteIndex)) {
+                queueSpriteIndexOnce(dataWin, seen, spriteQueue, spriteIndex);
+            }
+        }
+    }
+}
+
+static uint32_t Runner_prefetchRuntimeSprites(Runner* runner) {
+    if (runner == nullptr || runner->renderer == nullptr ||
+        (runner->renderer->vtable->prefetchSprite == nullptr &&
+         runner->renderer->vtable->prefetchSprites == nullptr)) {
+        return 0;
+    }
+
+    DataWin* dataWin = runner->dataWin;
+    bool* seen = calloc(dataWin->sprt.count ? dataWin->sprt.count : 1, sizeof(bool));
+    int32_t* spriteQueue = nullptr;
+
+    repeat(arrlen(runner->instances), i) {
+        Instance* inst = runner->instances[i];
+        if (inst == nullptr) continue;
+
+        if (inst->active && inst->visible) {
+            queueSpriteIndexOnce(dataWin, seen, &spriteQueue, inst->spriteIndex);
+        }
+
+        if (isMaincharaInstance(dataWin, inst)) {
+            repeat(inst->selfVars.capacity, slot) {
+                IntRValueEntry* entry = &inst->selfVars.entries[slot];
+                if (entry->key == INT_RVALUE_HASHMAP_EMPTY_KEY) continue;
+                if (!varIdLooksLikeSpriteRef(dataWin, entry->key)) continue;
+                queueSpriteRefsFromValue(dataWin, seen, &spriteQueue, entry->value);
+            }
+        }
+    }
+
+    repeat(arrlenu(runner->runtimeLayers), layerIndex) {
+        RuntimeLayer* layer = &runner->runtimeLayers[layerIndex];
+        if (!layer->visible) continue;
+        repeat(arrlenu(layer->elements), elIndex) {
+            RuntimeLayerElement* el = &layer->elements[elIndex];
+            if (el->type == RuntimeLayerElementType_Sprite && el->spriteElement != nullptr) {
+                queueSpriteIndexOnce(dataWin, seen, &spriteQueue, el->spriteElement->spriteIndex);
+            }
+        }
+    }
+
+    uint32_t prefetchedCount = (uint32_t)arrlenu(spriteQueue);
+    if (prefetchedCount > 0) {
+        if (runner->renderer->vtable->prefetchSprites != nullptr) {
+            runner->renderer->vtable->prefetchSprites(runner->renderer, spriteQueue, prefetchedCount);
+        } else {
+            repeat(prefetchedCount, i) {
+                runner->renderer->vtable->prefetchSprite(runner->renderer, spriteQueue[i]);
+            }
+        }
+    }
+
+    arrfree(spriteQueue);
+    free(seen);
+    if (prefetchedCount > 0) {
+        fprintf(stderr, "Runner: runtime sprite preload touched %lu sprites\n",
+                (unsigned long)prefetchedCount);
+    }
+    return prefetchedCount;
+}
+
 static void initRoom(Runner* runner, int32_t roomIndex) {
     DataWin* dataWin = runner->dataWin;
     require(roomIndex >= 0 && dataWin->room.count > (uint32_t) roomIndex);
@@ -1709,6 +1861,7 @@ void Runner_initFirstRoom(Runner* runner) {
 
     // Fire Room Start for all instances
     Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_START);
+    Runner_prefetchRuntimeSprites(runner);
 }
 
 // ===[ Collision Event Dispatch ]===
@@ -2411,6 +2564,7 @@ void Runner_step(Runner* runner) {
 
         // Fire Room Start for all instances
         Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_START);
+        Runner_prefetchRuntimeSprites(runner);
     }
 
     Runner_cleanupDestroyedInstances(runner);

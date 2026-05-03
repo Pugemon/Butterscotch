@@ -3,7 +3,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef IMAGE_DECODER_ENABLE_BZ2
 #include <bzlib.h>
+#endif
 
 #include "stb_image.h"
 
@@ -119,6 +122,7 @@ static uint8_t* decodeQoi(const uint8_t* data, size_t dataSize, int* outW, int* 
 //   bytes 8..11 = uncompressed BZ2 length (LE uint32) -- ONLY when gm2022_5 is true
 //   bytes 8.. (or 12.. if gm2022_5) = raw BZip2 stream, which decompresses into a full "fioq" QOI file.
 static uint8_t* decodeBz2Qoi(const uint8_t* blob, size_t blobSize, bool gm2022_5, int* outW, int* outH) {
+#ifdef IMAGE_DECODER_ENABLE_BZ2
     size_t headerSize = gm2022_5 ? COMPRESSED_QOI_HEADER_SIZE_NEW : COMPRESSED_QOI_HEADER_SIZE_OLD;
     if (headerSize > blobSize) return nullptr;
 
@@ -142,6 +146,19 @@ static uint8_t* decodeBz2Qoi(const uint8_t* blob, size_t blobSize, bool gm2022_5
     uint8_t* result = decodeQoi(uncompressed, destLen, outW, outH);
     free(uncompressed);
     return result;
+#else
+    (void)blob;
+    (void)blobSize;
+    (void)gm2022_5;
+    (void)outW;
+    (void)outH;
+    static bool warned = false;
+    if (!warned) {
+        fprintf(stderr, "ImageDecoder: BZip2 support is not compiled in; cannot decode 2zoq textures\n");
+        warned = true;
+    }
+    return nullptr;
+#endif
 }
 
 uint8_t* ImageDecoder_decodeToRgba(const uint8_t* blob, size_t blobSize, bool gm2022_5, int* outW, int* outH) {
@@ -164,4 +181,8 @@ uint8_t* ImageDecoder_decodeToRgba(const uint8_t* blob, size_t blobSize, bool gm
     *outW = w;
     *outH = h;
     return pixels;
+}
+
+void ImageDecoder_freeRgba(uint8_t* pixels) {
+    stbi_image_free(pixels);
 }

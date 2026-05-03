@@ -33,8 +33,11 @@ typedef struct {
     int      width, height;
     int      potW,  potH;
     uint32_t fileOffset;
+    uint32_t dataSize;
+    uint32_t format;
     C3D_Tex  tex;
     uint32_t lastFrame;
+    bool     loadFailed;
 } CtrSourcePage;
 
 typedef struct {
@@ -132,6 +135,10 @@ typedef struct CtrRenderer {
     // Frame state
     bool              inFrame;
     int               currentBlendMode;
+
+    // Repacked atlas stream.
+    FILE             *atlasFile;
+    bool              preloadingAtlases;
 } CtrRenderer;
 
 Renderer *CtrRenderer_create(void);

@@ -342,6 +342,7 @@ static bool launcher_upload_icon(LauncherGameEntry *game, const IconImage *img) 
     linearFree(tiled);
     free(linear);
 
+    //GPU_LA4.;
     game->icon_ready = true;
     game->icon_w = img->width;
     game->icon_h = img->height;
@@ -585,6 +586,8 @@ static const uint8_t *launcher_glyph(char ch) {
     static const uint8_t rpar[7] = {0x08,0x04,0x02,0x02,0x02,0x04,0x08};
     static const uint8_t lbr[7]  = {0x0E,0x08,0x08,0x08,0x08,0x08,0x0E};
     static const uint8_t rbr[7]  = {0x0E,0x02,0x02,0x02,0x02,0x02,0x0E};
+    static const uint8_t eq[7]   = {0,0,0x1F,0,0x1F,0,0};
+    static const uint8_t hash[7] = {0x0A,0x0A,0x1F,0x0A,0x1F,0x0A,0x0A};
 
     ch = (char)toupper((unsigned char)ch);
     switch (ch) {
@@ -603,6 +606,7 @@ static const uint8_t *launcher_glyph(char ch) {
         case '_': return under; case '!': return bang; case '%': return pct;
         case '<': return lt;   case '>': return gt;   case '+': return plus;
         case '(': return lpar; case ')': return rpar; case '[': return lbr; case ']': return rbr;
+        case '=': return eq;   case '#': return hash;
         default: return q;
     }
 }
@@ -1615,7 +1619,7 @@ static void pause_draw_overlay(LauncherGfx *gfx, LauncherScreen *scr, int sel, f
         bool selRow = (i == sel);
         if (selRow) {
             float breath = 0.5f + 0.5f * sinf(t * 3.0f);
-            launcher_rect(gfx, listX - 6, ry - 3, cardW - 28.f, rowH - 2,
+            launcher_rect(gfx, listX - 6, ry - 3, cardW - 16.f, rowH - 2,
                           th->accent[0], th->accent[1], th->accent[2], 0.18f + 0.10f * breath);
             launcher_rect(gfx, listX - 6, ry - 3, 3, rowH - 2,
                           th->accent[0], th->accent[1], th->accent[2], 1.f);

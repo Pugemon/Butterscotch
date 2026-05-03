@@ -333,7 +333,7 @@ static bool write_one_page_legacy(int pageId, const uint8_t *pixels, int w, int 
             uint8_t g = src[x * 4 + 1];
             uint8_t b = src[x * 4 + 2];
             uint8_t a = src[x * 4 + 3];
-            if (a == 0) { r = 0; g = 0; b = 0; }
+            //if (a == 0) { r = 0; g = 0; b = 0; }
             row[x] = pack_rgba4444(r, g, b, a);
         }
         if (fwrite(row, sizeof(uint16_t), (size_t)w, outF) != (size_t)w) ok = false;
@@ -736,7 +736,7 @@ static bool blit_repack_image(const RepackImage *img, const uint8_t *srcPixels,
             uint8_t g = src[x * 4 + 1];
             uint8_t b = src[x * 4 + 2];
             uint8_t a = src[x * 4 + 3];
-            if (a == 0) { r = 0; g = 0; b = 0; }
+            //if (a == 0) { r = 0; g = 0; b = 0; }
             row[x] = pack_rgba4444(r, g, b, a);
         }
         long off = (long)sizeof(AtlasHeader) +
@@ -1158,7 +1158,6 @@ static void push_quad(CtrRenderer *ctx, C3D_Tex *tex,
         {col[0], col[1], col[2], col[3]},
         {col[0], col[1], col[2], col[3]},
     };
-    // Используем версию, которая берёт x[0..3], y[0..3] независимо
     CtrVertex *v = vbuf_reserve(ctx, 6, tex);
     #define VV(idx, ix, iy, uu, vv, cc) \
         v[idx] = (CtrVertex){xs[ix], ys[iy], 0.f, uu, vv, cs[cc][0], cs[cc][1], cs[cc][2], cs[cc][3]}
@@ -1349,7 +1348,7 @@ static void extract_legacy_page_file(CtrRenderer *ctx, DataWin *dw, uint32_t id,
                 complete = false;
                 continue;
             }
-            C3D_TexSetFilter(&chunk->tex, GPU_LINEAR, GPU_NEAREST);
+            C3D_TexSetFilter(&chunk->tex, GPU_NEAREST, GPU_NEAREST);
             C3D_TexSetWrap(&chunk->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
             uint32_t tiledSize = (uint32_t)chunk->potW * (uint32_t)chunk->potH * 2u;
@@ -1422,6 +1421,7 @@ static void free_old_source_pages(CtrRenderer *ctx) {
         C3D_TexDelete(&ctx->sourcePages[victim].tex);
         memset(&ctx->sourcePages[victim].tex, 0, sizeof(ctx->sourcePages[victim].tex));
         ctx->sourcePages[victim].loaded = false;
+        ctx->sourcePages[victim].loadFailed = false;
         evicted++;
     }
 }
@@ -1437,6 +1437,7 @@ static void unload_nonresident_source_pages(CtrRenderer *ctx) {
         C3D_TexDelete(&p->tex);
         memset(&p->tex, 0, sizeof(p->tex));
         p->loaded = false;
+        p->loadFailed = false;
         evicted++;
     }
     if (evicted > 0) {
@@ -1448,45 +1449,61 @@ static void unload_nonresident_source_pages(CtrRenderer *ctx) {
 static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
     CtrSourcePage *page = get_source_page(ctx, pageId);
     if (!page) return false;
-    if (page->loaded) return true;
-    if (page->fileOffset == 0) return false;
+    if (page->loaded) {
+        page->lastFrame = g_frame;
+        return true;
+    }
+    if (page->loadFailed) return false;
+    if (page->fileOffset == 0 || !ctx->atlasFile) return false;
 
     free_old_source_pages(ctx);
 
-    char path[256];
-    CtrTextureCache_indexPath(path, sizeof(path));
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-    setvbuf(f, dyn_buf, _IOFBF, sizeof(dyn_buf));
-
-    uint32_t tiledSize = CTR_TEXTURE_CACHE_ATLAS_SIZE * CTR_TEXTURE_CACHE_ATLAS_SIZE * 2u;
-    uint16_t *tiled = linearAlloc(tiledSize);
-    bool ok = tiled &&
-              fseek(f, (long)page->fileOffset, SEEK_SET) == 0 &&
-              fread(tiled, 1, tiledSize, f) == tiledSize;
-    // Атласы держим в линейной памяти, VRAM оставляем под surface render-target'ы
-    // и appTex (иначе VRAM забивается атласами и сюрфейсы не аллоцируются).
-    bool texOk = ok && C3D_TexInit(&page->tex,
-                                   (u16)CTR_TEXTURE_CACHE_ATLAS_SIZE,
-                                   (u16)CTR_TEXTURE_CACHE_ATLAS_SIZE,
-                                   GPU_RGBA4);
-    if (ok && texOk) {
-        C3D_TexLoadImage(&page->tex, tiled, GPU_TEXFACE_2D, 0);
-        C3D_TexFlush(&page->tex);
-        C3D_TexSetFilter(&page->tex, GPU_LINEAR, GPU_NEAREST);
-        C3D_TexSetWrap(&page->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-        page->width = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
-        page->height = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
-        page->potW = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
-        page->potH = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
-        page->loaded = true;
-    } else {
-        ok = false;
+    uint32_t tiledSize = page->dataSize;
+    if (tiledSize == 0) {
+        tiledSize = CTR_TEXTURE_CACHE_ATLAS_SIZE * CTR_TEXTURE_CACHE_ATLAS_SIZE * 2u;
     }
-    if (tiled) linearFree(tiled);
+    GPU_TEXCOLOR texFormat = GPU_RGBA4;
+    if (page->format == CTR_TEXTURE_CACHE_FORMAT_LA4) texFormat = GPU_LA4;
+    else if (page->format == CTR_TEXTURE_CACHE_FORMAT_A4) texFormat = GPU_A4;
 
-    fclose(f);
-    return ok;
+    bool texOk = C3D_TexInit(&page->tex,
+                             (u16)CTR_TEXTURE_CACHE_ATLAS_SIZE,
+                             (u16)CTR_TEXTURE_CACHE_ATLAS_SIZE,
+                             texFormat);
+
+    if (!texOk) {
+        fprintf(stderr, "CTR: Failed to alloc C3D_Tex for atlas %d\n", pageId);
+        page->loadFailed = true;
+        return false;
+    }
+    if (tiledSize > page->tex.size) tiledSize = (uint32_t)page->tex.size;
+
+    fseek(ctx->atlasFile, (long)page->fileOffset, SEEK_SET);
+    if (fread(page->tex.data, 1, tiledSize, ctx->atlasFile) != tiledSize) {
+        C3D_TexDelete(&page->tex);
+        page->loadFailed = true;
+        return false;
+    }
+
+    C3D_TexFlush(&page->tex);
+    C3D_TexSetFilter(&page->tex, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexSetWrap(&page->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+
+    page->width = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    page->height = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    page->potW = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    page->potH = (int)CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    page->loaded = true;
+    page->loadFailed = false;
+    page->lastFrame = g_frame;
+
+    if (!ctx->preloadingAtlases) {
+        fprintf(stderr,
+                "CTR cache: lazy atlas load during draw: page %d; linear free %.2f MB\n",
+                pageId, (double)linearSpaceFree() / (1024.0 * 1024.0));
+    }
+
+    return true;
 }
 
 static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx) {
@@ -1750,6 +1767,13 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
     CtrTextureCache_prepare(dw);
     CtrTextureCache_apply(ctx, dw);
 
+    char path[256];
+    CtrTextureCache_indexPath(path, sizeof(path));
+    ctx->atlasFile = fopen(path, "rb");
+    if (ctx->atlasFile) {
+        setvbuf(ctx->atlasFile, NULL, _IOFBF, 128 * 1024);
+    }
+
     ctx->pageCount = dw->tpag.count;
     ctx->pages     = calloc(ctx->pageCount, sizeof(CtrPage));
 
@@ -1779,6 +1803,8 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
 
 static void ctr_destroy(Renderer *ren) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
+
+    if (ctx->atlasFile) fclose(ctx->atlasFile);
 
     for (uint32_t i = 0; i < ctx->surfaceCount; i++) {
         surface_release_storage(ctx, &ctx->surfaces[i]);
@@ -2066,8 +2092,8 @@ static bool draw_cached_region(CtrRenderer *ctx, uint32_t id,
         CtrSourcePage *src = get_source_page(ctx, pageId);
         if (!src || !src->loaded) continue;
 
-        float mX = (dR - dL > 1.0f) ? 0.5f : 0.0f;
-        float mY = (dB - dT > 1.0f) ? 0.5f : 0.0f;
+        float mX = 0.0f;
+        float mY = 0.0f;
         float u0 = ((float)seg->atlasX + (dL - sL) + mX) / (float)src->potW;
         float v0 = ((float)seg->atlasY + (dT - sT) + mY) / (float)src->potH;
         float u1 = ((float)seg->atlasX + (dR - sL) - mX) / (float)src->potW;
@@ -2122,8 +2148,8 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
         float dB = fminf(rB, (float)item->sourceHeight);
         if (dL >= dR || dT >= dB) return;
 
-        float mX = (dR - dL > 1.0f) ? 0.5f : 0.0f;
-        float mY = (dB - dT > 1.0f) ? 0.5f : 0.0f;
+        float mX = 0.0f;
+        float mY = 0.0f;
         float u0 = ((float)item->sourceX + dL + mX) / (float)src->potW;
         float v0 = ((float)item->sourceY + dT + mY) / (float)src->potH;
         float u1 = ((float)item->sourceX + dR - mX) / (float)src->potW;
@@ -2166,8 +2192,8 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
             float dB = fminf(rB, (float)(c->srcY + c->height));
             if (dL >= dR || dT >= dB) continue;
 
-            float mX = (dR - dL > 1.0f) ? 0.5f : 0.0f;
-            float mY = (dB - dT > 1.0f) ? 0.5f : 0.0f;
+            float mX = 0.0f;
+            float mY = 0.0f;
 
             float u0 = (dL - c->srcX + mX) / (float)c->potW;
             float v0 = (dT - c->srcY + mY) / (float)c->potH;
@@ -2602,6 +2628,34 @@ static void mark_bg(CtrRenderer *ctx, DataWin *dw, int id) {
     if (id >= 0 && (uint32_t)id < dw->bgnd.count) mark_res(ctx, dw->bgnd.backgrounds[id].tpagIndex);
 }
 
+static bool is_hot_font_name(const char *name) {
+    if (!name) return false;
+    static const char *hotFonts[] = {
+        "fnt_main",
+        "fnt_maintext",
+        "fnt_comicsans",
+        "fnt_papyrus",
+        "fnt_ja_main",
+        "fnt_ja_maintext",
+        "fnt_ja_comicsans",
+        "fnt_ja_comicsans_big",
+        "fnt_ja_papyrus",
+        "fnt_ja_papyrus_btl",
+    };
+    for (uint32_t i = 0; i < sizeof(hotFonts) / sizeof(hotFonts[0]); i++) {
+        if (strcmp(name, hotFonts[i]) == 0) return true;
+    }
+    return false;
+}
+
+static void mark_hot_fonts(CtrRenderer *ctx, DataWin *dw) {
+    for (uint32_t i = 0; i < dw->font.count; i++) {
+        if (is_hot_font_name(dw->font.fonts[i].name)) {
+            mark_res(ctx, dw->font.fonts[i].tpagIndex);
+        }
+    }
+}
+
 static void mark_tile(CtrRenderer *ctx, DataWin *dw, const RoomTile *tile) {
     if (!tile) return;
     if (tile->useSpriteDefinition) {
@@ -2668,28 +2722,55 @@ static void load_marked_room_pages(CtrRenderer *ctx, DataWin *dw) {
 
     if (sourceLoadMap) {
         uint32_t sourceNeedCount = 0;
-        uint32_t sourceLoadedCount = 0;
+        uint32_t sourceReadyCount = 0;
+        uint32_t sourceNewCount = 0;
+        ctx->preloadingAtlases = true;
         for (uint32_t i = 0; i < ctx->sourcePageCount; i++) {
             if (!sourceLoadMap[i]) continue;
             sourceNeedCount++;
-            if (load_source_page_dyn(ctx, (int32_t)(ctx->repackBasePageId + i)))
-                sourceLoadedCount++;
+            bool wasLoaded = ctx->sourcePages[i].loaded;
+            if (load_source_page_dyn(ctx, (int32_t)(ctx->repackBasePageId + i))) {
+                sourceReadyCount++;
+                if (!wasLoaded && ctx->sourcePages[i].loaded) sourceNewCount++;
+            }
         }
+        ctx->preloadingAtlases = false;
+
+        uint32_t sourceResidentCount = 0;
+        for (uint32_t i = 0; i < ctx->sourcePageCount; i++) {
+            if (ctx->sourcePages[i].loaded) sourceResidentCount++;
+        }
+        double sourceResidentMB =
+            0.0;
+        for (uint32_t i = 0; i < ctx->sourcePageCount; i++) {
+            if (!ctx->sourcePages[i].loaded) continue;
+            sourceResidentMB += (double)ctx->sourcePages[i].dataSize / (1024.0 * 1024.0);
+        }
+
         fprintf(stderr,
-                "CTR cache: room preload %lu TPAGs -> %lu/%lu atlas textures, %lu dynamic; linear free %.2f MB\n",
+                "CTR cache: room preload %lu TPAGs -> %lu/%lu atlas textures (%lu new, %lu resident, %.2f MB), %lu dynamic; linear free %.2f MB\n",
                 (unsigned long)markedTpagCount,
-                (unsigned long)sourceLoadedCount,
+                (unsigned long)sourceReadyCount,
                 (unsigned long)sourceNeedCount,
+                (unsigned long)sourceNewCount,
+                (unsigned long)sourceResidentCount,
+                sourceResidentMB,
                 (unsigned long)dynamicLoadCount,
                 (double)linearSpaceFree() / (1024.0 * 1024.0));
         free(sourceLoadMap);
     }
 }
 
-void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx) {
+static void CtrRenderer_prefetchSprites(Renderer *ren, const int32_t *spriteIndices, uint32_t spriteCount) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
-    mark_spr(ctx, ren->dataWin, sprIdx);
+    for (uint32_t i = 0; i < spriteCount; i++) {
+        mark_spr(ctx, ren->dataWin, spriteIndices[i]);
+    }
     load_marked_room_pages(ctx, ren->dataWin);
+}
+
+void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx) {
+    CtrRenderer_prefetchSprites(ren, &sprIdx, 1);
 }
 
 static void ctr_on_room(Renderer *ren, int32_t rm) {
@@ -2702,6 +2783,8 @@ static void ctr_on_room(Renderer *ren, int32_t rm) {
         ctx->pages[i].keepResident = false;
     for (uint32_t i = 0; i < ctx->sourcePageCount; i++)
         ctx->sourcePages[i].keepResident = false;
+    for (uint32_t i = 0; i < ctx->sourcePageCount; i++)
+        ctx->sourcePages[i].loadFailed = false;
 
     if (room->backgrounds) {
         for (int i = 0; i < 8; i++)
@@ -2716,6 +2799,8 @@ static void ctr_on_room(Renderer *ren, int32_t rm) {
         int id = room->gameObjects[i].objectDefinition;
         mark_obj_and_parents(ctx, dw, id);
     }
+
+    mark_hot_fonts(ctx, dw);
 
     unload_nonresident_source_pages(ctx);
     load_marked_room_pages(ctx, dw);
@@ -3162,6 +3247,8 @@ static RendererVtable vtable = {
     .drawTriangle = ctr_draw_tri,                .drawTriangleColor = ctr_draw_tri_c,
     .drawText = ctr_draw_text,                   .drawTextColor = ctr_draw_text_c,
     .flush = ctr_flush,
+    .prefetchSprite = CtrRenderer_prefetchSprite,
+    .prefetchSprites = CtrRenderer_prefetchSprites,
     .createSpriteFromSurface = ctr_create_surf,
     .createSpriteFromSurfaceEx = ctr_create_surf_ex,
     .deleteSprite = ctr_del_sprite,

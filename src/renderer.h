@@ -63,6 +63,8 @@ typedef struct {
     void (*drawText)(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg);
     void (*drawTextColor)(Renderer* renderer, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t c1, int32_t c2, int32_t c3, int32_t c4, float alpha);
     void (*flush)(Renderer* renderer);
+    void (*prefetchSprite)(Renderer* renderer, int32_t spriteIndex);
+    void (*prefetchSprites)(Renderer* renderer, const int32_t* spriteIndices, uint32_t spriteCount);
     int32_t (*createSpriteFromSurface)(Renderer* renderer, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
     int32_t (*createSpriteFromSurfaceEx)(Renderer* renderer, int32_t surfaceId, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
     void (*deleteSprite)(Renderer* renderer, int32_t spriteIndex);
