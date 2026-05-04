@@ -267,8 +267,11 @@ static void cache_set_pixel(uint8_t *linear, uint32_t format, size_t pixelIndex,
             set_nibble(linear, pixelIndex, (uint8_t)(a >> 4));
             break;
         case CTR_TEXTURE_CACHE_FORMAT_LA4: {
+            // PICA200 LA4 byte layout is LLLLAAAA (luma in the high nibble, alpha in the low).
+            // The previous encoding had the nibbles swapped, which made antialiased font edges
+            // sample as "dark luma + full alpha" — i.e. a black outline around glyphs.
             uint8_t l = (uint8_t)(cache_luma(r, g, b) >> 4);
-            linear[pixelIndex] = (uint8_t)(((a >> 4) << 4) | l);
+            linear[pixelIndex] = (uint8_t)((l << 4) | (a >> 4));
             break;
         }
         case CTR_TEXTURE_CACHE_FORMAT_RGBA4:
@@ -1200,7 +1203,7 @@ void CtrTextureCache_prepare(DataWin *dw) {
     if (atlasFile) fclose(atlasFile);
     if (dwFile) fclose(dwFile);
 
-    if (g_progressCallback) g_progressCallback(dw->txtr.count, dw->txtr.count, atlasPath, g_progressUser);
+    if (ok && g_progressCallback) g_progressCallback(dw->txtr.count, dw->txtr.count, atlasPath, g_progressUser);
 
     if (ok) {
         if (!commit_tmp_file(tmpPath, atlasPath)) {
