@@ -1628,6 +1628,7 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
     runner->frameCount = 0;
     runner->osType = OS_WINDOWS;
     runner->keyboard = RunnerKeyboard_create();
+    runner->mouse = RunnerMouse_create();
     runner->gamepads = RunnerGamepad_create();
 
     // Collision compatibility mode is "enabled" for all pre-GM 2022.1 games AND for any post-GM 2022.1 games that have the bit 27 set
@@ -2961,6 +2962,7 @@ void Runner_free(Runner* runner) {
     shfree(runner->assetsByName);
 
     RunnerKeyboard_free(runner->keyboard);
+    RunnerMouse_free(runner->mouse);
     RunnerGamepad_free(runner->gamepads);
     Instance_free(runner->globalScopeInstance);
     free(runner);

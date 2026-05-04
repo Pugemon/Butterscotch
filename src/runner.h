@@ -9,6 +9,7 @@
 #include "instance.h"
 #include "renderer.h"
 #include "runner_keyboard.h"
+#include "runner_mouse.h"
 #include "spatial_grid.h"
 #include "runner_gamepad.h"
 #include "vm.h"
@@ -329,6 +330,7 @@ typedef struct Runner {
     int frameCount;
     uint32_t nextInstanceId;
     RunnerKeyboardState* keyboard;
+    RunnerMouseState* mouse;
     RuntimeView views[MAX_VIEWS];
     RunnerGamepadState* gamepads;
     RuntimeBackground backgrounds[8];

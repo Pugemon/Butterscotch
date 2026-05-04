@@ -270,6 +270,13 @@ static const BuiltinVarEntry BUILTIN_VAR_TABLE[] = {
     { "keyboard_lastkey", BUILTIN_VAR_KEYBOARD_LASTKEY },
     { "layer", BUILTIN_VAR_LAYER },
     { "mask_index", BUILTIN_VAR_MASK_INDEX },
+    { "mb_any", BUILTIN_VAR_MB_ANY },
+    { "mb_left", BUILTIN_VAR_MB_LEFT },
+    { "mb_middle", BUILTIN_VAR_MB_MIDDLE },
+    { "mb_none", BUILTIN_VAR_MB_NONE },
+    { "mb_right", BUILTIN_VAR_MB_RIGHT },
+    { "mouse_x", BUILTIN_VAR_MOUSE_X },
+    { "mouse_y", BUILTIN_VAR_MOUSE_Y },
     { "object_index", BUILTIN_VAR_OBJECT_INDEX },
     { "os_3ds", BUILTIN_VAR_OS_3DS },
     { "os_amazon", BUILTIN_VAR_OS_AMAZON },
@@ -459,6 +466,23 @@ RValue VMBuiltins_getVariable(VMContext* ctx, int16_t builtinVarId, const char* 
             return RValue_makeReal(OS_LLVM_LINUX);
         case BUILTIN_VAR_OS_LLVM_WINPHONE:
             return RValue_makeReal(OS_LLVM_WINPHONE);
+
+        // Mouse
+        case BUILTIN_VAR_MOUSE_X:
+            return RValue_makeReal(runner->mouse ? runner->mouse->x : 0);
+        case BUILTIN_VAR_MOUSE_Y:
+            return RValue_makeReal(runner->mouse ? runner->mouse->y : 0);
+        case BUILTIN_VAR_MB_NONE:
+            return RValue_makeReal(MB_NONE);
+        case BUILTIN_VAR_MB_LEFT:
+            return RValue_makeReal(MB_LEFT);
+        case BUILTIN_VAR_MB_RIGHT:
+            return RValue_makeReal(MB_RIGHT);
+        case BUILTIN_VAR_MB_MIDDLE:
+            return RValue_makeReal(MB_MIDDLE);
+        case BUILTIN_VAR_MB_ANY:
+            return RValue_makeReal(MB_ANY);
+
         case BUILTIN_VAR_ASYNC_LOAD:
             return RValue_makeReal((GMLReal) runner->asyncLoadMapId);
 
@@ -1247,6 +1271,7 @@ void VMBuiltins_setVariable(VMContext* ctx, int16_t builtinVarId, const char* na
         case BUILTIN_VAR_DEBUG_MODE:
         case BUILTIN_VAR_ROOM_FIRST:
         case BUILTIN_VAR_GP_FACE1 ... BUILTIN_VAR_GP_AXIS_RV:
+        case BUILTIN_VAR_MOUSE_X ... BUILTIN_VAR_MB_ANY:
             fprintf(stderr, "VM: Warning - attempted write to read-only built-in '%s'\n", name);
             return;
 
@@ -4074,6 +4099,41 @@ static RValue builtinKeyboardCheckReleased(VMContext* ctx, RValue* args, int32_t
 static RValue builtinKeyboardCheckDirect(VMContext* ctx, RValue* args, int32_t argCount) {
     // keyboard_check_direct is the same as keyboard_check for our purposes
     return builtinKeyboardCheck(ctx, args, argCount);
+}
+
+// Mouse =====================================================================
+
+static RValue builtinMouseCheckButton(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeBool(false);
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t mb = RValue_toInt32(args[0]);
+    return RValue_makeBool(RunnerMouse_check(runner->mouse, mb));
+}
+
+static RValue builtinMouseCheckButtonPressed(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeBool(false);
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t mb = RValue_toInt32(args[0]);
+    return RValue_makeBool(RunnerMouse_checkPressed(runner->mouse, mb));
+}
+
+static RValue builtinMouseCheckButtonReleased(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (1 > argCount) return RValue_makeBool(false);
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t mb = RValue_toInt32(args[0]);
+    return RValue_makeBool(RunnerMouse_checkReleased(runner->mouse, mb));
+}
+
+static RValue builtinDeviceMouseX(VMContext* ctx, RValue* args, int32_t argCount) {
+    (void)args; (void)argCount;
+    Runner* runner = (Runner*) ctx->runner;
+    return RValue_makeReal(runner->mouse ? runner->mouse->x : 0);
+}
+
+static RValue builtinDeviceMouseY(VMContext* ctx, RValue* args, int32_t argCount) {
+    (void)args; (void)argCount;
+    Runner* runner = (Runner*) ctx->runner;
+    return RValue_makeReal(runner->mouse ? runner->mouse->y : 0);
 }
 
 static RValue builtinKeyboardKeyPress(VMContext* ctx, RValue* args, int32_t argCount) {
@@ -8995,6 +9055,15 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "file_text_read_real", builtinFileTextReadReal);
     VM_registerBuiltin(ctx, "file_text_readln", builtinFileTextReadln);
     VM_registerBuiltin(ctx, "file_rename", builtinFileRename);
+
+    // Mouse
+    VM_registerBuiltin(ctx, "mouse_check_button", builtinMouseCheckButton);
+    VM_registerBuiltin(ctx, "mouse_check_button_pressed", builtinMouseCheckButtonPressed);
+    VM_registerBuiltin(ctx, "mouse_check_button_released", builtinMouseCheckButtonReleased);
+    VM_registerBuiltin(ctx, "device_mouse_x", builtinDeviceMouseX);
+    VM_registerBuiltin(ctx, "device_mouse_y", builtinDeviceMouseY);
+    VM_registerBuiltin(ctx, "device_mouse_x_to_gui", builtinDeviceMouseX);
+    VM_registerBuiltin(ctx, "device_mouse_y_to_gui", builtinDeviceMouseY);
 
     // Keyboard
     VM_registerBuiltin(ctx, "keyboard_check", builtinKeyboardCheck);

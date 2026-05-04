@@ -22,7 +22,7 @@
 
 //u32 __ctru_heap_size        = 35 * 1024 * 1024;
 u32 __ctru_linear_heap_size = 48 * 1024 * 1024;
-//u32 __stacksize__           = 64 * 1024;
+u32 __stacksize__           = 64 * 1024;
 
 #define BASE_DIR  "sdmc:/3ds/butterscotch"
 char g_current_data_path[256];
@@ -88,33 +88,66 @@ static bool atlas_index_is_current(const char *path) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
+    // 1. Инит логов
     setup_logging();
+    printf("\n\n========================================\n");
+    printf("[BOOT] setup_logging OK\n");
     printMemoryStats();
+
+    // 2. Инит систем 3DS
+    printf("[BOOT] Calling cfguInit...\n");
     cfguInit();
+
+    printf("[BOOT] Calling gfxInitDefault...\n");
     gfxInitDefault();
     gfxSet3D(false);
 
+    printf("[BOOT] Calling APT_SetAppCpuTimeLimit & osSetSpeedupEnable...\n");
     APT_SetAppCpuTimeLimit(30);
-    osSetSpeedupEnable(1);
+    osSetSpeedupEnable(1); // На O3DS это ничего не делает, но не крашит
 
+    // 3. Инит графики (C3D выделяет Linear RAM)
+    printf("[BOOT] Calling C3D_Init...\n");
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE)) {
-        printf("C3D_Init failed!\n");
+        printf("[FATAL] C3D_Init failed! OOM in Linear RAM?\n");
         gfxExit();
         return 1;
     }
+    printf("[BOOT] C3D_Init OK\n");
+    printMemoryStats();
 
+    // 4. Парсинг шейдеров (Выделяет обычный RAM через malloc)
+    printf("[BOOT] Parsing DVLB shader...\n");
     g_vshaderDvlb = DVLB_ParseFile((u32 *)render2d_shader_shbin, render2d_shader_shbin_size);
+    if (!g_vshaderDvlb) {
+        printf("[FATAL] g_vshaderDvlb is NULL! malloc failed?\n");
+    }
+    printf("[BOOT] DVLB_ParseFile OK\n");
+
+    printf("[BOOT] shaderProgramInit...\n");
     shaderProgramInit(&g_shaderProg);
     shaderProgramSetVsh(&g_shaderProg, &g_vshaderDvlb->DVLE[0]);
+    printf("[BOOT] Shader setup OK\n");
 
+    // 5. Инициализация UI лаунчера (Выделяет текстуры в Linear RAM)
+    printf("[BOOT] Initializing LauncherGfx...\n");
     LauncherGfx gfx;
     bool gfx_ready = launcher_gfx_init(&gfx);
+    printf("[BOOT] launcher_gfx_init OK. gfx_ready = %d\n", gfx_ready);
+    printMemoryStats();
 
-    // Load saved theme/layout before the menu draws.
+    // 6. Загрузка настроек с SD карты
+    printf("[BOOT] Calling launcher_load_settings...\n");
     launcher_load_settings();
+    printf("[BOOT] launcher_load_settings OK\n");
 
+    // 7. Запуск меню
+    printf("[BOOT] Entering launcher_run_menu...\n");
     int selected_game = launcher_run_menu(&gfx);
+    printf("[BOOT] launcher_run_menu returned: %d\n", selected_game);
+
     if (selected_game < 0) {
+        printf("[BOOT] Exiting from menu...\n");
         if (gfx_ready) launcher_gfx_destroy(&gfx);
         launcher_free_game_icons();
 
@@ -261,7 +294,7 @@ int main(int argc, char **argv) {
         if (snd) snd->dataWin = dw;
 
         Runner *run = Runner_create(dw, vm, ren, (FileSystem *)fs, snd);
-        run->osType = OS_WINDOWS;
+        run->osType = (YoYoOperatingSystem)launcher_get_settings()->os_type;
 
         Runner_initFirstRoom(run);
 
@@ -290,6 +323,7 @@ int main(int argc, char **argv) {
                 }
                 // Apply any layout/theme tweaks the user made.
                 launcher_apply_settings(launcher_get_settings());
+                run->osType = (YoYoOperatingSystem)launcher_get_settings()->os_type;
 
                 if (action == LAUNCHER_PAUSE_QUIT_TO_LAUNCHER) {
                     quit_to_launcher = true;
@@ -301,7 +335,32 @@ int main(int argc, char **argv) {
             }
 
             RunnerKeyboard_beginFrame(run->keyboard);
-            launcher_apply_3ds_input(run->keyboard, d, u, h);
+            RunnerGamepad_beginFrame(run->gamepads);
+            RunnerMouse_beginFrame(run->mouse);
+
+            LauncherInputMode mode = launcher_get_settings()->input_mode;
+            switch (mode) {
+                case LAUNCHER_INPUT_GAMEPAD: {
+                    circlePosition cp; hidCircleRead(&cp);
+                    circlePosition cs; hidCstickRead(&cs);
+                    launcher_apply_3ds_gamepad(run->gamepads, d, u, h,
+                                               cp.dx, cp.dy, cs.dx, cs.dy);
+                    break;
+                }
+                case LAUNCHER_INPUT_TOUCH: {
+                    touchPosition tp; hidTouchRead(&tp);
+                    bool touched = (h & KEY_TOUCH) != 0;
+                    launcher_apply_3ds_touch(run->mouse, touched, tp.px, tp.py,
+                                             dw->gen8.defaultWindowWidth,
+                                             dw->gen8.defaultWindowHeight);
+                    break;
+                }
+                case LAUNCHER_INPUT_KEYBOARD:
+                default:
+                    launcher_apply_3ds_input(run->keyboard, d, u, h);
+                    break;
+            }
+            RunnerMouse_endFrame(run->mouse);
 
             Runner_step(run);
             if (run->audioSystem)

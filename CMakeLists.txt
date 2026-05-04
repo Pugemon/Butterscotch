@@ -14,7 +14,9 @@ project(butterscotch C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-add_compile_options(-Wall -Wextra)
+if(NOT MSVC)
+    add_compile_options(-Wall -Wextra)
+endif()
 
 set(PLATFORM "" CACHE STRING "Platform backend")
 
@@ -444,7 +446,6 @@ elseif(PLATFORM STREQUAL "3ds")
             -mfpu=vfpv2
             -mfloat-abi=hard
 
-            -O2
             -fno-strict-aliasing
             -fno-crossjumping
 
@@ -457,17 +458,11 @@ elseif(PLATFORM STREQUAL "3ds")
             -fno-math-errno
             -fno-trapping-math
 
-            -fno-exceptions
-            -fno-rtti
-            -fomit-frame-pointer
             -ffunction-sections
             -fdata-sections
-            -flto
     )
 
     target_link_options(butterscotch PRIVATE
-            -flto
-            -Wl,-O2
             -Wl,--gc-sections
     )
 
@@ -528,7 +523,7 @@ elseif(PLATFORM STREQUAL "3ds")
                 -DAPP_TITLE="${APP_TITLE}"
                 -DAPP_PRODUCT_CODE="${APP_PRODUCT_CODE}"
                 -DAPP_UNIQUE_ID="${APP_UNIQUE_ID}"
-                -DAPP_SYSTEM_MODE="96MB"
+                -DAPP_SYSTEM_MODE="80MB"
                 -DAPP_SYSTEM_MODE_EXT="124MB"
                 -major "${APP_VERSION_MAJOR}"
                 -minor "${APP_VERSION_MINOR}"

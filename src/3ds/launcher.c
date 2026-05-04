@@ -19,6 +19,7 @@
 #include "icon_parse.h"
 #include "image_decoder.h"
 #include "ctr_renderer.h"
+#include "runner.h"
 
 #define BASE_DIR  "sdmc:/3ds/butterscotch"
 #define SETTINGS_PATH BASE_DIR "/launcher_settings.bin"
@@ -131,7 +132,63 @@ static LauncherSettings g_settings = {
     .show_side_particles = 1,
     .show_side_blur = 1,
     .backdrop_mode = LAUNCHER_BACKDROP_GRADIENT,
+    .os_type = OS_WINDOWS,
+    .input_mode = LAUNCHER_INPUT_KEYBOARD,
 };
+
+// Subset of YoYoOperatingSystem the user can pick from in settings. Order
+// roughly matches what real GameMaker games branch on.
+static const struct {
+    int          value;
+    const char  *label;
+} g_os_options[] = {
+    { OS_WINDOWS,  "WINDOWS"  },
+    { OS_LINUX,    "LINUX"    },
+    { OS_MACOSX,   "MACOSX"   },
+    { OS_ANDROID,  "ANDROID"  },
+    { OS_IOS,      "IOS"      },
+    { OS_3DS,      "3DS"      },
+    { OS_SWITCH,   "SWITCH"   },
+    { OS_PSVITA,   "PSVITA"   },
+    { OS_PS4,      "PS4"      },
+    { OS_PS3,      "PS3"      },
+    { OS_XBOXONE,  "XBOXONE"  },
+    { OS_XBOX360,  "XBOX360"  },
+    { OS_UWP,      "UWP"      },
+    { OS_WIIU,     "WIIU"     },
+};
+#define OS_OPTION_COUNT ((int)(sizeof(g_os_options) / sizeof(g_os_options[0])))
+
+const char *launcher_os_type_label(int osType) {
+    for (int i = 0; i < OS_OPTION_COUNT; i++) {
+        if (g_os_options[i].value == osType) return g_os_options[i].label;
+    }
+    return "WINDOWS";
+}
+
+int launcher_os_type_count(void) { return OS_OPTION_COUNT; }
+
+int launcher_os_type_at(int index) {
+    if (index < 0) index = 0;
+    if (index >= OS_OPTION_COUNT) index = OS_OPTION_COUNT - 1;
+    return g_os_options[index].value;
+}
+
+int launcher_os_type_index_of(int osType) {
+    for (int i = 0; i < OS_OPTION_COUNT; i++) {
+        if (g_os_options[i].value == osType) return i;
+    }
+    return -1;
+}
+
+const char *launcher_input_mode_label(LauncherInputMode mode) {
+    switch (mode) {
+        case LAUNCHER_INPUT_KEYBOARD: return "KEYBOARD";
+        case LAUNCHER_INPUT_GAMEPAD:  return "GAMEPAD";
+        case LAUNCHER_INPUT_TOUCH:    return "TOUCH";
+        default:                      return "KEYBOARD";
+    }
+}
 
 typedef struct {
     const char *label;
@@ -284,6 +341,126 @@ void launcher_apply_3ds_input(RunnerKeyboardState *kb, u32 down, u32 up, u32 hel
     }
 }
 
+// Indices in GamepadSlot.buttonDown[] (see runner_gamepad.c gmlButtonToIndex).
+enum {
+    GP_IDX_FACE1     = 0,
+    GP_IDX_FACE2     = 1,
+    GP_IDX_FACE3     = 2,
+    GP_IDX_FACE4     = 3,
+    GP_IDX_SHOULDERL = 4,
+    GP_IDX_SHOULDERR = 5,
+    GP_IDX_TRIGGERL  = 6,
+    GP_IDX_TRIGGERR  = 7,
+    GP_IDX_SELECT    = 8,
+    GP_IDX_START     = 9,
+    GP_IDX_PADU      = 12,
+    GP_IDX_PADD      = 13,
+    GP_IDX_PADL      = 14,
+    GP_IDX_PADR      = 15,
+};
+
+static float circle_axis_normalize(int v) {
+    // 3DS circle pad raw range is roughly -156..+156. Clamp & normalize.
+    if (v >  156) v =  156;
+    if (v < -156) v = -156;
+    return (float)v / 156.0f;
+}
+
+static float deadzone(float v, float dz) {
+    if (v >  0.0f) return (v <  dz) ? 0.0f : (v - dz) / (1.0f - dz);
+    if (v <  0.0f) return (v > -dz) ? 0.0f : (v + dz) / (1.0f - dz);
+    return 0.0f;
+}
+
+void launcher_apply_3ds_gamepad(RunnerGamepadState *gp,
+                                u32 down, u32 up, u32 held,
+                                int circleX, int circleY,
+                                int cstickX, int cstickY) {
+    (void)down; (void)up;
+    if (!gp) return;
+    GamepadSlot *slot = &gp->slots[0];
+
+    memcpy(slot->buttonDownPrev, slot->buttonDown, sizeof(slot->buttonDown));
+    memset(slot->buttonDown,     0, sizeof(slot->buttonDown));
+    memset(slot->buttonPressed,  0, sizeof(slot->buttonPressed));
+    memset(slot->buttonReleased, 0, sizeof(slot->buttonReleased));
+    memset(slot->buttonValue,    0, sizeof(slot->buttonValue));
+    memset(slot->axisValue,      0, sizeof(slot->axisValue));
+
+    // Map 3DS face buttons to GameMaker's xinput-style face indices:
+    //   GP_FACE1 = bottom = A on 3DS  (matches "A" on Xbox = bottom)
+    //   GP_FACE2 = right  = B on 3DS
+    //   GP_FACE3 = left   = Y on 3DS
+    //   GP_FACE4 = top    = X on 3DS
+    if (held & KEY_A) slot->buttonDown[GP_IDX_FACE1] = true;
+    if (held & KEY_B) slot->buttonDown[GP_IDX_FACE2] = true;
+    if (held & KEY_Y) slot->buttonDown[GP_IDX_FACE3] = true;
+    if (held & KEY_X) slot->buttonDown[GP_IDX_FACE4] = true;
+
+    if (held & KEY_L)  slot->buttonDown[GP_IDX_SHOULDERL] = true;
+    if (held & KEY_R)  slot->buttonDown[GP_IDX_SHOULDERR] = true;
+    if (held & KEY_ZL) slot->buttonDown[GP_IDX_TRIGGERL]  = true;
+    if (held & KEY_ZR) slot->buttonDown[GP_IDX_TRIGGERR]  = true;
+
+    if (held & KEY_SELECT) slot->buttonDown[GP_IDX_SELECT] = true;
+    if (held & KEY_START)  slot->buttonDown[GP_IDX_START]  = true;
+
+    if (held & KEY_DUP)    slot->buttonDown[GP_IDX_PADU] = true;
+    if (held & KEY_DDOWN)  slot->buttonDown[GP_IDX_PADD] = true;
+    if (held & KEY_DLEFT)  slot->buttonDown[GP_IDX_PADL] = true;
+    if (held & KEY_DRIGHT) slot->buttonDown[GP_IDX_PADR] = true;
+
+    // 3DS doesn't have analog triggers, so trigger buttons only carry 0/1.
+    for (int i = 0; i < GP_BUTTON_COUNT; i++) {
+        slot->buttonValue[i] = slot->buttonDown[i] ? 1.0f : 0.0f;
+    }
+
+    // Circle pad → left stick. Y is inverted to match XInput/GameMaker.
+    float lh = circle_axis_normalize(circleX);
+    float lv = -circle_axis_normalize(circleY);
+    // C-stick (New 3DS) → right stick.
+    float rh = circle_axis_normalize(cstickX);
+    float rv = -circle_axis_normalize(cstickY);
+    slot->axisValue[0] = deadzone(lh, slot->deadzone);
+    slot->axisValue[1] = deadzone(lv, slot->deadzone);
+    slot->axisValue[2] = deadzone(rh, slot->deadzone);
+    slot->axisValue[3] = deadzone(rv, slot->deadzone);
+
+    for (int i = 0; i < GP_BUTTON_COUNT; i++) {
+        bool now = slot->buttonDown[i];
+        bool was = slot->buttonDownPrev[i];
+        if (now && !was) slot->buttonPressed[i]  = true;
+        if (!now && was) slot->buttonReleased[i] = true;
+    }
+
+    snprintf(slot->description, sizeof(slot->description), "Nintendo 3DS");
+    snprintf(slot->guid,        sizeof(slot->guid),        "n3ds-builtin");
+    slot->connectedPrev = slot->connected;
+    slot->connected = true;
+    slot->jid = 0;
+    gp->connectedCount = 1;
+}
+
+void launcher_apply_3ds_touch(RunnerMouseState *mouse,
+                              bool touched, int touchX, int touchY,
+                              int gameW, int gameH) {
+    if (!mouse) return;
+    if (touched) {
+        // 3DS bottom screen is 320x240. Scale to game logical size so that
+        // mouse_x/mouse_y match what the game expects in room space. If gameW/H
+        // are zero (no room loaded yet), fall back to raw touch coords.
+        if (gameW <= 0) gameW = 320;
+        if (gameH <= 0) gameH = 240;
+        int x = (touchX * gameW) / 320;
+        int y = (touchY * gameH) / 240;
+        RunnerMouse_setPosition(mouse, x, y);
+    }
+    RunnerMouse_setButton(mouse, MB_LEFT, touched);
+    // 3DS has no separate right/middle buttons; leave them clear.
+    RunnerMouse_setButton(mouse, MB_RIGHT,  false);
+    RunnerMouse_setButton(mouse, MB_MIDDLE, false);
+}
+
 static void launcher_push_theme_to_renderer(void) {
     const LauncherTheme *t = launcher_current_theme();
     CtrRenderer_setLetterboxTheme(t->bg_top[0], t->bg_top[1], t->bg_top[2],
@@ -327,12 +504,20 @@ void launcher_apply_settings(const LauncherSettings *s) {
     g_settings.show_side_blur = s->show_side_blur;
     g_settings.show_side_particles = s->show_side_particles;
     g_settings.backdrop_mode = s->backdrop_mode;
+    g_settings.os_type = s->os_type;
+    g_settings.input_mode = s->input_mode;
     g_settings.global_controls = s->global_controls;
     launcher_normalize_control_map(&g_settings.global_controls);
     int backdropValue = (int)g_settings.backdrop_mode;
     if (backdropValue < (int)LAUNCHER_BACKDROP_GRADIENT ||
         backdropValue > (int)LAUNCHER_BACKDROP_STRETCH) {
         g_settings.backdrop_mode = LAUNCHER_BACKDROP_GRADIENT;
+    }
+    if (g_settings.input_mode < 0 || g_settings.input_mode >= LAUNCHER_INPUT_MODE_COUNT) {
+        g_settings.input_mode = LAUNCHER_INPUT_KEYBOARD;
+    }
+    if (launcher_os_type_index_of(g_settings.os_type) < 0) {
+        g_settings.os_type = OS_WINDOWS;
     }
     launcher_push_theme_to_renderer();
 }
@@ -366,6 +551,16 @@ void launcher_load_settings(void) {
         if (backdropValue < (int)LAUNCHER_BACKDROP_GRADIENT ||
             backdropValue > (int)LAUNCHER_BACKDROP_STRETCH) {
             tmp.backdrop_mode = LAUNCHER_BACKDROP_GRADIENT;
+        }
+        // Older settings files (version 3) don't have os_type / input_mode —
+        // their bytes will be whatever happened to live in the previous
+        // _reserved[] padding. Fall back to defaults if they're out of range.
+        if (tmp.version < 4u || launcher_os_type_index_of(tmp.os_type) < 0) {
+            tmp.os_type = OS_WINDOWS;
+        }
+        if (tmp.version < 4u || tmp.input_mode < 0 ||
+            tmp.input_mode >= LAUNCHER_INPUT_MODE_COUNT) {
+            tmp.input_mode = LAUNCHER_INPUT_KEYBOARD;
         }
         launcher_normalize_control_map(&tmp.global_controls);
         g_settings = tmp;
@@ -1562,40 +1757,60 @@ typedef struct {
     int          show_side_particles;
     int          show_side_blur;
     LauncherBackdropMode backdrop_mode;
+    int          os_type;
+    LauncherInputMode input_mode;
 } LauncherSettingsDraft;
 
-#define SETTINGS_OPTION_COUNT 6
+enum {
+    SETTINGS_OPT_THEME = 0,
+    SETTINGS_OPT_GAME_SCREEN,
+    SETTINGS_OPT_BACKDROP,
+    SETTINGS_OPT_PARTICLES,
+    SETTINGS_OPT_BLUR,
+    SETTINGS_OPT_OS_TYPE,
+    SETTINGS_OPT_INPUT_MODE,
+    SETTINGS_OPT_CONTROLS,
+    SETTINGS_OPTION_COUNT
+};
 
 static const char *settings_option_label(int idx) {
     switch (idx) {
-        case 0: return "THEME";
-        case 1: return "GAME SCREEN";
-        case 2: return "EMPTY SPACE";
-        case 3: return "SIDE PARTICLES";
-        case 4: return "SIDE BLUR";
-        case 5: return "GLOBAL CONTROLS";
+        case SETTINGS_OPT_THEME:        return "THEME";
+        case SETTINGS_OPT_GAME_SCREEN:  return "GAME SCREEN";
+        case SETTINGS_OPT_BACKDROP:     return "EMPTY SPACE";
+        case SETTINGS_OPT_PARTICLES:    return "SIDE PARTICLES";
+        case SETTINGS_OPT_BLUR:         return "SIDE BLUR";
+        case SETTINGS_OPT_OS_TYPE:      return "OS TYPE";
+        case SETTINGS_OPT_INPUT_MODE:   return "INPUT MODE";
+        case SETTINGS_OPT_CONTROLS:     return "GLOBAL CONTROLS";
         default: return "?";
     }
 }
 
 static void settings_option_value(const LauncherSettingsDraft *d, int idx, char *out, size_t size) {
     switch (idx) {
-        case 0:
+        case SETTINGS_OPT_THEME:
             snprintf(out, size, "< %s >", launcher_theme_at(d->theme_index)->display);
             break;
-        case 1:
+        case SETTINGS_OPT_GAME_SCREEN:
             snprintf(out, size, "< %s >", d->game_screen == LAUNCHER_GAME_SCREEN_TOP ? "TOP" : "BOTTOM");
             break;
-        case 2:
+        case SETTINGS_OPT_BACKDROP:
             snprintf(out, size, "< %s >", launcher_backdrop_label(d->backdrop_mode));
             break;
-        case 3:
+        case SETTINGS_OPT_PARTICLES:
             snprintf(out, size, "< %s >", d->show_side_particles ? "ON" : "OFF");
             break;
-        case 4:
+        case SETTINGS_OPT_BLUR:
             snprintf(out, size, "< %s >", d->show_side_blur ? "ON" : "OFF");
             break;
-        case 5:
+        case SETTINGS_OPT_OS_TYPE:
+            snprintf(out, size, "< %s >", launcher_os_type_label(d->os_type));
+            break;
+        case SETTINGS_OPT_INPUT_MODE:
+            snprintf(out, size, "< %s >", launcher_input_mode_label(d->input_mode));
+            break;
+        case SETTINGS_OPT_CONTROLS:
             snprintf(out, size, "PRESS A");
             break;
         default:
@@ -1606,7 +1821,7 @@ static void settings_option_value(const LauncherSettingsDraft *d, int idx, char 
 
 static void settings_option_step(LauncherSettingsDraft *d, int idx, int dir) {
     switch (idx) {
-        case 0: {
+        case SETTINGS_OPT_THEME: {
             int next = d->theme_index + dir;
             int n = launcher_theme_count();
             if (next < 0) next = n - 1;
@@ -1614,20 +1829,34 @@ static void settings_option_step(LauncherSettingsDraft *d, int idx, int dir) {
             d->theme_index = next;
             break;
         }
-        case 1:
+        case SETTINGS_OPT_GAME_SCREEN:
             d->game_screen = (d->game_screen == LAUNCHER_GAME_SCREEN_TOP)
                                  ? LAUNCHER_GAME_SCREEN_BOTTOM : LAUNCHER_GAME_SCREEN_TOP;
             break;
-        case 2:
+        case SETTINGS_OPT_BACKDROP:
             d->backdrop_mode = launcher_next_backdrop(d->backdrop_mode, dir);
             break;
-        case 3:
+        case SETTINGS_OPT_PARTICLES:
             d->show_side_particles = !d->show_side_particles;
             break;
-        case 4:
+        case SETTINGS_OPT_BLUR:
             d->show_side_blur = !d->show_side_blur;
             break;
-        case 5:
+        case SETTINGS_OPT_OS_TYPE: {
+            int idx_now = launcher_os_type_index_of(d->os_type);
+            if (idx_now < 0) idx_now = 0;
+            int n = launcher_os_type_count();
+            int next = (idx_now + dir + n) % n;
+            d->os_type = launcher_os_type_at(next);
+            break;
+        }
+        case SETTINGS_OPT_INPUT_MODE: {
+            int next = ((int)d->input_mode + dir + LAUNCHER_INPUT_MODE_COUNT)
+                       % LAUNCHER_INPUT_MODE_COUNT;
+            d->input_mode = (LauncherInputMode)next;
+            break;
+        }
+        case SETTINGS_OPT_CONTROLS:
             break;
         default: break;
     }
@@ -1643,8 +1872,8 @@ static void settings_draw_top(LauncherGfx *gfx, const LauncherSettingsDraft *d, 
     launcher_draw_top_chrome(gfx, W, th, t, "SETTINGS");
 
     float listX = 36.f;
-    float listY = 56.f;
-    float rowH  = 28.f;
+    float listY = 44.f;
+    float rowH  = 22.f;
 
     char value[48];
     for (int i = 0; i < SETTINGS_OPTION_COUNT; i++) {
@@ -1710,6 +1939,11 @@ static void settings_draw_bottom(LauncherGfx *gfx, const LauncherSettingsDraft *
              d->show_side_blur ? "ON" : "OFF");
     launcher_draw_text_rgb(gfx, buf, 16.f, sy + sw + 70.f, 1.00f, th->text_subtle, 0.80f);
 
+    snprintf(buf, sizeof(buf), "OS: %s   INPUT: %s",
+             launcher_os_type_label(d->os_type),
+             launcher_input_mode_label(d->input_mode));
+    launcher_draw_text_rgb(gfx, buf, 16.f, sy + sw + 86.f, 1.00f, th->text_subtle, 0.80f);
+
     launcher_rect(gfx, 0, H - 22, W, 22, 0.030f, 0.028f, 0.065f, 0.93f);
     launcher_draw_text_rgb(gfx, "DPAD: NAVIGATE  L/R: CHANGE  A: EDIT/SAVE", 6, H - 17, 0.95f, th->text_main, 1.f);
     launcher_draw_text_rgb(gfx, "B: CANCEL  Y: RESET DEFAULTS",         6, H - 9,  0.95f, th->text_subtle, 0.85f);
@@ -1722,6 +1956,8 @@ static bool launcher_run_settings(LauncherGfx *gfx) {
         .show_side_particles = g_settings.show_side_particles,
         .show_side_blur      = g_settings.show_side_blur,
         .backdrop_mode       = g_settings.backdrop_mode,
+        .os_type             = g_settings.os_type,
+        .input_mode          = g_settings.input_mode,
     };
     int sel = 0;
 
@@ -1748,19 +1984,23 @@ static bool launcher_run_settings(LauncherGfx *gfx) {
             draft.show_side_particles = 1;
             draft.show_side_blur = 1;
             draft.backdrop_mode = LAUNCHER_BACKDROP_GRADIENT;
+            draft.os_type = OS_WINDOWS;
+            draft.input_mode = LAUNCHER_INPUT_KEYBOARD;
         }
-        if ((kDown & KEY_A) && sel == 5) {
+        if ((kDown & KEY_A) && sel == SETTINGS_OPT_CONTROLS) {
             if (launcher_run_control_mapper(gfx, &g_settings.global_controls, "GLOBAL CONTROLS")) {
                 launcher_save_settings();
             }
             continue;
         }
-        if ((kDown & KEY_START) || ((kDown & KEY_A) && sel != 5)) {
+        if ((kDown & KEY_START) || ((kDown & KEY_A) && sel != SETTINGS_OPT_CONTROLS)) {
             g_settings.theme_index = draft.theme_index;
             g_settings.game_screen = draft.game_screen;
             g_settings.show_side_particles = draft.show_side_particles;
             g_settings.show_side_blur = draft.show_side_blur;
             g_settings.backdrop_mode = draft.backdrop_mode;
+            g_settings.os_type = draft.os_type;
+            g_settings.input_mode = draft.input_mode;
             launcher_push_theme_to_renderer();
             launcher_save_settings();
             return true;

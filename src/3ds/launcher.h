@@ -12,6 +12,8 @@
 
 #include "data_win.h"
 #include "runner_keyboard.h"
+#include "runner_gamepad.h"
+#include "runner_mouse.h"
 
 #define LAUNCHER_TOP_W   400
 #define LAUNCHER_TOP_H   240
@@ -106,7 +108,14 @@ typedef struct {
     float side_particle_alpha;
 } LauncherTheme;
 
-#define LAUNCHER_SETTINGS_VERSION 3u
+typedef enum {
+    LAUNCHER_INPUT_KEYBOARD = 0,
+    LAUNCHER_INPUT_GAMEPAD,
+    LAUNCHER_INPUT_TOUCH,
+    LAUNCHER_INPUT_MODE_COUNT
+} LauncherInputMode;
+
+#define LAUNCHER_SETTINGS_VERSION 4u
 
 typedef struct {
     uint32_t           magic;
@@ -116,7 +125,9 @@ typedef struct {
     int                show_side_particles;
     int                show_side_blur;
     LauncherBackdropMode backdrop_mode;
-    int                _reserved[7];
+    int                os_type;          // YoYoOperatingSystem value reported via os_type to GML
+    LauncherInputMode  input_mode;
+    int                _reserved[5];
     LauncherControlMap global_controls;
 } LauncherSettings;
 
@@ -175,6 +186,29 @@ void                 launcher_load_settings(void);
 void                 launcher_load_active_controls(const char *data_win_path);
 void                 launcher_save_active_controls(void);
 void                 launcher_apply_3ds_input(RunnerKeyboardState *kb, u32 down, u32 up, u32 held);
+
+// Populates gamepad slot 0 of `gp` from current 3DS hardware state. Treats the
+// circle pad / c-stick as left/right analog axes and any held button as a
+// digital button-down. Always marks the slot connected so games see one device.
+void                 launcher_apply_3ds_gamepad(RunnerGamepadState *gp,
+                                                u32 down, u32 up, u32 held,
+                                                int circleX, int circleY,
+                                                int cstickX, int cstickY);
+
+// Feeds the bottom-screen touchscreen into the runner's mouse state. `gameW`/
+// `gameH` are the logical game dimensions used to scale the 320x240 touch
+// coords into game space. `touched` is non-zero if the user is currently
+// touching the screen.
+void                 launcher_apply_3ds_touch(RunnerMouseState *mouse,
+                                              bool touched, int touchX, int touchY,
+                                              int gameW, int gameH);
+
+// Returns short labels for settings UI / debug.
+const char          *launcher_os_type_label(int osType);
+int                  launcher_os_type_count(void);
+int                  launcher_os_type_at(int index);
+int                  launcher_os_type_index_of(int osType);
+const char          *launcher_input_mode_label(LauncherInputMode mode);
 
 // ---- Library bootstrap ------------------------------------------------------
 
