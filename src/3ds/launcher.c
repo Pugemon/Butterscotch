@@ -14,6 +14,7 @@
 #include <dirent.h>
 #include <math.h>
 #include <ctype.h>
+#include <stddef.h>
 
 #include "icon_parse.h"
 #include "image_decoder.h"
@@ -22,6 +23,7 @@
 #define BASE_DIR  "sdmc:/3ds/butterscotch"
 #define SETTINGS_PATH BASE_DIR "/launcher_settings.bin"
 #define LAUNCHER_SETTINGS_MAGIC 0x4253544Cu // 'LTSB'
+#define GAME_CONTROL_MAP_NAME "controls.bin"
 
 #define LAUNCHER_VBUF_CAP (8192 * 3)
 #define LAUNCHER_DISPLAY_TRANSFER_FLAGS \
@@ -131,6 +133,40 @@ static LauncherSettings g_settings = {
     .backdrop_mode = LAUNCHER_BACKDROP_GRADIENT,
 };
 
+typedef struct {
+    const char *label;
+    u32         mask;
+    uint8_t     default_vk;
+} LauncherControlDef;
+
+static const LauncherControlDef g_control_defs[LAUNCHER_CONTROL_COUNT] = {
+    [LAUNCHER_CONTROL_CPAD_UP]      = {"CPAD UP",      KEY_CPAD_UP,      VK_UP},
+    [LAUNCHER_CONTROL_CPAD_DOWN]    = {"CPAD DOWN",    KEY_CPAD_DOWN,    VK_DOWN},
+    [LAUNCHER_CONTROL_CPAD_LEFT]    = {"CPAD LEFT",    KEY_CPAD_LEFT,    VK_LEFT},
+    [LAUNCHER_CONTROL_CPAD_RIGHT]   = {"CPAD RIGHT",   KEY_CPAD_RIGHT,   VK_RIGHT},
+    [LAUNCHER_CONTROL_DPAD_UP]      = {"DPAD UP",      KEY_DUP,          VK_UP},
+    [LAUNCHER_CONTROL_DPAD_DOWN]    = {"DPAD DOWN",    KEY_DDOWN,        VK_DOWN},
+    [LAUNCHER_CONTROL_DPAD_LEFT]    = {"DPAD LEFT",    KEY_DLEFT,        VK_LEFT},
+    [LAUNCHER_CONTROL_DPAD_RIGHT]   = {"DPAD RIGHT",   KEY_DRIGHT,       VK_RIGHT},
+    [LAUNCHER_CONTROL_A]            = {"A",            KEY_A,            'Z'},
+    [LAUNCHER_CONTROL_B]            = {"B",            KEY_B,            'X'},
+    [LAUNCHER_CONTROL_X]            = {"X",            KEY_X,            'C'},
+    [LAUNCHER_CONTROL_Y]            = {"Y",            KEY_Y,            VK_SHIFT},
+    [LAUNCHER_CONTROL_L]            = {"L",            KEY_L,            VK_ENTER},
+    [LAUNCHER_CONTROL_R]            = {"R",            KEY_R,            VK_SPACE},
+    [LAUNCHER_CONTROL_ZL]           = {"ZL",           KEY_ZL,           VK_NOKEY},
+    [LAUNCHER_CONTROL_ZR]           = {"ZR",           KEY_ZR,           VK_NOKEY},
+    [LAUNCHER_CONTROL_START]        = {"START",        KEY_START,        VK_NOKEY},
+    [LAUNCHER_CONTROL_SELECT]       = {"SELECT",       KEY_SELECT,       VK_NOKEY},
+    [LAUNCHER_CONTROL_CSTICK_UP]    = {"CSTICK UP",    KEY_CSTICK_UP,    VK_NOKEY},
+    [LAUNCHER_CONTROL_CSTICK_DOWN]  = {"CSTICK DOWN",  KEY_CSTICK_DOWN,  VK_NOKEY},
+    [LAUNCHER_CONTROL_CSTICK_LEFT]  = {"CSTICK LEFT",  KEY_CSTICK_LEFT,  VK_NOKEY},
+    [LAUNCHER_CONTROL_CSTICK_RIGHT] = {"CSTICK RIGHT", KEY_CSTICK_RIGHT, VK_NOKEY},
+};
+
+static LauncherControlMap g_active_controls;
+static char               g_active_controls_path[256];
+
 const LauncherTheme *launcher_theme_at(int index) {
     if (index < 0) index = 0;
     if (index >= THEME_COUNT) index = THEME_COUNT - 1;
@@ -144,6 +180,109 @@ const LauncherTheme *launcher_current_theme(void) {
 }
 
 const LauncherSettings *launcher_get_settings(void) { return &g_settings; }
+const LauncherControlMap *launcher_get_global_controls(void) { return &g_settings.global_controls; }
+const LauncherControlMap *launcher_get_active_controls(void) { return &g_active_controls; }
+
+static void launcher_reset_control_map(LauncherControlMap *map) {
+    if (!map) return;
+    memset(map, 0, sizeof(*map));
+    map->magic = LAUNCHER_CONTROL_MAP_MAGIC;
+    map->version = LAUNCHER_CONTROL_MAP_VERSION;
+    for (int i = 0; i < LAUNCHER_CONTROL_COUNT; i++) {
+        map->vk[i] = g_control_defs[i].default_vk;
+    }
+}
+
+static void launcher_normalize_control_map(LauncherControlMap *map) {
+    if (!map || map->magic != LAUNCHER_CONTROL_MAP_MAGIC ||
+        map->version != LAUNCHER_CONTROL_MAP_VERSION) {
+        launcher_reset_control_map(map);
+        return;
+    }
+    map->magic = LAUNCHER_CONTROL_MAP_MAGIC;
+    map->version = LAUNCHER_CONTROL_MAP_VERSION;
+}
+
+static bool launcher_game_dir_from_data_path(const char *data_win_path, char *out, size_t out_size) {
+    if (!data_win_path || !out || out_size == 0) return false;
+    const char *slash = strrchr(data_win_path, '/');
+    if (!slash) return false;
+    size_t len = (size_t)(slash - data_win_path);
+    if (len >= out_size) len = out_size - 1;
+    memcpy(out, data_win_path, len);
+    out[len] = '\0';
+    return len > 0;
+}
+
+static bool launcher_control_path_for_game(const char *data_win_path, char *out, size_t out_size) {
+    char game_dir[256];
+    if (!launcher_game_dir_from_data_path(data_win_path, game_dir, sizeof(game_dir))) return false;
+    snprintf(out, out_size, "%s/%s", game_dir, GAME_CONTROL_MAP_NAME);
+    return true;
+}
+
+void launcher_load_active_controls(const char *data_win_path) {
+    g_active_controls = g_settings.global_controls;
+    launcher_normalize_control_map(&g_active_controls);
+    g_active_controls_path[0] = '\0';
+
+    char path[256];
+    if (!launcher_control_path_for_game(data_win_path, path, sizeof(path))) return;
+    strncpy(g_active_controls_path, path, sizeof(g_active_controls_path) - 1);
+    g_active_controls_path[sizeof(g_active_controls_path) - 1] = '\0';
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    LauncherControlMap tmp = g_active_controls;
+    size_t r = fread(&tmp, 1, sizeof(tmp), f);
+    fclose(f);
+    if (r >= offsetof(LauncherControlMap, vk) + LAUNCHER_CONTROL_COUNT &&
+        tmp.magic == LAUNCHER_CONTROL_MAP_MAGIC) {
+        g_active_controls = tmp;
+        launcher_normalize_control_map(&g_active_controls);
+    }
+}
+
+void launcher_save_active_controls(void) {
+    launcher_normalize_control_map(&g_active_controls);
+    if (g_active_controls_path[0] == '\0') return;
+    FILE *f = fopen(g_active_controls_path, "wb");
+    if (!f) return;
+    fwrite(&g_active_controls, sizeof(g_active_controls), 1, f);
+    fclose(f);
+}
+
+static void launcher_apply_vk_edge(RunnerKeyboardState *kb, int vk, bool down, bool up, bool held) {
+    if (!kb || vk < 0 || vk >= GML_KEY_COUNT || vk == VK_NOKEY) return;
+    if (down) {
+        RunnerKeyboard_onKeyDown(kb, vk);
+    } else if (up && !held) {
+        RunnerKeyboard_onKeyUp(kb, vk);
+    }
+}
+
+void launcher_apply_3ds_input(RunnerKeyboardState *kb, u32 down, u32 up, u32 held) {
+    bool vk_down[GML_KEY_COUNT];
+    bool vk_up[GML_KEY_COUNT];
+    bool vk_held[GML_KEY_COUNT];
+    memset(vk_down, 0, sizeof(vk_down));
+    memset(vk_up, 0, sizeof(vk_up));
+    memset(vk_held, 0, sizeof(vk_held));
+
+    launcher_normalize_control_map(&g_active_controls);
+    for (int i = 0; i < LAUNCHER_CONTROL_COUNT; i++) {
+        int vk = g_active_controls.vk[i];
+        if (vk == VK_NOKEY || vk >= GML_KEY_COUNT) continue;
+        u32 mask = g_control_defs[i].mask;
+        if (down & mask) vk_down[vk] = true;
+        if (up & mask) vk_up[vk] = true;
+        if (held & mask) vk_held[vk] = true;
+    }
+
+    for (int vk = 1; vk < GML_KEY_COUNT; vk++) {
+        launcher_apply_vk_edge(kb, vk, vk_down[vk], vk_up[vk], vk_held[vk]);
+    }
+}
 
 static void launcher_push_theme_to_renderer(void) {
     const LauncherTheme *t = launcher_current_theme();
@@ -188,6 +327,8 @@ void launcher_apply_settings(const LauncherSettings *s) {
     g_settings.show_side_blur = s->show_side_blur;
     g_settings.show_side_particles = s->show_side_particles;
     g_settings.backdrop_mode = s->backdrop_mode;
+    g_settings.global_controls = s->global_controls;
+    launcher_normalize_control_map(&g_settings.global_controls);
     int backdropValue = (int)g_settings.backdrop_mode;
     if (backdropValue < (int)LAUNCHER_BACKDROP_GRADIENT ||
         backdropValue > (int)LAUNCHER_BACKDROP_STRETCH) {
@@ -202,17 +343,20 @@ void launcher_save_settings(void) {
     if (!f) return;
     g_settings.magic = LAUNCHER_SETTINGS_MAGIC;
     g_settings.version = LAUNCHER_SETTINGS_VERSION;
+    launcher_normalize_control_map(&g_settings.global_controls);
     fwrite(&g_settings, sizeof(g_settings), 1, f);
     fclose(f);
 }
 
 void launcher_load_settings(void) {
+    launcher_normalize_control_map(&g_settings.global_controls);
     FILE *f = fopen(SETTINGS_PATH, "rb");
     if (!f) { launcher_push_theme_to_renderer(); return; }
-    LauncherSettings tmp;
+    LauncherSettings tmp = g_settings;
     size_t r = fread(&tmp, 1, sizeof(tmp), f);
     fclose(f);
-    if (r >= sizeof(tmp) && tmp.magic == LAUNCHER_SETTINGS_MAGIC) {
+    if (r >= offsetof(LauncherSettings, theme_index) + sizeof(tmp.theme_index) &&
+        tmp.magic == LAUNCHER_SETTINGS_MAGIC) {
         if (tmp.theme_index < 0 || tmp.theme_index >= THEME_COUNT) tmp.theme_index = 0;
         if (tmp.game_screen != LAUNCHER_GAME_SCREEN_TOP &&
             tmp.game_screen != LAUNCHER_GAME_SCREEN_BOTTOM) {
@@ -223,8 +367,10 @@ void launcher_load_settings(void) {
             backdropValue > (int)LAUNCHER_BACKDROP_STRETCH) {
             tmp.backdrop_mode = LAUNCHER_BACKDROP_GRADIENT;
         }
+        launcher_normalize_control_map(&tmp.global_controls);
         g_settings = tmp;
     }
+    g_settings.version = LAUNCHER_SETTINGS_VERSION;
     launcher_push_theme_to_renderer();
 }
 
@@ -244,6 +390,22 @@ const LauncherGameEntry *launcher_game(int index) {
 // ---------------------------------------------------------------------------
 // Texture helpers
 // ---------------------------------------------------------------------------
+
+#define LAUNCHER_ICON_CACHE_MAGIC   0x49435442u // 'BTCI'
+#define LAUNCHER_ICON_CACHE_VERSION 1u
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    int32_t  width;
+    int32_t  height;
+    int32_t  pot_w;
+    int32_t  pot_h;
+    uint64_t source_size;
+    int64_t  source_mtime;
+    uint32_t data_bytes;
+    char     source_name[96];
+} LauncherIconCacheHeader;
 
 static int launcher_next_pow2(int x) {
     if (x < 8) return 8;
@@ -289,6 +451,113 @@ static void launcher_tile_rgba4(const uint16_t *linear, uint16_t *tiled,
     }
 }
 
+static const char *launcher_basename(const char *path) {
+    const char *slash = path ? strrchr(path, '/') : NULL;
+    return slash ? slash + 1 : (path ? path : "");
+}
+
+static void launcher_icon_cache_path(const char *game_dir, char *out, size_t out_size) {
+    snprintf(out, out_size, "%s/cache/launcher_icon.bin", game_dir);
+}
+
+static bool launcher_write_icon_cache(const char *cache_path, const char *source_path,
+                                      const struct stat *source_st,
+                                      const LauncherGameEntry *game,
+                                      const uint16_t *tiled) {
+    if (!cache_path || !source_path || !source_st || !game || !tiled) return false;
+
+    char cache_dir[256];
+    strncpy(cache_dir, cache_path, sizeof(cache_dir) - 1);
+    cache_dir[sizeof(cache_dir) - 1] = '\0';
+    char *slash = strrchr(cache_dir, '/');
+    if (slash) {
+        *slash = '\0';
+        mkdir(cache_dir, 0777);
+    }
+
+    FILE *f = fopen(cache_path, "wb");
+    if (!f) return false;
+
+    LauncherIconCacheHeader hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.magic = LAUNCHER_ICON_CACHE_MAGIC;
+    hdr.version = LAUNCHER_ICON_CACHE_VERSION;
+    hdr.width = game->icon_w;
+    hdr.height = game->icon_h;
+    hdr.pot_w = game->icon_pot_w;
+    hdr.pot_h = game->icon_pot_h;
+    hdr.source_size = (uint64_t)source_st->st_size;
+    hdr.source_mtime = (int64_t)source_st->st_mtime;
+    hdr.data_bytes = (uint32_t)((size_t)hdr.pot_w * (size_t)hdr.pot_h * sizeof(uint16_t));
+    snprintf(hdr.source_name, sizeof(hdr.source_name), "%s", launcher_basename(source_path));
+
+    bool ok = fwrite(&hdr, sizeof(hdr), 1, f) == 1 &&
+              fwrite(tiled, 1, hdr.data_bytes, f) == hdr.data_bytes;
+    fclose(f);
+    return ok;
+}
+
+static bool launcher_load_icon_cache(LauncherGameEntry *game, const char *cache_path,
+                                     const char *source_path, const struct stat *source_st) {
+    if (!game || !cache_path || !source_path || !source_st) return false;
+
+    FILE *f = fopen(cache_path, "rb");
+    if (!f) return false;
+
+    LauncherIconCacheHeader hdr;
+    bool ok = fread(&hdr, sizeof(hdr), 1, f) == 1;
+    char source_name[96];
+    memset(source_name, 0, sizeof(source_name));
+    snprintf(source_name, sizeof(source_name), "%s", launcher_basename(source_path));
+    if (ok) {
+        size_t expected = (size_t)hdr.pot_w * (size_t)hdr.pot_h * sizeof(uint16_t);
+        ok = hdr.magic == LAUNCHER_ICON_CACHE_MAGIC &&
+             hdr.version == LAUNCHER_ICON_CACHE_VERSION &&
+             hdr.width > 0 && hdr.height > 0 &&
+             hdr.pot_w >= hdr.width && hdr.pot_h >= hdr.height &&
+             hdr.pot_w <= 512 && hdr.pot_h <= 512 &&
+             hdr.source_size == (uint64_t)source_st->st_size &&
+             hdr.source_mtime == (int64_t)source_st->st_mtime &&
+             hdr.data_bytes == expected &&
+             memcmp(hdr.source_name, source_name, sizeof(hdr.source_name)) == 0;
+    }
+
+    uint16_t *tiled = NULL;
+    if (ok) {
+        tiled = linearAlloc(hdr.data_bytes);
+        ok = tiled && fread(tiled, 1, hdr.data_bytes, f) == hdr.data_bytes;
+    }
+    fclose(f);
+    if (!ok) {
+        if (tiled) linearFree(tiled);
+        return false;
+    }
+
+    if (game->icon_ready) {
+        C3D_TexDelete(&game->icon_tex);
+        memset(&game->icon_tex, 0, sizeof(game->icon_tex));
+        game->icon_ready = false;
+    }
+
+    if (!C3D_TexInit(&game->icon_tex, (u16)hdr.pot_w, (u16)hdr.pot_h, GPU_RGBA4)) {
+        linearFree(tiled);
+        return false;
+    }
+
+    C3D_TexLoadImage(&game->icon_tex, tiled, GPU_TEXFACE_2D, 0);
+    C3D_TexFlush(&game->icon_tex);
+    C3D_TexSetFilter(&game->icon_tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&game->icon_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    linearFree(tiled);
+
+    game->icon_ready = true;
+    game->icon_w = hdr.width;
+    game->icon_h = hdr.height;
+    game->icon_pot_w = hdr.pot_w;
+    game->icon_pot_h = hdr.pot_h;
+    return true;
+}
+
 void launcher_free_game_icons(void) {
     for (int i = 0; i < g_game_count; i++) {
         if (g_games[i].icon_ready) {
@@ -299,7 +568,9 @@ void launcher_free_game_icons(void) {
     }
 }
 
-static bool launcher_upload_icon(LauncherGameEntry *game, const IconImage *img) {
+static bool launcher_upload_icon(LauncherGameEntry *game, const IconImage *img,
+                                 const char *cache_path, const char *source_path,
+                                 const struct stat *source_st) {
     if (!game || !img || !img->pixels || img->width <= 0 || img->height <= 0) return false;
 
     if (game->icon_ready) {
@@ -339,15 +610,18 @@ static bool launcher_upload_icon(LauncherGameEntry *game, const IconImage *img) 
     C3D_TexSetFilter(&game->icon_tex, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&game->icon_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-    linearFree(tiled);
-    free(linear);
-
-    //GPU_LA4.;
     game->icon_ready = true;
     game->icon_w = img->width;
     game->icon_h = img->height;
     game->icon_pot_w = potW;
     game->icon_pot_h = potH;
+
+    if (cache_path && source_path && source_st) {
+        launcher_write_icon_cache(cache_path, source_path, source_st, game, tiled);
+    }
+
+    linearFree(tiled);
+    free(linear);
     return true;
 }
 
@@ -384,21 +658,32 @@ static void launcher_try_load_icon(LauncherGameEntry *game, const char *game_dir
         "icon.png", "icon.jpg", "icon.jpeg", "cover.png", "cover.jpg", "cover.jpeg"
     };
 
+    char cache_path[256];
+    launcher_icon_cache_path(game_dir, cache_path, sizeof(cache_path));
+
     for (size_t i = 0; i < sizeof(image_names) / sizeof(image_names[0]); i++) {
         char image_path[256];
         snprintf(image_path, sizeof(image_path), "%s/%s", game_dir, image_names[i]);
+        struct stat st;
+        if (stat(image_path, &st) != 0) continue;
+        if (launcher_load_icon_cache(game, cache_path, image_path, &st)) return;
+
         IconImage img;
         if (load_image_from_file(image_path, &img)) {
-            bool ok = launcher_upload_icon(game, &img);
+            bool ok = launcher_upload_icon(game, &img, cache_path, image_path, &st);
             IconImage_free(&img);
             if (ok) return;
         }
     }
 
     if (launcher_find_exe(game_dir, game->exe_path, sizeof(game->exe_path))) {
+        struct stat st;
+        if (stat(game->exe_path, &st) != 0) return;
+        if (launcher_load_icon_cache(game, cache_path, game->exe_path, &st)) return;
+
         IconImage img;
         if (extract_icon_from_exe_pe(game->exe_path, &img)) {
-            bool ok = launcher_upload_icon(game, &img);
+            bool ok = launcher_upload_icon(game, &img, cache_path, game->exe_path, &st);
             IconImage_free(&img);
             if (ok) return;
         }
@@ -1110,6 +1395,167 @@ static void launcher_draw_bottom_panel(LauncherGfx *gfx, int selected, float t,
 // Settings screen (top + bottom)
 // ---------------------------------------------------------------------------
 
+static void launcher_vk_label(int vk, char *out, size_t size) {
+    if (vk == VK_NOKEY) { snprintf(out, size, "DISABLED"); return; }
+    if (vk == VK_ANYKEY) { snprintf(out, size, "ANYKEY"); return; }
+    if (vk >= 'A' && vk <= 'Z') { snprintf(out, size, "%c", (char)vk); return; }
+    if (vk >= '0' && vk <= '9') { snprintf(out, size, "%c", (char)vk); return; }
+    if (vk >= VK_F1 && vk <= VK_F12) { snprintf(out, size, "F%d", vk - VK_F1 + 1); return; }
+
+    switch (vk) {
+        case VK_BACKSPACE: snprintf(out, size, "BACKSPACE"); break;
+        case VK_TAB:       snprintf(out, size, "TAB"); break;
+        case VK_ENTER:     snprintf(out, size, "ENTER"); break;
+        case VK_SHIFT:     snprintf(out, size, "SHIFT"); break;
+        case VK_CONTROL:   snprintf(out, size, "CTRL"); break;
+        case VK_ALT:       snprintf(out, size, "ALT"); break;
+        case VK_ESCAPE:    snprintf(out, size, "ESC"); break;
+        case VK_SPACE:     snprintf(out, size, "SPACE"); break;
+        case VK_PAGEUP:    snprintf(out, size, "PAGEUP"); break;
+        case VK_PAGEDOWN:  snprintf(out, size, "PAGEDOWN"); break;
+        case VK_END:       snprintf(out, size, "END"); break;
+        case VK_HOME:      snprintf(out, size, "HOME"); break;
+        case VK_LEFT:      snprintf(out, size, "LEFT"); break;
+        case VK_UP:        snprintf(out, size, "UP"); break;
+        case VK_RIGHT:     snprintf(out, size, "RIGHT"); break;
+        case VK_DOWN:      snprintf(out, size, "DOWN"); break;
+        case VK_INSERT:    snprintf(out, size, "INSERT"); break;
+        case VK_DELETE:    snprintf(out, size, "DELETE"); break;
+        default:           snprintf(out, size, "VK%03d", vk & 255); break;
+    }
+}
+
+static void launcher_step_control_vk(LauncherControlMap *map, int idx, int delta) {
+    if (!map || idx < 0 || idx >= LAUNCHER_CONTROL_COUNT) return;
+    int vk = (int)map->vk[idx] + delta;
+    while (vk < 0) vk += GML_KEY_COUNT;
+    while (vk >= GML_KEY_COUNT) vk -= GML_KEY_COUNT;
+    map->vk[idx] = (uint8_t)vk;
+}
+
+static void controls_draw_top(LauncherGfx *gfx, const LauncherControlMap *map,
+                              int selected, const char *title, float t) {
+    const LauncherTheme *th = launcher_current_theme();
+    const float W = (float)LAUNCHER_TOP_W;
+    const int visible = 8;
+    int first = selected - visible / 2;
+    if (first < 0) first = 0;
+    if (first > LAUNCHER_CONTROL_COUNT - visible) first = LAUNCHER_CONTROL_COUNT - visible;
+    if (first < 0) first = 0;
+
+    launcher_bind_screen(gfx, &gfx->topScreen, true, 0x070914FF);
+    launcher_draw_themed_background(gfx, t, W, LAUNCHER_TOP_H, th);
+    launcher_draw_top_chrome(gfx, W, th, t, title ? title : "CONTROLS");
+
+    float listX = 34.f;
+    float listY = 42.f;
+    float rowH = 21.f;
+    char value[32];
+    char code[16];
+    for (int row = 0; row < visible; row++) {
+        int idx = first + row;
+        if (idx >= LAUNCHER_CONTROL_COUNT) break;
+        bool selRow = (idx == selected);
+        float y = listY + (float)row * rowH;
+        if (selRow) {
+            float breath = 0.5f + 0.5f * sinf(t * 3.0f);
+            launcher_rect(gfx, listX - 8, y - 3, W - listX * 2 + 16, rowH - 3,
+                          th->accent[0], th->accent[1], th->accent[2],
+                          0.18f + 0.10f * breath);
+            launcher_rect(gfx, listX - 8, y - 3, 4, rowH - 3,
+                          th->accent[0], th->accent[1], th->accent[2], 1.f);
+        }
+
+        launcher_vk_label(map->vk[idx], value, sizeof(value));
+        snprintf(code, sizeof(code), "%03u", (unsigned)map->vk[idx]);
+        launcher_draw_text_rgb(gfx, g_control_defs[idx].label, listX, y, 1.12f,
+                               selRow ? th->text_main : th->text_subtle, 1.f);
+        float vw = launcher_text_width(value, 1.12f);
+        launcher_draw_text_rgb(gfx, value, W - 78.f - vw, y, 1.12f,
+                               selRow ? th->text_title : th->text_main, 1.f);
+        launcher_draw_text_rgb(gfx, code, W - 54.f, y, 1.0f, th->text_subtle, 0.75f);
+    }
+
+    launcher_draw_centered_text_rgb(gfx, "A/START SAVE   B BACK   SELECT DEFAULTS",
+                                    W * 0.5f, 224.f, 0.95f, th->text_subtle, 0.95f);
+}
+
+static void controls_draw_bottom(LauncherGfx *gfx, const LauncherControlMap *map,
+                                 int selected, float t) {
+    if (!gfx->bottomScreen.ready) return;
+    const LauncherTheme *th = launcher_current_theme();
+    const float W = (float)LAUNCHER_BOT_W;
+    const float H = (float)LAUNCHER_BOT_H;
+    char vkName[32];
+    launcher_vk_label(map->vk[selected], vkName, sizeof(vkName));
+
+    launcher_bind_screen(gfx, &gfx->bottomScreen, true, 0x050711FF);
+    launcher_draw_themed_background(gfx, t * 0.7f, W, H, th);
+
+    launcher_rect(gfx, 0, 0, W, 22, 0.04f, 0.035f, 0.085f, 0.92f);
+    launcher_rect(gfx, 0, 22, W, 1,
+                  th->accent[0], th->accent[1], th->accent[2], 0.85f);
+    launcher_draw_text_rgb(gfx, "VK REMAP", 10, 7, 1.20f, th->text_title, 1.f);
+
+    launcher_draw_centered_text_rgb(gfx, g_control_defs[selected].label,
+                                    W * 0.5f, 62.f, 1.65f, th->text_main, 1.f);
+    launcher_draw_centered_text_rgb(gfx, vkName, W * 0.5f, 96.f,
+                                    1.95f, th->text_title, 1.f);
+
+    char code[32];
+    snprintf(code, sizeof(code), "VK CODE %03u", (unsigned)map->vk[selected]);
+    launcher_draw_centered_text_rgb(gfx, code, W * 0.5f, 126.f,
+                                    1.10f, th->text_subtle, 0.92f);
+
+    launcher_rect(gfx, 0, H - 30, W, 30, 0.030f, 0.028f, 0.065f, 0.93f);
+    launcher_draw_text_rgb(gfx, "DPAD: MOVE   L/R: +/-1", 8, H - 23, 0.95f, th->text_main, 0.95f);
+    launcher_draw_text_rgb(gfx, "X/Y: +/-10   000 DISABLES", 8, H - 12, 0.95f, th->text_subtle, 0.85f);
+}
+
+static bool launcher_run_control_mapper(LauncherGfx *gfx, LauncherControlMap *target,
+                                        const char *title) {
+    if (!target) return false;
+    LauncherControlMap draft = *target;
+    launcher_normalize_control_map(&draft);
+    int selected = 0;
+
+    while (aptMainLoop()) {
+        hidScanInput();
+        u32 kDown = hidKeysDown();
+
+        if (kDown & KEY_B) return false;
+        if (kDown & (KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN)) {
+            selected = (selected + 1) % LAUNCHER_CONTROL_COUNT;
+        }
+        if (kDown & (KEY_UP | KEY_DUP | KEY_CPAD_UP)) {
+            selected = (selected - 1 + LAUNCHER_CONTROL_COUNT) % LAUNCHER_CONTROL_COUNT;
+        }
+        if (kDown & (KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT | KEY_R)) {
+            launcher_step_control_vk(&draft, selected, +1);
+        }
+        if (kDown & (KEY_LEFT | KEY_DLEFT | KEY_CPAD_LEFT | KEY_L)) {
+            launcher_step_control_vk(&draft, selected, -1);
+        }
+        if (kDown & KEY_X) launcher_step_control_vk(&draft, selected, +10);
+        if (kDown & KEY_Y) launcher_step_control_vk(&draft, selected, -10);
+        if (kDown & KEY_SELECT) launcher_reset_control_map(&draft);
+        if (kDown & (KEY_A | KEY_START)) {
+            *target = draft;
+            launcher_normalize_control_map(target);
+            return true;
+        }
+
+        if (gfx && gfx->ready && launcher_begin_frame(gfx)) {
+            float now = launcher_anim_seconds();
+            controls_draw_top(gfx, &draft, selected, title, now);
+            controls_draw_bottom(gfx, &draft, selected, now);
+            launcher_end_frame(gfx);
+        }
+        gspWaitForVBlank();
+    }
+    return false;
+}
+
 typedef struct {
     int          theme_index;
     LauncherGameScreen game_screen;
@@ -1118,7 +1564,7 @@ typedef struct {
     LauncherBackdropMode backdrop_mode;
 } LauncherSettingsDraft;
 
-#define SETTINGS_OPTION_COUNT 5
+#define SETTINGS_OPTION_COUNT 6
 
 static const char *settings_option_label(int idx) {
     switch (idx) {
@@ -1127,6 +1573,7 @@ static const char *settings_option_label(int idx) {
         case 2: return "EMPTY SPACE";
         case 3: return "SIDE PARTICLES";
         case 4: return "SIDE BLUR";
+        case 5: return "GLOBAL CONTROLS";
         default: return "?";
     }
 }
@@ -1147,6 +1594,9 @@ static void settings_option_value(const LauncherSettingsDraft *d, int idx, char 
             break;
         case 4:
             snprintf(out, size, "< %s >", d->show_side_blur ? "ON" : "OFF");
+            break;
+        case 5:
+            snprintf(out, size, "PRESS A");
             break;
         default:
             snprintf(out, size, "?");
@@ -1176,6 +1626,8 @@ static void settings_option_step(LauncherSettingsDraft *d, int idx, int dir) {
             break;
         case 4:
             d->show_side_blur = !d->show_side_blur;
+            break;
+        case 5:
             break;
         default: break;
     }
@@ -1213,7 +1665,7 @@ static void settings_draw_top(LauncherGfx *gfx, const LauncherSettingsDraft *d, 
                                selRow ? th->text_title : th->text_main, 1.f);
     }
 
-    launcher_draw_centered_text_rgb(gfx, "B = BACK   A = SAVE   START = APPLY",
+    launcher_draw_centered_text_rgb(gfx, "A EDIT/SAVE   B BACK   START APPLY",
                                     W * 0.5f, 224.f, 1.05f, th->text_subtle, 0.95f);
 }
 
@@ -1259,7 +1711,7 @@ static void settings_draw_bottom(LauncherGfx *gfx, const LauncherSettingsDraft *
     launcher_draw_text_rgb(gfx, buf, 16.f, sy + sw + 70.f, 1.00f, th->text_subtle, 0.80f);
 
     launcher_rect(gfx, 0, H - 22, W, 22, 0.030f, 0.028f, 0.065f, 0.93f);
-    launcher_draw_text_rgb(gfx, "DPAD: NAVIGATE  L/R: CHANGE  A: SAVE", 6, H - 17, 0.95f, th->text_main, 1.f);
+    launcher_draw_text_rgb(gfx, "DPAD: NAVIGATE  L/R: CHANGE  A: EDIT/SAVE", 6, H - 17, 0.95f, th->text_main, 1.f);
     launcher_draw_text_rgb(gfx, "B: CANCEL  Y: RESET DEFAULTS",         6, H - 9,  0.95f, th->text_subtle, 0.85f);
 }
 
@@ -1297,7 +1749,13 @@ static bool launcher_run_settings(LauncherGfx *gfx) {
             draft.show_side_blur = 1;
             draft.backdrop_mode = LAUNCHER_BACKDROP_GRADIENT;
         }
-        if (kDown & (KEY_A | KEY_START)) {
+        if ((kDown & KEY_A) && sel == 5) {
+            if (launcher_run_control_mapper(gfx, &g_settings.global_controls, "GLOBAL CONTROLS")) {
+                launcher_save_settings();
+            }
+            continue;
+        }
+        if ((kDown & KEY_START) || ((kDown & KEY_A) && sel != 5)) {
             g_settings.theme_index = draft.theme_index;
             g_settings.game_screen = draft.game_screen;
             g_settings.show_side_particles = draft.show_side_particles;
@@ -1504,7 +1962,7 @@ void launcher_render_loading(LauncherGfx *gfx, const char *gameName, const char 
 // In-game pause overlay
 // ---------------------------------------------------------------------------
 
-#define PAUSE_OPTION_COUNT 7
+#define PAUSE_OPTION_COUNT 8
 
 static const char *pause_option_label(int idx) {
     switch (idx) {
@@ -1514,7 +1972,8 @@ static const char *pause_option_label(int idx) {
         case 3: return "EMPTY SPACE";
         case 4: return "SIDE PARTICLES";
         case 5: return "SIDE BLUR";
-        case 6: return "QUIT TO LAUNCHER";
+        case 6: return "GAME CONTROLS";
+        case 7: return "QUIT TO LAUNCHER";
         default: return "?";
     }
 }
@@ -1541,6 +2000,9 @@ static void pause_option_value(int idx, char *out, size_t size) {
             snprintf(out, size, "< %s >", g_settings.show_side_blur ? "ON" : "OFF");
             break;
         case 6:
+            snprintf(out, size, "PRESS A");
+            break;
+        case 7:
             snprintf(out, size, "PRESS A");
             break;
         default:
@@ -1577,6 +2039,8 @@ static bool pause_option_step(int idx, int dir) {
             g_settings.show_side_blur = !g_settings.show_side_blur;
             launcher_push_theme_to_renderer();
             return true;
+        case 6:
+            return false;
         default:
             return false;
     }
@@ -1672,6 +2136,11 @@ LauncherPauseAction launcher_run_pause(LauncherGfx *gfx) {
                 launcher_save_settings();
                 return LAUNCHER_PAUSE_RESUME;
             } else if (sel == 6) {
+                if (launcher_run_control_mapper(gfx, &g_active_controls, "GAME CONTROLS")) {
+                    launcher_save_active_controls();
+                }
+                continue;
+            } else if (sel == 7) {
                 launcher_save_settings();
                 return LAUNCHER_PAUSE_QUIT_TO_LAUNCHER;
             } else {

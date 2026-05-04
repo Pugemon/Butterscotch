@@ -34,11 +34,6 @@ shaderProgram_s  g_shaderProg;
 char  g_next_game_path[256] = "";
 bool  g_game_change_requested = false;
 
-static void map_key(RunnerKeyboardState *kb, u32 down, u32 up, u32 held, u32 mask, int gml) {
-    if (down & mask)             RunnerKeyboard_onKeyDown(kb, gml);
-    else if ((up & mask) && !(held & mask)) RunnerKeyboard_onKeyUp(kb, gml);
-}
-
 static void setup_logging(void) {
     freopen("sdmc:/3ds/butter_out.txt", "w", stdout);
     freopen("sdmc:/3ds/butter_err.txt", "w", stderr);
@@ -162,6 +157,7 @@ int main(int argc, char **argv) {
         display_name = display_name ? display_name + 1 : base_game_dir;
         printf("Loading %s...\n", display_name);
 
+        launcher_load_active_controls(g_current_data_path);
         launcher_free_game_icons();
 
         if (gfx_ready) launcher_render_loading(&gfx, display_name, "PREPARING", 0, 0, 2.f);
@@ -220,7 +216,7 @@ int main(int argc, char **argv) {
             .spanPercent = 99.f - fullBase
         };
         DataWinParserOptions full_opt = {
-            .parseGen8=1, .parseOptn=1, .parseLang=1, .parseExtn=1, .parseSond=1,
+            .parseGen8=1, .parseOptn=1, .parseLang=1, .parseExtn=0, .parseSond=1,
             .parseAgrp=1, .parseSprt=1, .parseBgnd=1, .parsePath=1, .parseScpt=1,
             .parseGlob=1, .parseShdr=1, .parseFont=1, .parseTmln=1, .parseObjt=1,
             .parseRoom=1, .parseTpag=1, .parseCode=1, .parseVari=1, .parseFunc=1,
@@ -228,7 +224,7 @@ int main(int argc, char **argv) {
             .skipLoadingPreciseMasksForNonPreciseSprites=1,
             .skipTextureBlobData=cached, .skipAudioBlobData=1,
 
-            .lazyLoadRooms=0,
+            .lazyLoadRooms=1,
             .codeCachePath=code_cache_path,
             .progressCallback = gfx_ready ? datawin_progress_cb : NULL,
             .progressCallbackUserData = &fullParseState
@@ -305,17 +301,7 @@ int main(int argc, char **argv) {
             }
 
             RunnerKeyboard_beginFrame(run->keyboard);
-            map_key(run->keyboard, d, u, h, KEY_CPAD_UP    | KEY_DUP,    VK_UP);
-            map_key(run->keyboard, d, u, h, KEY_CPAD_DOWN  | KEY_DDOWN,  VK_DOWN);
-            map_key(run->keyboard, d, u, h, KEY_CPAD_LEFT  | KEY_DLEFT,  VK_LEFT);
-            map_key(run->keyboard, d, u, h, KEY_CPAD_RIGHT | KEY_DRIGHT, VK_RIGHT);
-            map_key(run->keyboard, d, u, h, KEY_A,          'Z');
-            map_key(run->keyboard, d, u, h, KEY_B,          'X');
-            map_key(run->keyboard, d, u, h, KEY_X,          'C');
-            map_key(run->keyboard, d, u, h, KEY_Y,          VK_SHIFT);
-            map_key(run->keyboard, d, u, h, KEY_L,          VK_ENTER);
-            map_key(run->keyboard, d, u, h, KEY_R,          VK_SPACE);
-            //map_key(run->keyboard, d, u, h, KEY_SELECT,     VK_ESCAPE);
+            launcher_apply_3ds_input(run->keyboard, d, u, h);
 
             Runner_step(run);
             if (run->audioSystem)

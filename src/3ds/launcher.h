@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "data_win.h"
+#include "runner_keyboard.h"
 
 #define LAUNCHER_TOP_W   400
 #define LAUNCHER_TOP_H   240
@@ -41,6 +42,42 @@ typedef enum {
     LAUNCHER_BACKDROP_STRETCH,
 } LauncherBackdropMode;
 
+typedef enum {
+    LAUNCHER_CONTROL_CPAD_UP = 0,
+    LAUNCHER_CONTROL_CPAD_DOWN,
+    LAUNCHER_CONTROL_CPAD_LEFT,
+    LAUNCHER_CONTROL_CPAD_RIGHT,
+    LAUNCHER_CONTROL_DPAD_UP,
+    LAUNCHER_CONTROL_DPAD_DOWN,
+    LAUNCHER_CONTROL_DPAD_LEFT,
+    LAUNCHER_CONTROL_DPAD_RIGHT,
+    LAUNCHER_CONTROL_A,
+    LAUNCHER_CONTROL_B,
+    LAUNCHER_CONTROL_X,
+    LAUNCHER_CONTROL_Y,
+    LAUNCHER_CONTROL_L,
+    LAUNCHER_CONTROL_R,
+    LAUNCHER_CONTROL_ZL,
+    LAUNCHER_CONTROL_ZR,
+    LAUNCHER_CONTROL_START,
+    LAUNCHER_CONTROL_SELECT,
+    LAUNCHER_CONTROL_CSTICK_UP,
+    LAUNCHER_CONTROL_CSTICK_DOWN,
+    LAUNCHER_CONTROL_CSTICK_LEFT,
+    LAUNCHER_CONTROL_CSTICK_RIGHT,
+    LAUNCHER_CONTROL_COUNT
+} LauncherControl;
+
+#define LAUNCHER_CONTROL_MAP_MAGIC   0x4D545243u // 'CRTM'
+#define LAUNCHER_CONTROL_MAP_VERSION 1u
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint8_t  vk[LAUNCHER_CONTROL_COUNT];
+    uint8_t  _reserved[42];
+} LauncherControlMap;
+
 typedef struct {
     char  id[12];
     char  display[20];
@@ -69,7 +106,7 @@ typedef struct {
     float side_particle_alpha;
 } LauncherTheme;
 
-#define LAUNCHER_SETTINGS_VERSION 2u
+#define LAUNCHER_SETTINGS_VERSION 3u
 
 typedef struct {
     uint32_t           magic;
@@ -80,6 +117,7 @@ typedef struct {
     int                show_side_blur;
     LauncherBackdropMode backdrop_mode;
     int                _reserved[7];
+    LauncherControlMap global_controls;
 } LauncherSettings;
 
 typedef struct {
@@ -128,10 +166,15 @@ const LauncherTheme *launcher_theme_at(int index);
 int                  launcher_theme_count(void);
 const LauncherTheme *launcher_current_theme(void);
 const LauncherSettings *launcher_get_settings(void);
+const LauncherControlMap *launcher_get_global_controls(void);
+const LauncherControlMap *launcher_get_active_controls(void);
 void                 launcher_apply_theme_index(int index);
 void                 launcher_apply_settings(const LauncherSettings *s);
 void                 launcher_save_settings(void);
 void                 launcher_load_settings(void);
+void                 launcher_load_active_controls(const char *data_win_path);
+void                 launcher_save_active_controls(void);
+void                 launcher_apply_3ds_input(RunnerKeyboardState *kb, u32 down, u32 up, u32 held);
 
 // ---- Library bootstrap ------------------------------------------------------
 

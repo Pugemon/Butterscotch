@@ -373,7 +373,20 @@ static void parseLANG(BinaryReader* reader, DataWin* dw) {
 }
 
 static void parseEXTN(BinaryReader* reader, DataWin* dw) {
-    // TODO: Update EXTN parser because it is broken for newer GM:S 2 versions
+    // EXTN layout (UndertaleModTool reference):
+    //   PointerList<Extension>
+    //     Extension: folderName, name, className,
+    //                SimpleList<File> files
+    //                  File: filename, cleanupScript, initScript, kind,
+    //                        SimpleList<Function> functions
+    //                          Function: name, id, kind, retType, extName,
+    //                                    SimpleList<uint32> arguments
+    //   ProductIdData: 16 bytes per extension when bytecodeVersion >= 14 (skipped — dispatcher
+    //   restores the file position to chunkEnd after we're done).
+    //
+    // Earlier revisions of this parser read files/functions/arguments as PointerLists, which
+    // over-consumed bytes once any extension actually had files (e.g. DELTARUNE Steamworks),
+    // crashing on the buffer boundary.
     Extn* e = &dw->extn;
 
     uint32_t extCount;
@@ -383,6 +396,7 @@ static void parseEXTN(BinaryReader* reader, DataWin* dw) {
     if (extCount == 0) { free(extPtrs); e->extensions = nullptr; return; }
 
     e->extensions = safeMalloc(extCount * sizeof(Extension));
+    memset(e->extensions, 0, extCount * sizeof(Extension));
     repeat(extCount, i) {
         BinaryReader_seek(reader, extPtrs[i]);
         Extension* ext = &e->extensions[i];
@@ -390,38 +404,36 @@ static void parseEXTN(BinaryReader* reader, DataWin* dw) {
         ext->name = readStringPtr(reader, dw);
         ext->className = readStringPtr(reader, dw);
 
-        // Files PointerList
-        uint32_t fileCount;
-        uint32_t* filePtrs = readPointerTable(reader, &fileCount);
+        // Files: SimpleList (count followed by inline structs — NOT a pointer list)
+        uint32_t fileCount = BinaryReader_readUint32(reader);
         ext->fileCount = fileCount;
 
         if (fileCount > 0) {
             ext->files = safeMalloc(fileCount * sizeof(ExtensionFile));
+            memset(ext->files, 0, fileCount * sizeof(ExtensionFile));
             repeat(fileCount, j) {
-                BinaryReader_seek(reader, filePtrs[j]);
                 ExtensionFile* file = &ext->files[j];
-                file->filename = readStringPtr(reader, dw);
+                file->filename      = readStringPtr(reader, dw);
                 file->cleanupScript = readStringPtr(reader, dw);
-                file->initScript = readStringPtr(reader, dw);
-                file->kind = BinaryReader_readUint32(reader);
+                file->initScript    = readStringPtr(reader, dw);
+                file->kind          = BinaryReader_readUint32(reader);
 
-                // Functions PointerList
-                uint32_t funcCount;
-                uint32_t* funcPtrs = readPointerTable(reader, &funcCount);
+                // Functions: SimpleList
+                uint32_t funcCount = BinaryReader_readUint32(reader);
                 file->functionCount = funcCount;
 
                 if (funcCount > 0) {
                     file->functions = safeMalloc(funcCount * sizeof(ExtensionFunction));
+                    memset(file->functions, 0, funcCount * sizeof(ExtensionFunction));
                     repeat(funcCount, k) {
-                        BinaryReader_seek(reader, funcPtrs[k]);
                         ExtensionFunction* func = &file->functions[k];
-                        func->name = readStringPtr(reader, dw);
-                        func->id = BinaryReader_readUint32(reader);
-                        func->kind = BinaryReader_readUint32(reader);
+                        func->name    = readStringPtr(reader, dw);
+                        func->id      = BinaryReader_readUint32(reader);
+                        func->kind    = BinaryReader_readUint32(reader);
                         func->retType = BinaryReader_readUint32(reader);
                         func->extName = readStringPtr(reader, dw);
 
-                        // Arguments SimpleList
+                        // Arguments: SimpleList<uint32>
                         func->argumentCount = BinaryReader_readUint32(reader);
                         if (func->argumentCount > 0) {
                             func->arguments = safeMalloc(func->argumentCount * sizeof(uint32_t));
@@ -435,17 +447,12 @@ static void parseEXTN(BinaryReader* reader, DataWin* dw) {
                 } else {
                     file->functions = nullptr;
                 }
-                free(funcPtrs);
             }
         } else {
             ext->files = nullptr;
         }
-        free(filePtrs);
     }
     free(extPtrs);
-
-    // Product ID data (16 bytes per extension, bytecodeVersion >= 14)
-    // Skipped -- we seek to chunkEnd after parsing
 }
 
 static void parseSOND(BinaryReader* reader, DataWin* dw) {
@@ -1454,6 +1461,70 @@ static void parseROOM(BinaryReader* reader, DataWin* dw, bool lazyLoadRooms, Str
         }
     }
 
+    // Detect whether Layer headers include EffectEnabled/EffectType/EffectProperties
+    // fields (added in GMS 2022.1). Some games ship these records while still
+    // reporting a 2.3.x runtime version; DELTARUNE is one of the practical cases.
+    if (DataWin_isVersionAtLeast(dw, 2, 3, 0, 0) && !DataWin_isVersionAtLeast(dw, 2022, 1, 0, 0)) {
+        repeat(count, i) {
+            BinaryReader_seek(reader, ptrs[i]);
+            // Room header before layersPtr: 22 uint32s (name..metersPerPixel).
+            BinaryReader_skip(reader, 22 * 4);
+            uint32_t layersPtr = BinaryReader_readUint32(reader);
+            uint32_t seqnPtr = BinaryReader_readUint32(reader);
+            BinaryReader_seek(reader, layersPtr);
+            uint32_t layerCount = BinaryReader_readUint32(reader);
+            if (layerCount == 0) continue;
+            uint32_t jumpOffset = BinaryReader_readUint32(reader);
+            uint32_t nextOffset = (layerCount == 1) ? seqnPtr : BinaryReader_readUint32(reader);
+
+            BinaryReader_seek(reader, jumpOffset + 8);
+            uint32_t layerType = BinaryReader_readUint32(reader);
+            if (layerType == RoomLayerType_Path || layerType == RoomLayerType_Path2) continue;
+
+            bool detected = false;
+            switch (layerType) {
+                case RoomLayerType_Background: {
+                    size_t absPos = BinaryReader_getPosition(reader);
+                    if (nextOffset - absPos > 16 * 4) detected = true;
+                    break;
+                }
+                case RoomLayerType_Instances: {
+                    BinaryReader_skip(reader, 6 * 4);
+                    uint32_t instanceCount = BinaryReader_readUint32(reader);
+                    size_t absPos = BinaryReader_getPosition(reader);
+                    if (nextOffset - absPos != instanceCount * 4) detected = true;
+                    break;
+                }
+                case RoomLayerType_Assets: {
+                    BinaryReader_skip(reader, 6 * 4);
+                    uint32_t tileOffset = BinaryReader_readUint32(reader);
+                    size_t absPos = BinaryReader_getPosition(reader);
+                    if (tileOffset != absPos + 8 && tileOffset != absPos + 12) detected = true;
+                    break;
+                }
+                case RoomLayerType_Tiles: {
+                    BinaryReader_skip(reader, 7 * 4);
+                    uint32_t tileMapWidth = BinaryReader_readUint32(reader);
+                    uint32_t tileMapHeight = BinaryReader_readUint32(reader);
+                    size_t absPos = BinaryReader_getPosition(reader);
+                    if (nextOffset - absPos != tileMapWidth * tileMapHeight * 4) detected = true;
+                    break;
+                }
+                case RoomLayerType_Effect: {
+                    BinaryReader_skip(reader, 7 * 4);
+                    uint32_t propertyCount = BinaryReader_readUint32(reader);
+                    size_t absPos = BinaryReader_getPosition(reader);
+                    if (nextOffset - absPos != propertyCount * 3 * 4) detected = true;
+                    break;
+                }
+                default:
+                    break;
+            }
+            if (detected) DataWin_bumpVersionTo(dw, 2022, 1, 0, 0);
+            break;
+        }
+    }
+
     rc->rooms = safeCalloc(count, sizeof(Room));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
@@ -2165,6 +2236,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
                 exit(1);
             }
             BinaryReader_setBuffer(&reader, chunkBuffer, chunkDataStart, chunkLength);
+            BinaryReader_setBufferContext(&reader, chunkName);
         }
 
         if (options.parseGen8 && memcmp(chunkName, "GEN8", 4) == 0) {
