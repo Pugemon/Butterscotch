@@ -20,9 +20,9 @@
 #include "render2d_shader_shbin.h"
 #include "launcher.h"
 
-u32 __ctru_heap_size        = 30 * 1024 * 1024;
-u32 __ctru_linear_heap_size = 30 * 1024 * 1024;
-u32 __stacksize__           = 64 * 1024;
+//u32 __ctru_heap_size        = 35 * 1024 * 1024;
+u32 __ctru_linear_heap_size = 48 * 1024 * 1024;
+//u32 __stacksize__           = 64 * 1024;
 
 #define BASE_DIR  "sdmc:/3ds/butterscotch"
 char g_current_data_path[256];
@@ -94,6 +94,7 @@ int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
     setup_logging();
+    printMemoryStats();
     cfguInit();
     gfxInitDefault();
     gfxSet3D(false);

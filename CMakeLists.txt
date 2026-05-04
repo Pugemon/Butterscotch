@@ -471,7 +471,82 @@ elseif(PLATFORM STREQUAL "3ds")
             -Wl,--gc-sections
     )
 
+    #add_custom_target()
+
     ctr_create_3dsx(butterscotch)
+
+    set(APP_TITLE "Butterscotch")
+    set(APP_DESCRIPTION "GMS1.4 runner for 3DS")
+    set(APP_AUTHOR "efimandreev0, Pugemon0")
+    set(APP_PRODUCT_CODE "CTR-P-BTRS")
+    set(APP_UNIQUE_ID "0xEFADR")
+    set(APP_VERSION_MAJOR "0")
+    set(APP_VERSION_MINOR "1")
+    set(APP_VERSION_MICRO "0")
+
+    set(APP_RSF "${CMAKE_SOURCE_DIR}/3ds/template.rsf")
+    set(APP_ICON "${CMAKE_SOURCE_DIR}/3ds/icon.png")
+    set(BANNER_IMAGE "${CMAKE_SOURCE_DIR}/3ds/banner.png")
+    set(BANNER_AUDIO "${CMAKE_SOURCE_DIR}/3ds/audio_silent.wav")
+
+    find_program(BANNERTOOL NAMES bannertool HINTS "$ENV{DEVKITPRO}/tools/bin")
+    find_program(MAKEROM NAMES makerom HINTS "$ENV{DEVKITPRO}/tools/bin")
+
+    if(BANNERTOOL AND MAKEROM)
+        add_custom_command(
+                OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.smdh"
+                COMMAND ${BANNERTOOL} makesmdh
+                -s "${APP_TITLE}"
+                -l "${APP_DESCRIPTION}"
+                -p "${APP_AUTHOR}"
+                -i "${APP_ICON}"
+                -o "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.smdh" > /dev/null
+                DEPENDS "${APP_ICON}"
+                COMMENT "Building SMDH icon..."
+        )
+
+        add_custom_command(
+                OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.bnr"
+                COMMAND ${BANNERTOOL} makebanner
+                -i "${BANNER_IMAGE}"
+                -a "${BANNER_AUDIO}"
+                -o "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.bnr" > /dev/null
+                DEPENDS "${BANNER_IMAGE}" "${BANNER_AUDIO}"
+                COMMENT "Building Banner..."
+        )
+
+        add_custom_command(
+                OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.cia"
+                COMMAND ${MAKEROM} -f cia -o "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.cia"
+                -DAPP_ENCRYPTED=false
+                -rsf "${APP_RSF}"
+                -target t
+                -exefslogo
+                -elf "$<TARGET_FILE:butterscotch>"
+                -icon "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.smdh"
+                -banner "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.bnr"
+                -DAPP_TITLE="${APP_TITLE}"
+                -DAPP_PRODUCT_CODE="${APP_PRODUCT_CODE}"
+                -DAPP_UNIQUE_ID="${APP_UNIQUE_ID}"
+                -DAPP_SYSTEM_MODE="96MB"
+                -DAPP_SYSTEM_MODE_EXT="124MB"
+                -major "${APP_VERSION_MAJOR}"
+                -minor "${APP_VERSION_MINOR}"
+                -micro "${APP_VERSION_MICRO}"
+                DEPENDS butterscotch
+                "${APP_RSF}"
+                "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.smdh"
+                "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.bnr"
+                COMMENT "Building butterscotch.cia..."
+        )
+
+        add_custom_target(butterscotch_cia
+                DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.cia"
+        )
+
+    else()
+        message(WARNING "bannertool or makerom not found in devkitPro/tools/bin! CIA generation target is disabled.")
+    endif()
 else()
     message(FATAL_ERROR "Unknown platform! ${PLATFORM}")
 endif()
