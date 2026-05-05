@@ -5,6 +5,45 @@
 <a href="https://discord.gg/2gQR7t3WJR"><img src="https://img.shields.io/discord/1406856655920168971?color=5865F2&logo=discord&logoColor=white&label=discord"></a>
 </p>
 
+## Running on Nintendo 3DS
+
+First, install the provided `.cia` file on your console (using FBI or your preferred installer).
+
+Next, you'll need to copy your game files to your SD card into the following directory:
+`sdmc:/3ds/butterscotch/undertale/`
+
+> **Note:** If you want the game's icon to actually show up in the launcher, just drop the original game's `.exe` file into that same folder alongside the other files. The runner will automatically extract the icon from it!
+
+### Launcher features
+
+The 3DS build ships with a built-in launcher that scans `sdmc:/3ds/butterscotch` for installed games and lets you tweak how they run. Press **Select** on the grid to open settings, **Start** while in-game to bring up the pause menu.
+
+* **Themes** — 5 colour palettes that retint the whole launcher UI (background gradient, particles, accents, text). Choices: `BUTTERSCOTCH`, `MIDNIGHT`, `FOREST`, `ROSE`, `CARBON`.
+* **Game screen** — render the game on the **top** or **bottom** screen. The other screen automatically shows the same backdrop / letterbox.
+* **Empty space (backdrop mode)** — what fills the screen around a non-fullscreen game:
+  * `GRADIENT` — themed gradient.
+  * `BLUR` — blurred, scaled-up copy of the game itself (looks great on rooms with a strong palette).
+  * `BLACK` — plain black bars.
+  * `STRETCH` — no letterbox, the game is stretched to fit (breaks aspect ratio).
+* **Side particles / Side blur** — toggle the animated particles and blur effect drawn on top of the backdrop.
+* **OS type** — overrides the value GMS sees from `os_type`. Some games branch on this (e.g. Undertale's Xbox edition needs `xboxone`); leave on `WINDOWS` for the default Steam build.
+* **Input mode** — `KEYBOARD` / `GAMEPAD` / `TOUCH`. Picks which device the runtime exposes to the game; useful for games that hard-code one input style.
+* **Global controls** — remap the buttons used by every game (D-Pad, A/B/X/Y, L/R, Start, Select).
+* **Per-game controls** — open the pause menu while the game is running to remap controls for that game only, without touching the global mapping.
+* **Settings persistence** — everything saves to `sdmc:/3ds/butterscotch/launcher_settings.bin` and is reloaded on next boot. Press **Y** in the settings menu to restore defaults.
+
+### Preprocessing (`ctr-cache-preprocess`)
+For the game to run on the 3DS hardware, the files need to be preprocessed. You have two ways to do this:
+
+1. **Preprocess on your PC (Recommended):** Use the `ctr-cache-preprocess` tool included in the release to process the game files *before* moving them to your SD card. This is way faster. You can also build it from source — see [Building Butterscotch](#building-butterscotch).
+2. **Preprocess on the 3DS at first boot (Slow):** If you just put the raw, unprocessed game files on your SD card, the console will handle the preprocessing itself the first time you launch the game. **Be patient!** This takes a really long time, so don't panic if it looks stuck—just let it do its thing.
+
+### Current Playability Status
+Here is what we've tested on actual 3DS hardware so far:
+* **Undertale:** Fully playable. A complete True Pacifist route has been tested and beaten from start to finish.
+* **Deltarune:** Chapters 1, 2, and 3 have been successfully tested to boot. Chapter 4 also booting, but isn't working.
+* **WARNING:** Mods can don't work on Butterscotch-3DS.
+
 > [!IMPORTANT]  
 > Butterscotch is still VERY early in development and it is NOT that good yet.
 
@@ -26,7 +65,6 @@ While our target is Undertale v1.08, that doesn't mean that other games CAN'T ru
 
 Here are the Bytecode Versions that Butterscotch supports
 
-* Bytecode Version 15
 * Bytecode Version 16
 * Bytecode Version 17
 
@@ -43,6 +81,7 @@ Of course, there are exceptions that break game compatibility altogether:
 * macOS (GLFW, OpenGL)
 * Windows (GLFW, OpenGL, MinGW)
 * PlayStation 2 (ps2sdk, gsKit)
+* Nintendo 3DS (devkitPro, citro3d)
 * Haiku (GLFW)
 * ...and maybe more in the future!
 
@@ -62,6 +101,12 @@ make
 If you are using CLion, set the platform in `Settings` > `Build, Execution, Deployment` > `CMake` and add `-DPLATFORM=glfw`
 
 Then run Butterscotch with `./butterscotch /path/to/data.win`!
+
+### Other targets
+
+* **Nintendo 3DS:** requires [devkitPro](https://devkitpro.org/) with the `3ds-dev` group installed. With `DEVKITPRO` exported, run `cmake -DPLATFORM=3ds ..` and `make` — the build produces a `.3dsx`/`.cia` you can install via FBI.
+* **PlayStation 2:** `cmake -DPLATFORM=ps2 ..` (needs `ps2sdk` and `gsKit`).
+* **`ctr-cache-preprocess` (PC tool):** `cmake -DPLATFORM=ctr-cache-tool ..` builds the standalone preprocessor used to bake textures for the 3DS target before copying the game to your SD card.
 
 ## CLI parameters
 
