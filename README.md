@@ -16,7 +16,7 @@ Next, you'll need to copy your game files to your SD card into the following dir
 
 ### Launcher features
 
-The 3DS build ships with a built-in launcher that scans `sdmc:/3ds/butterscotch` for installed games and lets you tweak how they run. Press **Select** on the grid to open settings, **Start** while in-game to bring up the pause menu.
+The 3DS build ships with a built-in launcher that scans `sdmc:/3ds/butterscotch` for installed games and lets you tweak how they run. Press **Select** on the grid to open settings, **L + R + A** while in-game to bring up the pause menu.
 
 * **Themes** — 5 colour palettes that retint the whole launcher UI (background gradient, particles, accents, text). Choices: `BUTTERSCOTCH`, `MIDNIGHT`, `FOREST`, `ROSE`, `CARBON`.
 * **Game screen** — render the game on the **top** or **bottom** screen. The other screen automatically shows the same backdrop / letterbox.
