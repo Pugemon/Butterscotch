@@ -18,6 +18,14 @@
 // Maximum number of local variables per code entry (stack-allocated arrays in VM_executeCode/VM_callCodeIndex)
 #define MAX_CODE_LOCALS 128
 
+// Resolve-miss diagnostics: noisy when GML reads/writes <object>.var with no instance present
+// (valid GMS semantics, returns 0/undefined). Off by default - enable for debugging.
+#ifdef ENABLE_VM_RESOLVE_LOGS
+#define VM_RESOLVE_LOG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define VM_RESOLVE_LOG(...) ((void)0)
+#endif
+
 // ===[ Stack Operations ]===
 
 #ifdef ENABLE_VM_TRACING
@@ -614,10 +622,12 @@ static RValue resolveVariableRead(VMContext* ctx, int32_t instanceType, uint32_t
             const char* varTypeName = varTypeToString((varRef >> 24) & 0xF8);
             if (instanceType < 100000 && (uint32_t) instanceType < ctx->dataWin->objt.count) {
                 GameObject* gameObject = &ctx->dataWin->objt.objects[instanceType];
-                fprintf(stderr, "VM: [%s] READ var '%s' on object index %d (%s) but no instance found (varType=%s, isArray=%s, originalInstanceType=%d, hasInstanceType=%s, varID=%d)\n", ctx->currentCodeName, varDef->name, instanceType, gameObject->name, varTypeName, access.isArray ? "true" : "false", originalInstanceType, access.hasInstanceType ? "true" : "false", varDef->varID);
+                VM_RESOLVE_LOG("VM: [%s] READ var '%s' on object index %d (%s) but no instance found (varType=%s, isArray=%s, originalInstanceType=%d, hasInstanceType=%s, varID=%d)\n", ctx->currentCodeName, varDef->name, instanceType, gameObject->name, varTypeName, access.isArray ? "true" : "false", originalInstanceType, access.hasInstanceType ? "true" : "false", varDef->varID);
+                (void) gameObject;
             } else {
-                fprintf(stderr, "VM: [%s] READ var '%s' on instance %d but no instance found (varType=%s, isArray=%s, originalInstanceType=%d, hasInstanceType=%s, varID=%d)\n", ctx->currentCodeName, varDef->name, instanceType, varTypeName, access.isArray ? "true" : "false", originalInstanceType, access.hasInstanceType ? "true" : "false", varDef->varID);
+                VM_RESOLVE_LOG("VM: [%s] READ var '%s' on instance %d but no instance found (varType=%s, isArray=%s, originalInstanceType=%d, hasInstanceType=%s, varID=%d)\n", ctx->currentCodeName, varDef->name, instanceType, varTypeName, access.isArray ? "true" : "false", originalInstanceType, access.hasInstanceType ? "true" : "false", varDef->varID);
             }
+            (void) varTypeName;
             return RValue_makeReal(0.0);
         }
     } else if (instanceType == INSTANCE_OTHER) {
@@ -945,10 +955,12 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
         Runner_popInstanceSnapshot(runner, snapBase);
         if (!found) {
             if (ctx->dataWin->objt.count > (uint32_t) instanceType) {
+#ifdef ENABLE_VM_RESOLVE_LOGS
                 GameObject* gameObject = &ctx->dataWin->objt.objects[instanceType];
                 char* valAsString = RValue_toString(val);
                 fprintf(stderr, "VM: [%s] WRITE var '%s' on object %d (%s) but no instances found (value=%s)\n", ctx->currentCodeName, varDef->name, instanceType, gameObject->name, valAsString);
                 free(valAsString);
+#endif
             }
         }
         RValue_free(&val);
@@ -960,10 +972,12 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
     if (instanceType >= 0) {
         targetInstance = findInstanceByTarget(ctx, instanceType);
         if (targetInstance == nullptr) {
+#ifdef ENABLE_VM_RESOLVE_LOGS
             const char* varTypeName = varTypeToString((varRef >> 24) & 0xF8);
             char* valAsString = RValue_toString(val);
             fprintf(stderr, "VM: [%s] WRITE var '%s' on instance %d but no instance found (varType=%s, isArray=%s, originalInstanceType=%d, hasInstanceType=%s, varID=%d, value=%s)\n", ctx->currentCodeName, varDef->name, instanceType, varTypeName, access.isArray ? "true" : "false", originalInstanceType, access.hasInstanceType ? "true" : "false", varDef->varID, valAsString);
             free(valAsString);
+#endif
             return;
         }
     } else if (instanceType == INSTANCE_OTHER) {
@@ -1226,7 +1240,7 @@ static void handlePush(VMContext* ctx, uint32_t instr, const uint8_t* extraData,
                     default: {
                         Instance* inst = findInstanceByTarget(ctx, scope);
                         if (inst == nullptr) {
-                            fprintf(stderr, "VM: ARRAYPUSHAF: no instance for scope %d varID=%d\n", scope, varDef->varID);
+                            VM_RESOLVE_LOG("VM: ARRAYPUSHAF: no instance for scope %d varID=%d\n", scope, varDef->varID);
                             abort();
                         }
                         slot = IntRValueHashMap_getOrInsertUndefined(&inst->selfVars, varDef->varID);
@@ -1313,7 +1327,7 @@ static void handlePushBltn(VMContext* ctx, uint32_t instr, const uint8_t* extraD
             inst = (Instance*) ctx->currentInstance;
         }
         if (inst == nullptr) {
-            fprintf(stderr, "VM: PushBltn ARRAYPUSHAF: no instance for scope %d varID=%d\n", scope, varDef->varID);
+            VM_RESOLVE_LOG("VM: PushBltn ARRAYPUSHAF: no instance for scope %d varID=%d\n", scope, varDef->varID);
             abort();
         }
         RValue* slot = IntRValueHashMap_getOrInsertUndefined(&inst->selfVars, varDef->varID);
@@ -1468,6 +1482,7 @@ static void handlePop(VMContext* ctx, uint32_t instr, uint8_t type1, uint8_t typ
                     if (instanceType >= 0) {
                         inst = findInstanceByTarget(ctx, instanceType);
                         if (inst == nullptr) {
+#ifdef ENABLE_VM_RESOLVE_LOGS
                             const char* varTypeName = varTypeToString(varType);
                             char* valAsString = RValue_toString(val);
                             if (instanceType < 100000 && (uint32_t) instanceType < ctx->dataWin->objt.count) {
@@ -1476,6 +1491,7 @@ static void handlePop(VMContext* ctx, uint32_t instr, uint8_t type1, uint8_t typ
                                 fprintf(stderr, "VM: [%s] WRITE array var '%s[%d]' on instance %d but no instance found (varType=%s, originalInstanceType=%d, varID=%d, value=%s)\n", ctx->currentCodeName, varDef->name, arrayIndex, instanceType, varTypeName, originalInstanceType, varDef->varID, valAsString);
                             }
                             free(valAsString);
+#endif
                             RValue_free(&val);
                             return;
                         }

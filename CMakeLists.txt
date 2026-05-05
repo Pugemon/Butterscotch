@@ -399,6 +399,11 @@ elseif(PLATFORM STREQUAL "3ds")
         add_compile_definitions(ENABLE_VM_OPCODE_PROFILER)
     endif()
 
+    option(ENABLE_VM_RESOLVE_LOGS "Log every var read/write that fails to resolve to an instance (very noisy on 3DS)" OFF)
+    if(ENABLE_VM_RESOLVE_LOGS)
+        add_compile_definitions(ENABLE_VM_RESOLVE_LOGS)
+    endif()
+
     option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" OFF)
     if(ENABLE_SPATIAL_GRID_LOGS)
         add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)

@@ -7861,9 +7861,15 @@ static RValue builtinNewGMLObject(VMContext* ctx, RValue* args, int32_t argCount
     int32_t codeIndex;
     if (args[0].type == RVALUE_METHOD && args[0].method != nullptr) {
         codeIndex = args[0].method->codeIndex;
+        // Lazy resolve for unresolved method stubs (created when a function reference's name was not in codeIndexByName at push time).
+        if (codeIndex < 0 && args[0].method->unresolvedName != nullptr) {
+            ptrdiff_t idx = shgeti(ctx->codeIndexByName, (char*) args[0].method->unresolvedName);
+            if (idx >= 0) {
+                codeIndex = ctx->codeIndexByName[idx].value;
+                args[0].method->codeIndex = codeIndex;
+            }
+        }
     } else {
-        // Raw funcIdx pushed via "Push.i <funcIdx>; Conv.i.v" (no method() wrapper used when no static binding is needed).
-        // Resolve via FUNC chunk name -> codeIndexByName, matching builtinMethod's lookup.
         int32_t rawArg = RValue_toInt32(args[0]);
         codeIndex = rawArg;
         if (rawArg >= 0 && (uint32_t) rawArg < ctx->dataWin->func.functionCount) {
@@ -7875,7 +7881,13 @@ static RValue builtinNewGMLObject(VMContext* ctx, RValue* args, int32_t argCount
         }
     }
     if (0 > codeIndex || (uint32_t) codeIndex > ctx->dataWin->code.count) {
-        fprintf(stderr, "VM: @@NewGMLObject@@ method has invalid codeIndex %d\n", codeIndex);
+#ifdef ENABLE_VM_RESOLVE_LOGS
+        const char* missName = "?";
+        if (args[0].type == RVALUE_METHOD && args[0].method != nullptr && args[0].method->unresolvedName != nullptr) {
+            missName = args[0].method->unresolvedName;
+        }
+        fprintf(stderr, "VM: @@NewGMLObject@@ method has invalid codeIndex %d (name='%s')\n", codeIndex, missName);
+#endif
         return RValue_makeUndefined();
     }
 
