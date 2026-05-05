@@ -88,13 +88,11 @@ static bool atlas_index_is_current(const char *path) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    // 1. Инит логов
-    setup_logging();
+    //setup_logging();
     printf("\n\n========================================\n");
     printf("[BOOT] setup_logging OK\n");
     printMemoryStats();
 
-    // 2. Инит систем 3DS
     printf("[BOOT] Calling cfguInit...\n");
     cfguInit();
 
@@ -104,14 +102,9 @@ int main(int argc, char **argv) {
 
     printf("[BOOT] Calling APT_SetAppCpuTimeLimit & osSetSpeedupEnable...\n");
     APT_SetAppCpuTimeLimit(30);
-    osSetSpeedupEnable(1); // На O3DS это ничего не делает, но не крашит
+    osSetSpeedupEnable(1);
 
-    // 3. Инит графики (C3D выделяет Linear RAM)
     printf("[BOOT] Calling C3D_Init...\n");
-    // Default cmdbuf is 256 KiB; big rooms (cooking minigame, undynebridge) blow
-    // through this in a single frame because of many texture switches per atlas.
-    // Quadrupling buys headroom; flush_batch also calls C3D_FrameSplit when the
-    // per-frame draw count gets large.
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 4)) {
         printf("[FATAL] C3D_Init failed! OOM in Linear RAM?\n");
         gfxExit();
@@ -120,7 +113,6 @@ int main(int argc, char **argv) {
     printf("[BOOT] C3D_Init OK\n");
     printMemoryStats();
 
-    // 4. Парсинг шейдеров (Выделяет обычный RAM через malloc)
     printf("[BOOT] Parsing DVLB shader...\n");
     g_vshaderDvlb = DVLB_ParseFile((u32 *)render2d_shader_shbin, render2d_shader_shbin_size);
     if (!g_vshaderDvlb) {
@@ -133,19 +125,16 @@ int main(int argc, char **argv) {
     shaderProgramSetVsh(&g_shaderProg, &g_vshaderDvlb->DVLE[0]);
     printf("[BOOT] Shader setup OK\n");
 
-    // 5. Инициализация UI лаунчера (Выделяет текстуры в Linear RAM)
     printf("[BOOT] Initializing LauncherGfx...\n");
     LauncherGfx gfx;
     bool gfx_ready = launcher_gfx_init(&gfx);
     printf("[BOOT] launcher_gfx_init OK. gfx_ready = %d\n", gfx_ready);
     printMemoryStats();
 
-    // 6. Загрузка настроек с SD карты
     printf("[BOOT] Calling launcher_load_settings...\n");
     launcher_load_settings();
     printf("[BOOT] launcher_load_settings OK\n");
 
-    // 7. Запуск меню
     printf("[BOOT] Entering launcher_run_menu...\n");
     int selected_game = launcher_run_menu(&gfx);
     printf("[BOOT] launcher_run_menu returned: %d\n", selected_game);
@@ -288,7 +277,6 @@ int main(int argc, char **argv) {
             launcher_render_loading(&gfx, display_name, "LAUNCHING GAME!", 0, 0, 100.f);
         }
 
-        // Tear down the launcher's owned targets — CtrRenderer takes over the screens.
         if (gfx_ready) { launcher_gfx_destroy(&gfx); gfx_ready = false; }
 
         VMContext      *vm  = VM_create(dw);
@@ -302,7 +290,6 @@ int main(int argc, char **argv) {
 
         Runner_initFirstRoom(run);
 
-        // Make sure the renderer reflects whatever theme/screen the user picked.
         launcher_apply_settings(launcher_get_settings());
 
         bool quit_to_launcher = false;
@@ -313,7 +300,7 @@ int main(int argc, char **argv) {
             u32 d = hidKeysDown(), u = hidKeysUp(), h = hidKeysHeld();
 
             // SELECT+START+A is now the pause chord (used to be hard-quit).
-            if ((h & KEY_START) && (h & KEY_SELECT) && (h & KEY_A)) {
+            if ((h & KEY_L) && (h & KEY_R) && (h & KEY_A)) {
                 LauncherGfx pauseGfx;
                 bool pauseReady = launcher_gfx_init_borrowed(
                     &pauseGfx,

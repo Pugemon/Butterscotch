@@ -5,6 +5,27 @@
 <a href="https://discord.gg/2gQR7t3WJR"><img src="https://img.shields.io/discord/1406856655920168971?color=5865F2&logo=discord&logoColor=white&label=discord"></a>
 </p>
 
+## Running on Nintendo 3DS
+
+First, install the provided `.cia` file on your console (using FBI or your preferred installer).
+
+Next, you'll need to copy your game files to your SD card into the following directory:
+`sdmc:/3ds/butterscotch/undertale/`
+
+> **Note:** If you want the game's icon to actually show up in the launcher, just drop the original game's `.exe` file into that same folder alongside the other files. The runner will automatically extract the icon from it!
+
+### Preprocessing (`ctr_cache_preprocess`)
+For the game to run on the 3DS hardware, the files need to be preprocessed. You have two ways to do this:
+
+1. **Preprocess on your PC (Recommended):** Use the preprocessor tool included in the release to process the game files *before* moving them to your SD card. This is way faster.
+2. **Preprocess on the 3DS at first boot (Slow):** If you just put the raw, unprocessed game files on your SD card, the console will handle the preprocessing itself the first time you launch the game. **Be patient!** This takes a really long time, so don't panic if it looks stuck—just let it do its thing.
+
+### Current Playability Status
+Here is what we've tested on actual 3DS hardware so far:
+* **Undertale:** Fully playable. A complete True Pacifist route has been tested and beaten from start to finish.
+* **Deltarune:** Chapters 1, 2, and 3 have been successfully tested to boot. Chapter 4 also booting, but isn't working.
+* **WARNING:** Mods can don't work on Butterscotch-3DS.
+
 > [!IMPORTANT]  
 > Butterscotch is still VERY early in development and it is NOT that good yet.
 

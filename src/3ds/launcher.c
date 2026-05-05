@@ -26,7 +26,12 @@
 #define LAUNCHER_SETTINGS_MAGIC 0x4253544Cu // 'LTSB'
 #define GAME_CONTROL_MAP_NAME "controls.bin"
 
-#define LAUNCHER_VBUF_CAP (8192 * 3)
+// Each glyph in the bitmap font expands to ~17 6-vertex rects, so a single full footer
+// line can burn ~4k verts. Three footer lines + gradient + particles + chrome easily blew
+// past the old 24k cap mid-frame, which forced an in-frame buffer wraparound that we
+// could not safely combine with citro3d's draw-on switching. 96k gives a comfortable
+// margin (~6 MiB linear) for both screens worth of UI in one batch.
+#define LAUNCHER_VBUF_CAP (96 * 1024)
 #define LAUNCHER_DISPLAY_TRANSFER_FLAGS \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | \
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
@@ -971,6 +976,42 @@ static LauncherVertex *launcher_gfx_reserve(LauncherGfx *gfx, uint32_t count, C3
         C3D_FrameSplit(0);
         gfx->vbufHead   = 0;
         gfx->batchStart = 0;
+
+        // citro3d does NOT preserve render target / pipeline state across FrameSplit.
+        // Re-attach the current target and re-bind program/attrInfo/bufInfo/texenv/proj
+        // so the next draw call lands on the right screen instead of bleeding into
+        // whichever target citro3d last had bound.
+        if (gfx->currentScreen && gfx->currentScreen->target) {
+            C3D_FrameDrawOn(gfx->currentScreen->target);
+
+            C3D_BindProgram(&g_shaderProg);
+            C3D_SetAttrInfo(&gfx->attrInfo);
+
+            C3D_BufInfo *buf = C3D_GetBufInfo();
+            BufInfo_Init(buf);
+            BufInfo_Add(buf, gfx->vbuf, sizeof(LauncherVertex), 3, 0x210);
+
+            C3D_TexEnv *env = C3D_GetTexEnv(0);
+            C3D_TexEnvInit(env);
+            C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
+            C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+            C3D_DepthTest(false, GPU_GEQUAL, GPU_WRITE_ALL);
+            C3D_CullFace(GPU_CULL_NONE);
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                           GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
+                           GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
+
+            C3D_SetViewport(0, 0,
+                            (u32) gfx->currentScreen->logicalH,
+                            (u32) gfx->currentScreen->logicalW);
+            C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+
+            C3D_Mtx proj;
+            Mtx_Identity(&proj);
+            Mtx_OrthoTilt(&proj, 0.f, (float) gfx->currentScreen->logicalW,
+                          (float) gfx->currentScreen->logicalH, 0.f, -1.f, 1.f, true);
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, gfx->uLoc_projection, &proj);
+        }
     }
     gfx->batchTex = tex;
     LauncherVertex *v = gfx->vbuf + gfx->vbufHead;
