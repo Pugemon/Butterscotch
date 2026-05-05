@@ -2062,12 +2062,25 @@ static void ctr_begin_view(Renderer *ren, int32_t vx, int32_t vy, int32_t vw, in
         proj = res;
     }
     apply_projection(ctx, &proj);
+
+    // Enable culling against the view rect in room coords. Disabled when the view
+    // is rotated — an axis-aligned cull rect doesn't match a rotated frustum.
+    if (angle == 0.f) {
+        ctx->cullEnabled = true;
+        ctx->cullL = (float)vx;
+        ctx->cullT = (float)vy;
+        ctx->cullR = (float)(vx + vw);
+        ctx->cullB = (float)(vy + vh);
+    } else {
+        ctx->cullEnabled = false;
+    }
 }
 
 static void ctr_end_view(Renderer *ren) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
     flush_batch(ctx);
     disable_scissor(ctx);
+    ctx->cullEnabled = false;
 }
 
 static void ctr_begin_gui(Renderer *ren, int32_t gw, int32_t gh,
@@ -2082,12 +2095,40 @@ static void ctr_begin_gui(Renderer *ren, int32_t gw, int32_t gh,
     Mtx_Identity(&proj);
     Mtx_Ortho(&proj, 0.f, (float)gw, (float)gh, 0.f, -1.f, 1.f, true);
     apply_projection(ctx, &proj);
+
+    // GUI uses logical coords (0..gw, 0..gh). Anything outside that rect is
+    // off-screen for this layer and can be culled.
+    ctx->cullEnabled = true;
+    ctx->cullL = 0.f;
+    ctx->cullT = 0.f;
+    ctx->cullR = (float)gw;
+    ctx->cullB = (float)gh;
 }
 
 static void ctr_end_gui(Renderer *ren) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
     flush_batch(ctx);
     disable_scissor(ctx);
+    ctx->cullEnabled = false;
+}
+
+// View-bounds culling. Returns true if the quad's bbox is fully outside the
+// active cull rect (= safe to skip the draw entirely). Cheap: 4 fminf/fmaxf +
+// 4 compares. Bridge corridor + Hotland have rooms ~5000+ tiles; the renderer
+// previously emitted them all every frame, even though only ~400 fit on screen.
+static inline bool quad_culled(const CtrRenderer *ctx,
+                               float x0, float y0, float x1, float y1,
+                               float x2, float y2, float x3, float y3) {
+    if (!ctx->cullEnabled) return false;
+    float minX = fminf(fminf(x0, x1), fminf(x2, x3));
+    if (minX >= ctx->cullR) return true;
+    float maxX = fmaxf(fmaxf(x0, x1), fmaxf(x2, x3));
+    if (maxX <= ctx->cullL) return true;
+    float minY = fminf(fminf(y0, y1), fminf(y2, y3));
+    if (minY >= ctx->cullB) return true;
+    float maxY = fmaxf(fmaxf(y0, y1), fmaxf(y2, y3));
+    if (maxY <= ctx->cullT) return true;
+    return false;
 }
 
 // Region drawing
@@ -2164,6 +2205,11 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
                         float x2, float y2, float x3, float y3,
                         const float col[4]) {
     if (id >= ctx->pageCount) return;
+    // View-bounds culling. Single choke point: every sprite, tile, glyph, and
+    // tilemap cell goes through here. If the destination quad is entirely
+    // outside the active view/GUI rect, skip the source-page load + chunk
+    // intersection + push_quad entirely.
+    if (quad_culled(ctx, x0, y0, x1, y1, x2, y2, x3, y3)) return;
     if (id < ctx->originalTpagCount) {
         draw_cached_region(ctx, id, sx, sy, sw, sh,
                            x0, y0, x1, y1, x2, y2, x3, y3, col);
@@ -2332,6 +2378,19 @@ static void ctr_draw_sprite_pos(Renderer *ren, int32_t id,
 // Tiles
 
 static void ctr_draw_tile(Renderer *ren, RoomTile *tile, float ox, float oy) {
+    CtrRenderer *ctx = (CtrRenderer *)ren;
+
+    // Early cull: skip the TPAG resolve, clipping math, and the draw_region call
+    // chain entirely if the tile is off-camera. Big rooms (Undyne bridge, hotland)
+    // emit thousands of tiles per frame and only a few hundred fit on screen.
+    {
+        float dxA = (float)tile->x + ox;
+        float dyA = (float)tile->y + oy;
+        float dxB = dxA + (float)tile->width  * tile->scaleX;
+        float dyB = dyA + (float)tile->height * tile->scaleY;
+        if (quad_culled(ctx, dxA, dyA, dxB, dyA, dxB, dyB, dxA, dyB)) return;
+    }
+
     int32_t id = Renderer_resolveObjectTPAGIndex(ren->dataWin, tile);
     if (id < 0) return;
 
@@ -2360,6 +2419,7 @@ static void ctr_draw_tiled(Renderer *ren, int32_t id, float ox, float oy,
                            float x, float y, float sx, float sy,
                            bool tx, bool ty, float rw, float rh,
                            uint32_t col, float a) {
+    CtrRenderer *ctx = (CtrRenderer *)ren;
     if (id < 0 || (uint32_t)id >= ren->dataWin->tpag.count) return;
     TexturePageItem *t = &ren->dataWin->tpag.items[id];
     float tw = t->boundingWidth  * fabsf(sx);
@@ -2373,6 +2433,25 @@ static void ctr_draw_tiled(Renderer *ren, int32_t id, float ox, float oy,
 
     float eX = tx ? rw : sX + tw;
     float eY = ty ? rh : sY + th;
+
+    // Clamp the iteration window to the active cull rect so tiled-room-sized
+    // backgrounds (Hotland mountain BGs etc.) don't iterate the entire room.
+    // Per-quad cull in draw_region still catches partial-overlap edge cases.
+    if (ctx->cullEnabled) {
+        float minX = ctx->cullL - tw;
+        if (sX < minX) {
+            float skip = floorf((minX - sX) / tw);
+            if (skip > 0.f) sX += skip * tw;
+        }
+        if (eX > ctx->cullR) eX = ctx->cullR;
+
+        float minY = ctx->cullT - th;
+        if (sY < minY) {
+            float skip = floorf((minY - sY) / th);
+            if (skip > 0.f) sY += skip * th;
+        }
+        if (eY > ctx->cullB) eY = ctx->cullB;
+    }
 
     for (float dy = sY; dy < eY; dy += th) {
         for (float dx = sX; dx < eX; dx += tw) {
@@ -3031,6 +3110,9 @@ static void ctr_draw_surface(Renderer *ren, int32_t surfaceId,
         x0=pts[0][0]; y0=pts[0][1]; x1=pts[1][0]; y1=pts[1][1];
         x2=pts[2][0]; y2=pts[2][1]; x3=pts[3][0]; y3=pts[3][1];
     }
+
+    if (quad_culled(ctx, x + x0, y + y0, x + x1, y + y1,
+                          x + x2, y + y2, x + x3, y + y3)) return;
 
     flush_batch(ctx);
     // Surface texture must be fully resolved before sampling; FrameSplit forces a

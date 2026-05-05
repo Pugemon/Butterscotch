@@ -139,6 +139,13 @@ typedef struct CtrRenderer {
     // Repacked atlas stream.
     FILE             *atlasFile;
     bool              preloadingAtlases;
+
+    // Per-view culling rect in room coords (or GUI coords). Set by begin_view /
+    // begin_gui, cleared by end_view / end_gui. Skips quads whose bounding box
+    // doesn't overlap. Saves thousands of off-screen tile drawcalls in big rooms
+    // (Undyne bridge, hotland labs, etc.).
+    bool              cullEnabled;
+    float             cullL, cullT, cullR, cullB;
 } CtrRenderer;
 
 Renderer *CtrRenderer_create(void);
