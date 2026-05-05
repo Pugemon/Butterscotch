@@ -14,10 +14,10 @@ Next, you'll need to copy your game files to your SD card into the following dir
 
 > **Note:** If you want the game's icon to actually show up in the launcher, just drop the original game's `.exe` file into that same folder alongside the other files. The runner will automatically extract the icon from it!
 
-### Preprocessing (`ctr_cache_preprocess`)
+### Preprocessing (`ctr-cache-preprocess`)
 For the game to run on the 3DS hardware, the files need to be preprocessed. You have two ways to do this:
 
-1. **Preprocess on your PC (Recommended):** Use the preprocessor tool included in the release to process the game files *before* moving them to your SD card. This is way faster.
+1. **Preprocess on your PC (Recommended):** Use the `ctr-cache-preprocess` tool included in the release to process the game files *before* moving them to your SD card. This is way faster. You can also build it from source — see [Building Butterscotch](#building-butterscotch).
 2. **Preprocess on the 3DS at first boot (Slow):** If you just put the raw, unprocessed game files on your SD card, the console will handle the preprocessing itself the first time you launch the game. **Be patient!** This takes a really long time, so don't panic if it looks stuck—just let it do its thing.
 
 ### Current Playability Status
@@ -47,7 +47,6 @@ While our target is Undertale v1.08, that doesn't mean that other games CAN'T ru
 
 Here are the Bytecode Versions that Butterscotch supports
 
-* Bytecode Version 15
 * Bytecode Version 16
 * Bytecode Version 17
 
@@ -64,6 +63,7 @@ Of course, there are exceptions that break game compatibility altogether:
 * macOS (GLFW, OpenGL)
 * Windows (GLFW, OpenGL, MinGW)
 * PlayStation 2 (ps2sdk, gsKit)
+* Nintendo 3DS (devkitPro, citro3d)
 * Haiku (GLFW)
 * ...and maybe more in the future!
 
@@ -83,6 +83,12 @@ make
 If you are using CLion, set the platform in `Settings` > `Build, Execution, Deployment` > `CMake` and add `-DPLATFORM=glfw`
 
 Then run Butterscotch with `./butterscotch /path/to/data.win`!
+
+### Other targets
+
+* **Nintendo 3DS:** requires [devkitPro](https://devkitpro.org/) with the `3ds-dev` group installed. With `DEVKITPRO` exported, run `cmake -DPLATFORM=3ds ..` and `make` — the build produces a `.3dsx`/`.cia` you can install via FBI.
+* **PlayStation 2:** `cmake -DPLATFORM=ps2 ..` (needs `ps2sdk` and `gsKit`).
+* **`ctr-cache-preprocess` (PC tool):** `cmake -DPLATFORM=ctr-cache-tool ..` builds the standalone preprocessor used to bake textures for the 3DS target before copying the game to your SD card.
 
 ## CLI parameters
 

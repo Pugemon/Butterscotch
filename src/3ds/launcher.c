@@ -746,7 +746,8 @@ static bool launcher_load_icon_cache(LauncherGameEntry *game, const char *cache_
 
     C3D_TexLoadImage(&game->icon_tex, tiled, GPU_TEXFACE_2D, 0);
     C3D_TexFlush(&game->icon_tex);
-    C3D_TexSetFilter(&game->icon_tex, GPU_LINEAR, GPU_LINEAR);
+    // GPU_NEAREST so pixel-art game icons stay crisp at the launcher's upscale factor.
+    C3D_TexSetFilter(&game->icon_tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&game->icon_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     linearFree(tiled);
 
@@ -807,7 +808,8 @@ static bool launcher_upload_icon(LauncherGameEntry *game, const IconImage *img,
     launcher_tile_rgba4(linear, tiled, potW, potH, potW, potH);
     C3D_TexLoadImage(&game->icon_tex, tiled, GPU_TEXFACE_2D, 0);
     C3D_TexFlush(&game->icon_tex);
-    C3D_TexSetFilter(&game->icon_tex, GPU_LINEAR, GPU_LINEAR);
+    // GPU_NEAREST so pixel-art game icons stay crisp at the launcher's upscale factor.
+    C3D_TexSetFilter(&game->icon_tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&game->icon_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     game->icon_ready = true;

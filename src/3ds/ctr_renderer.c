@@ -1704,7 +1704,11 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
     if (!C3D_TexInitVRAM(&ctx->appTex, (u16)ctx->appPotW, (u16)ctx->appPotH, GPU_RGBA8)) {
         return false;
     }
-    C3D_TexSetFilter(&ctx->appTex, GPU_LINEAR, GPU_LINEAR);
+    // GPU_NEAREST so the app surface scales pixel-perfectly to the physical screen.
+    // GPU_LINEAR pulled samples across the logic <-> POT-padding boundary in the
+    // tex atlas and produced a 1-px stripe of garbage along the top/left edges of
+    // the game image (most visible on a black room).
+    C3D_TexSetFilter(&ctx->appTex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap  (&ctx->appTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     ctx->appTarget = C3D_RenderTargetCreateFromTex(&ctx->appTex, GPU_TEXFACE_2D, 0,
