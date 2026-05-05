@@ -50,8 +50,10 @@ endif()
 
 if(PLATFORM STREQUAL "ctr-cache-tool")
     include(CheckIncludeFile)
-    check_include_file(bzlib.h HAVE_BZLIB_H)
-    find_library(BZ2_LIBRARY bz2)
+    add_definitions(-DHAVE_BZLIB_H=1)
+    #add_subdirectory(vendor/bzip2)
+    #check_include_file(bzlib.h HAVE_BZLIB_H)
+    #find_library(BZ2_LIBRARY bz2)
 
     add_executable(ctr-cache-preprocess
         tools/ctr_cache_preprocess.c
@@ -66,16 +68,17 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/3ds
         ${CMAKE_SOURCE_DIR}/src/gl
+        ${CMAKE_SOURCE_DIR}/vendor/bzip2
         ${CMAKE_SOURCE_DIR}/vendor/stb/ds
         ${CMAKE_SOURCE_DIR}/vendor/stb/image
     )
     target_link_libraries(ctr-cache-preprocess m)
-    if(HAVE_BZLIB_H AND BZ2_LIBRARY)
+    #if(HAVE_BZLIB_H AND BZ2_LIBRARY)
         target_compile_definitions(ctr-cache-preprocess PRIVATE IMAGE_DECODER_ENABLE_BZ2)
-        target_link_libraries(ctr-cache-preprocess ${BZ2_LIBRARY})
-    else()
-        message(WARNING "bzlib.h/libbz2 not found; ctr-cache-preprocess will skip BZip2-compressed 2zoq textures")
-    endif()
+        target_link_libraries(ctr-cache-preprocess bz2)
+    #else()
+    #    message(WARNING "bzlib.h/libbz2 not found; ctr-cache-preprocess will skip BZip2-compressed 2zoq textures")
+    #endif()
     return()
 endif()
 
@@ -471,8 +474,8 @@ elseif(PLATFORM STREQUAL "3ds")
     ctr_create_3dsx(butterscotch)
 
     set(APP_TITLE "Butterscotch")
-    set(APP_DESCRIPTION "GMS1.4 runner for 3DS")
-    set(APP_AUTHOR "efimandreev0, Pugemon0")
+    set(APP_DESCRIPTION "GMS1.4-2.0 runner for 3DS")
+    set(APP_AUTHOR "efimandreev0, Pugemon")
     set(APP_PRODUCT_CODE "CTR-P-BTRS")
     set(APP_UNIQUE_ID "0xEFADR")
     set(APP_VERSION_MAJOR "0")

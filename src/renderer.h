@@ -132,10 +132,14 @@ static void Renderer_drawSpriteNineSlice(Renderer* renderer, int32_t spriteIndex
 // Stretched: draw_sprite_stretched(sprite, subimg, x, y, w, h)
 static void Renderer_drawSpriteStretched(Renderer* renderer, int32_t spriteIndex, int32_t subimg, float x, float y, float w, float h, uint32_t color, float alpha) {
     DataWin* dw = renderer->dataWin;
-    if (spriteIndex >= 0 && (uint32_t) spriteIndex < dw->sprt.count && dw->sprt.sprites[spriteIndex].nineSliceEnabled) {
+
+    if (spriteIndex >= 0 && (uint32_t) spriteIndex < dw->sprt.count &&
+        dw->sprt.sprites[spriteIndex].nineSliceEnabled &&
+        DataWin_isVersionAtLeast(dw, 2, 0, 0, 0)) {
+
         Renderer_drawSpriteNineSlice(renderer, spriteIndex, subimg, x, y, w, h, false, false, 0.0f, x, y, color, alpha);
         return;
-    }
+        }
 
     int32_t tpagIndex = Renderer_resolveTPAGIndex(dw, spriteIndex, subimg);
     if (0 > tpagIndex) return;
@@ -154,8 +158,7 @@ static void Renderer_drawSpriteExt(Renderer* renderer, int32_t spriteIndex, int3
 
     Sprite* sprite = &dw->sprt.sprites[spriteIndex];
 
-    // Nine-slice activates only when the draw scales the sprite away from its native size. At scale 1 there is nothing to slice.
-    if (sprite->nineSliceEnabled && (xscale != 1.0f || yscale != 1.0f)) {
+    if (sprite->nineSliceEnabled && DataWin_isVersionAtLeast(dw, 2, 0, 0, 0) && (xscale != 1.0f || yscale != 1.0f)) {
         bool flipX = 0.0f > xscale;
         bool flipY = 0.0f > yscale;
         float absX = fabsf(xscale);

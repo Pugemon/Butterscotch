@@ -622,6 +622,11 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
 void Runner_draw(Runner* runner) {
     Room* room = runner->currentRoom;
 
+    // native_scripts.c writes directly to inst->depth (e.g. y-sort: inst->depth = 50000 - inst->y*10)
+    // bypassing VMBuiltins_setVariable, which is the only code path that flips drawableListSortDirty.
+    // Force a depth refresh every frame so the cache reflects the live values; isDrawableArraySorted
+    // is O(N) and skips qsort when nothing actually crossed a neighbour.
+    runner->drawableListSortDirty = true;
     rebuildDrawableCacheIfDirty(runner);
     int32_t drawableCount = (int32_t) arrlen(runner->cachedDrawables);
     Drawable* drawables = runner->cachedDrawables;

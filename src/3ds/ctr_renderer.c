@@ -1094,6 +1094,30 @@ static bool apply_repack_index(CtrRenderer *ctx, DataWin *dw) {
 
 // Vertex batching
 
+// Forward decls — these live further down the file.
+static void rebind_state(CtrRenderer *ctx);
+static void apply_projection(CtrRenderer *ctx, const C3D_Mtx *m);
+static void apply_blend(CtrRenderer *ctx, int mode);
+
+// C3D_FrameSplit invalidates BufInfo / AttrInfo / TexEnv / AlphaBlend / projection
+// uniforms — bind_target already knows this (calls rebind_state+apply_projection
+// after every split). Anywhere else that splits mid-frame must do the same, or
+// the next DrawArrays reads vertices from a stale buffer binding and renders
+// garbage (UNDERTALE undynebridge / DELTARUNE cooking minigame). Use this
+// helper instead of calling C3D_FrameSplit(0) directly.
+static void ctr_safe_frame_split(CtrRenderer *ctx) {
+    C3D_FrameSplit(0);
+    if (ctx->inFrame && ctx->activeTarget) {
+        rebind_state(ctx);
+        apply_projection(ctx, &ctx->currentProjection);
+        // Re-emit C3D_AlphaBlend — citro3d state cache doesn't always restore it
+        // after a split, and stale blend state mangles font edges + UI overlays
+        // for the rest of the frame. Safe to call: batchVerts is 0 at this point
+        // (caller flushed before splitting), so the inner flush_batch is a no-op.
+        apply_blend(ctx, ctx->currentBlendMode);
+    }
+}
+
 static void flush_batch(CtrRenderer *ctx) {
     if (!ctx->batchVerts || !ctx->batchTex || !ctx->inFrame) {
         ctx->batchVerts = 0;
@@ -1114,7 +1138,7 @@ static inline CtrVertex *vbuf_reserve(CtrRenderer *ctx, uint32_t count, C3D_Tex 
     if (ctx->batchTex && ctx->batchTex != tex) flush_batch(ctx);
     if (ctx->vbufHead + count > ctx->vbufCap) {
         flush_batch(ctx);
-        C3D_FrameSplit(0);
+        ctr_safe_frame_split(ctx);
         ctx->vbufHead   = 0;
         ctx->batchStart = 0;
     }
@@ -1453,7 +1477,16 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
         page->lastFrame = g_frame;
         return true;
     }
-    if (page->loadFailed) return false;
+    // loadFailed used to stick until the next room change, which made one transient
+    // OOM during a peak (mid-frame eviction churn) permanently kill that atlas for
+    // the rest of the room. The Undyne bridge has many big tilesets and thrashes
+    // the eviction policy hardest, so a bridge atlas would lose its load forever
+    // and tiles from it would never render. Retry once per frame instead — if
+    // memory has freed up since (eviction, frame end), the second pass succeeds.
+    if (page->loadFailed) {
+        if (page->lastFrame == g_frame) return false;
+        page->loadFailed = false;
+    }
     if (page->fileOffset == 0 || !ctx->atlasFile) return false;
 
     free_old_source_pages(ctx);
@@ -1474,6 +1507,7 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
     if (!texOk) {
         fprintf(stderr, "CTR: Failed to alloc C3D_Tex for atlas %d\n", pageId);
         page->loadFailed = true;
+        page->lastFrame = g_frame; // stamp so retry waits until next frame
         return false;
     }
     if (tiledSize > page->tex.size) tiledSize = (uint32_t)page->tex.size;
@@ -1482,6 +1516,7 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
     if (fread(page->tex.data, 1, tiledSize, ctx->atlasFile) != tiledSize) {
         C3D_TexDelete(&page->tex);
         page->loadFailed = true;
+        page->lastFrame = g_frame;
         return false;
     }
 
@@ -1778,7 +1813,10 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
     ctx->pages     = calloc(ctx->pageCount, sizeof(CtrPage));
 
     if (!ctx->vbuf) {
-        ctx->vbufCap = BATCH_VERT_CAP;
+        // 4x batch capacity. With small vbuf, many tile-heavy rooms (bridge corridor
+        // before/with Undyne) trigger constant FrameSplits which both eat cmdbuf
+        // and stall the GPU. Larger vbuf = fewer splits per frame.
+        ctx->vbufCap = BATCH_VERT_CAP * 4;
         ctx->vbuf    = linearAlloc(ctx->vbufCap * sizeof(CtrVertex));
         ctx->vbufHead   = 0;
         ctx->batchStart = 0;
@@ -2830,12 +2868,19 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
     if (surf->target && surf->width == width && surf->height == height) {
         surf->used = true;
         flush_batch(ctx);
-        if (ctx->inFrame) C3D_FrameSplit(0);
+        if (ctx->inFrame) ctr_safe_frame_split(ctx);
 
         C3D_RenderTarget *oldTgt = ctx->activeTarget;
         C3D_FrameDrawOn(surf->target);
         C3D_RenderTargetClear(surf->target, C3D_CLEAR_ALL, 0x00000000, 0);
-        if (oldTgt) C3D_FrameDrawOn(oldTgt);
+        if (oldTgt) {
+            C3D_FrameDrawOn(oldTgt);
+            // Re-bind shader/buffer state for the restored target so subsequent
+            // draws don't use stale BufInfo/AttrInfo from before the split.
+            rebind_state(ctx);
+            apply_projection(ctx, &ctx->currentProjection);
+            apply_blend(ctx, ctx->currentBlendMode);
+        }
 
         return (int32_t)slot;
     }
@@ -2849,11 +2894,16 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
     surf->used = true;
 
     flush_batch(ctx);
-    if (ctx->inFrame) C3D_FrameSplit(0);
+    if (ctx->inFrame) ctr_safe_frame_split(ctx);
     C3D_RenderTarget *oldTgt = ctx->activeTarget;
     C3D_FrameDrawOn(surf->target);
     C3D_RenderTargetClear(surf->target, C3D_CLEAR_ALL, 0x00000000, 0);
-    if (oldTgt) C3D_FrameDrawOn(oldTgt);
+    if (oldTgt) {
+        C3D_FrameDrawOn(oldTgt);
+        rebind_state(ctx);
+        apply_projection(ctx, &ctx->currentProjection);
+        apply_blend(ctx, ctx->currentBlendMode);
+    }
 
     return (int32_t)slot;
 }
@@ -2983,7 +3033,11 @@ static void ctr_draw_surface(Renderer *ren, int32_t surfaceId,
     }
 
     flush_batch(ctx);
-    C3D_FrameSplit(0);
+    // Surface texture must be fully resolved before sampling; FrameSplit forces a
+    // GPU sync point. Use the safe variant — without rebind, the queued push_quad
+    // is later drawn with stale BufInfo/AttrInfo, which manifests as missing
+    // tiles in tile-heavy rooms (e.g. the Undyne bridge).
+    ctr_safe_frame_split(ctx);
     push_quad(ctx, tex,
               x + x0, y + y0,  x + x1, y + y1,
               x + x2, y + y2,  x + x3, y + y3,
@@ -2997,7 +3051,9 @@ static void ctr_clear_target(Renderer *ren, uint32_t color, float alpha) {
 
     uint8_t r = BGR_R(color), g = BGR_G(color), b = BGR_B(color), aa = clamp_u8(alpha);
     uint32_t rgba = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | aa;
-    C3D_FrameSplit(0);
+    // Use the safe variant: a bare C3D_FrameSplit leaves BufInfo/AttrInfo stale,
+    // and the next batched draw on this target then reads garbage vertices.
+    ctr_safe_frame_split(ctx);
     C3D_RenderTargetClear(ctx->activeTarget, C3D_CLEAR_ALL, rgba, 0);
 }
 

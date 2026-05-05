@@ -108,7 +108,11 @@ int main(int argc, char **argv) {
 
     // 3. Инит графики (C3D выделяет Linear RAM)
     printf("[BOOT] Calling C3D_Init...\n");
-    if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE)) {
+    // Default cmdbuf is 256 KiB; big rooms (cooking minigame, undynebridge) blow
+    // through this in a single frame because of many texture switches per atlas.
+    // Quadrupling buys headroom; flush_batch also calls C3D_FrameSplit when the
+    // per-frame draw count gets large.
+    if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 4)) {
         printf("[FATAL] C3D_Init failed! OOM in Linear RAM?\n");
         gfxExit();
         return 1;
