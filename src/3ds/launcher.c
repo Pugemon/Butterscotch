@@ -924,31 +924,143 @@ void launcher_scan_games(void) {
     closedir(dir);
 }
 
+// Case-insensitive substring search. We avoid strcasestr (GNU extension; newlib
+// doesn't expose it on devkitARM by default) and roll a tiny one inline.
+static const char *ci_strstr(const char *hay, const char *needle) {
+    if (!hay || !needle) return NULL;
+    if (!*needle) return hay;
+    size_t nlen = strlen(needle);
+    for (; *hay; hay++) {
+        size_t i = 0;
+        while (i < nlen) {
+            unsigned char a = (unsigned char)hay[i];
+            unsigned char b = (unsigned char)needle[i];
+            if (!a) return NULL;
+            if (tolower(a) != tolower(b)) break;
+            i++;
+        }
+        if (i == nlen) return hay;
+    }
+    return NULL;
+}
+
+// Try `path`; if it points at a directory, append "/data.win". Returns true if
+// the resulting file exists and is openable.
+static bool try_resolve_candidate(const char *path, char *out_path, size_t out_size) {
+    if (!path || !*path) return false;
+
+    char buf[512];
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        snprintf(buf, sizeof(buf), "%s/data.win", path);
+    } else {
+        snprintf(buf, sizeof(buf), "%s", path);
+    }
+
+    FILE *f = fopen(buf, "rb");
+    if (!f) return false;
+    fclose(f);
+
+    strncpy(out_path, buf, out_size - 1);
+    out_path[out_size - 1] = '\0';
+    return true;
+}
+
 void launcher_resolve_new_game_path(const char *request, char *out_path, size_t out_size) {
-    printf("Try resolve path: %s\n", request);
-    if (strncmp(request, "sdmc:/", 6) == 0) {
-        strncpy(out_path, request, out_size - 1);
+    printf("Try resolve path: %s\n", request ? request : "(null)");
+    if (!request || !out_path || out_size == 0) {
+        if (out_path && out_size) out_path[0] = '\0';
+        return;
+    }
+
+    // Drop a leading slash — Deltarune & co. pass paths like "/chapter3_windows"
+    // expecting them to be sibling-directory names. If we leave the slash in,
+    // path joins produce "BASE_DIR//chapter3_windows" which several SDMC
+    // implementations treat as invalid.
+    const char *clean = request;
+    while (*clean == '/' || *clean == '\\') clean++;
+
+    // Absolute sdmc:/ path — accept verbatim (well, after directory probe).
+    if (strncmp(clean, "sdmc:/", 6) == 0) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "%s", clean);
+        if (try_resolve_candidate(buf, out_path, out_size)) return;
+        // Fall through and let caller report failure.
+        strncpy(out_path, buf, out_size - 1);
         out_path[out_size - 1] = '\0';
         return;
     }
-    char base_dir[256];
-    char *slash = strrchr(g_current_data_path, '/');
-    size_t baselen = slash ? (size_t)(slash - g_current_data_path) : 0;
-    if (baselen >= sizeof(base_dir)) baselen = sizeof(base_dir) - 1;
-    memcpy(base_dir, g_current_data_path, baselen);
-    base_dir[baselen] = '\0';
 
-    char test_path[512];
-    snprintf(test_path, sizeof(test_path), "%s/%s/data.win", base_dir, request);
-    FILE *f = fopen(test_path, "rb");
-    if (f) { fclose(f); strncpy(out_path, test_path, out_size - 1); out_path[out_size - 1] = '\0'; return; }
+    // Compute the directory the current game lives in (parent of data.win).
+    char cur_dir[256];
+    {
+        const char *slash = strrchr(g_current_data_path, '/');
+        size_t baselen = slash ? (size_t)(slash - g_current_data_path) : 0;
+        if (baselen >= sizeof(cur_dir)) baselen = sizeof(cur_dir) - 1;
+        memcpy(cur_dir, g_current_data_path, baselen);
+        cur_dir[baselen] = '\0';
+    }
 
-    snprintf(test_path, sizeof(test_path), "%s/%s/data.win", BASE_DIR, request);
-    f = fopen(test_path, "rb");
-    if (f) { fclose(f); strncpy(out_path, test_path, out_size - 1); out_path[out_size - 1] = '\0'; return; }
+    // Compute the directory ABOVE the current game (where sibling chapters live).
+    char parent_dir[256];
+    {
+        const char *slash = strrchr(cur_dir, '/');
+        size_t baselen = slash ? (size_t)(slash - cur_dir) : 0;
+        if (baselen >= sizeof(parent_dir)) baselen = sizeof(parent_dir) - 1;
+        memcpy(parent_dir, cur_dir, baselen);
+        parent_dir[baselen] = '\0';
+    }
 
-    snprintf(test_path, sizeof(test_path), "%s/%s", BASE_DIR, request);
-    strncpy(out_path, test_path, out_size - 1);
+    // Strip any trailing data.win the request might already carry, so we can
+    // probe both as a directory and as an explicit data.win path.
+    char clean_req[256];
+    snprintf(clean_req, sizeof(clean_req), "%s", clean);
+    {
+        size_t n = strlen(clean_req);
+        const char *suffix = "/data.win";
+        size_t s = strlen(suffix);
+        if (n >= s && strcmp(clean_req + n - s, suffix) == 0) {
+            clean_req[n - s] = '\0';
+        }
+    }
+
+    char buf[512];
+
+    // 1) Sibling of the current game: <parent>/chapter3_windows[/data.win]
+    if (parent_dir[0]) {
+        snprintf(buf, sizeof(buf), "%s/%s", parent_dir, clean_req);
+        if (try_resolve_candidate(buf, out_path, out_size)) return;
+    }
+
+    // 2) Subdir of the current game: <current>/chapter3_windows[/data.win]
+    if (cur_dir[0]) {
+        snprintf(buf, sizeof(buf), "%s/%s", cur_dir, clean_req);
+        if (try_resolve_candidate(buf, out_path, out_size)) return;
+    }
+
+    // 3) Top-level games root: <BASE_DIR>/chapter3_windows[/data.win]
+    snprintf(buf, sizeof(buf), "%s/%s", BASE_DIR, clean_req);
+    if (try_resolve_candidate(buf, out_path, out_size)) return;
+
+    // 4) Last resort: scan the registered launcher games for a name match
+    //    (case-insensitive substring). Lets the user keep their own folder
+    //    naming (e.g. "deltarune_ch3") even if the script asks for
+    //    "chapter3_windows" — as long as one substring matches the other we
+    //    accept it.
+    for (int i = 0; i < g_game_count; i++) {
+        const char *gname = g_games[i].name;
+        if (!gname || !*gname) continue;
+        bool match = false;
+        if (ci_strstr(gname, clean_req) || ci_strstr(clean_req, gname)) match = true;
+        if (match && try_resolve_candidate(g_games[i].path, out_path, out_size)) {
+            return;
+        }
+    }
+
+    // Nothing matched. Return a "best guess" path with /data.win appended so
+    // the caller's open probe + error message at least show a meaningful path.
+    snprintf(buf, sizeof(buf), "%s/%s/data.win", BASE_DIR, clean_req);
+    strncpy(out_path, buf, out_size - 1);
     out_path[out_size - 1] = '\0';
 }
 

@@ -514,7 +514,7 @@ elseif(PLATFORM STREQUAL "3ds")
     set(APP_RSF "${CMAKE_SOURCE_DIR}/3ds/template.rsf")
     set(APP_ICON "${CMAKE_SOURCE_DIR}/3ds/icon.png")
     set(BANNER_IMAGE "${CMAKE_SOURCE_DIR}/3ds/banner.png")
-    set(BANNER_AUDIO "${CMAKE_SOURCE_DIR}/3ds/audio_silent.wav")
+    set(BANNER_AUDIO "${CMAKE_SOURCE_DIR}/3ds/efimandreev0.wav")
 
     find_program(BANNERTOOL NAMES bannertool HINTS "$ENV{DEVKITPRO}/tools/bin")
     find_program(MAKEROM NAMES makerom HINTS "$ENV{DEVKITPRO}/tools/bin")
@@ -527,7 +527,7 @@ elseif(PLATFORM STREQUAL "3ds")
                 -l "${APP_DESCRIPTION}"
                 -p "${APP_AUTHOR}"
                 -i "${APP_ICON}"
-                -o "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.smdh" > /dev/null
+                -o "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.smdh" 
                 DEPENDS "${APP_ICON}"
                 COMMENT "Building SMDH icon..."
         )
@@ -537,7 +537,7 @@ elseif(PLATFORM STREQUAL "3ds")
                 COMMAND ${BANNERTOOL} makebanner
                 -i "${BANNER_IMAGE}"
                 -a "${BANNER_AUDIO}"
-                -o "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.bnr" > /dev/null
+                -o "${CMAKE_CURRENT_BINARY_DIR}/butterscotch.bnr" 
                 DEPENDS "${BANNER_IMAGE}" "${BANNER_AUDIO}"
                 COMMENT "Building Banner..."
         )

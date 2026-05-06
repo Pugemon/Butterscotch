@@ -482,6 +482,8 @@ int main(int argc, char **argv) {
             } else {
                 fprintf(stderr, "[GAME_CHANGE] cannot open '%s' (request '%s'); back to menu\n",
                         resolved, g_next_game_path);
+                fprintf(stderr, "[GAME_CHANGE] tip: place a sibling folder containing data.win next to '%s'\n",
+                        g_current_data_path);
                 g_game_change_requested = false;
                 int new_selection = launcher_run_menu(&gfx);
                 if (new_selection < 0) {
