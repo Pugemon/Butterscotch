@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 extern char g_current_cache_dir[256];
 
@@ -125,6 +126,8 @@ static void remove_old_ready_flags(void) {
         "cache_ready_v8.flag",
         "cache_ready_v9.flag",
         "cache_ready_v10.flag",
+        "cache_ready_v11.flag",
+        "cache_ready_v12.flag",
     };
     char path[256];
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -201,6 +204,78 @@ static bool read_header(FILE *f, CtrTextureCacheHeader *hdr) {
            hdr->atlasDataOffset >= hdr->atlasInfosOffset;
 }
 
+// Compute a cheap, stable source-file fingerprint for a data.win. We hash a
+// handful of fixed-position byte ranges scattered through the file (not just
+// the first KB) so that minor in-place mod edits land in at least one of the
+// sampled regions. This is NOT a cryptographic hash — collision-resistance
+// is absolutely fine at the "did this game change?" granularity.
+//
+// Note: mtime intentionally NOT used in the fingerprint. SDMC on the 3DS
+// reports mtime=0 for a lot of files (the FAT timestamp isn't always
+// surfaced through newlib's stat()), but the same data.win cached on a
+// PC preprocessor has the real mtime baked in. That mismatch caused
+// "fingerprint mismatch" rebuilds on every boot even though the file is
+// byte-identical. Size + sample hash are enough to catch the cases we care
+// about (game switch, mod update, manual replace).
+typedef struct {
+    uint64_t size;
+    uint32_t sampleHash;
+} SrcFingerprint;
+
+static uint32_t fnv1a32_update(uint32_t h, const uint8_t *buf, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        h ^= buf[i];
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+static bool compute_src_fingerprint(const char *path, SrcFingerprint *out) {
+    if (!path || !out) return false;
+    out->size = 0;
+    out->sampleHash = 0;
+
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        out->size  = (uint64_t)st.st_size;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+
+    // Sample 1 KiB at five spread-out offsets: 0, 25%, 50%, 75%, end-1KiB.
+    // A 1.5GB modded data.win still completes this in a few ms.
+    fseek(f, 0, SEEK_END);
+    long fileSize = ftell(f);
+    if (fileSize <= 0) { fclose(f); return false; }
+    if (out->size == 0) out->size = (uint64_t)fileSize;
+
+    static const double offsets[5] = {0.0, 0.25, 0.5, 0.75, 1.0};
+    uint8_t buf[1024];
+    uint32_t hash = 0x811c9dc5u; // FNV-1a 32-bit init
+
+    // Mix the file size into the hash up front so two files of different
+    // sizes that happen to share sampled regions still hash differently.
+    uint8_t sizeBytes[8];
+    for (int i = 0; i < 8; i++) sizeBytes[i] = (uint8_t)(((uint64_t)fileSize) >> (i * 8));
+    hash = fnv1a32_update(hash, sizeBytes, sizeof(sizeBytes));
+
+    for (int i = 0; i < 5; i++) {
+        long target = (long)((double)fileSize * offsets[i]);
+        long maxStart = fileSize > (long)sizeof(buf) ? fileSize - (long)sizeof(buf) : 0;
+        if (target > maxStart) target = maxStart;
+        if (target < 0) target = 0;
+        if (fseek(f, target, SEEK_SET) != 0) break;
+        size_t got = fread(buf, 1, sizeof(buf), f);
+        if (got == 0) break;
+        hash = fnv1a32_update(hash, buf, got);
+    }
+
+    fclose(f);
+    out->sampleHash = hash;
+    return true;
+}
+
 bool CtrTextureCache_indexIsCurrentPath(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return false;
@@ -217,11 +292,36 @@ static bool index_is_valid_for(DataWin *dw) {
     FILE *f = fopen(path, "rb");
     if (!f) return false;
     CtrTextureCacheHeader hdr;
-    bool ok = read_header(f, &hdr) &&
-              hdr.tpagCount <= dw->tpag.count &&
-              hdr.segmentCount < 65536u * 16u;
+    bool headerOk = read_header(f, &hdr) &&
+                    hdr.tpagCount <= dw->tpag.count &&
+                    hdr.segmentCount < 65536u * 16u;
     fclose(f);
-    return ok;
+    if (!headerOk) return false;
+
+    // Fingerprint check: cache is only valid for the EXACT data.win it was
+    // built from. Without this, switching games (or replacing data.win for
+    // a mod update) keeps an old atlas.bin around and TPAG indices index
+    // into a stale atlas — that's how Chinese-glyph tiles end up in the
+    // wrong sprite slot during transitions.
+    SrcFingerprint fp = {0};
+    if (!compute_src_fingerprint(dw->filePath, &fp)) {
+        // Can't fingerprint — be conservative and force a rebuild.
+        fprintf(stderr,
+                "CTR cache: cannot fingerprint '%s'; treating cache as stale.\n",
+                dw->filePath ? dw->filePath : "(null)");
+        return false;
+    }
+
+    if (hdr.srcSize != fp.size ||
+        hdr.srcSampleHash != fp.sampleHash) {
+        fprintf(stderr,
+                "CTR cache: data.win fingerprint mismatch — cache (size=%llu hash=%08X) vs file (size=%llu hash=%08X); rebuilding\n",
+                (unsigned long long)hdr.srcSize, hdr.srcSampleHash,
+                (unsigned long long)fp.size,    fp.sampleHash);
+        return false;
+    }
+
+    return true;
 }
 
 static inline uint16_t pack_rgba4444(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
@@ -1018,6 +1118,17 @@ void CtrTextureCache_prepare(DataWin *dw) {
         hdr.segmentsOffset = hdr.itemsOffset + (uint32_t)(dw->tpag.count * sizeof(CacheItemDisk));
         hdr.atlasInfosOffset = hdr.segmentsOffset + (uint32_t)(segmentCount * sizeof(CacheSegmentDisk));
         hdr.atlasDataOffset = hdr.atlasInfosOffset + (uint32_t)(atlasCount * sizeof(CacheAtlasDisk));
+
+        // Stamp the source-file fingerprint. The apply-time check refuses to
+        // accept this cache if the data.win has changed (different game,
+        // mod update, manual replace), so a stale atlas.bin can't sneak in
+        // and project its TPAG slots onto unrelated atlas regions.
+        SrcFingerprint fp = {0};
+        compute_src_fingerprint(dw->filePath, &fp);
+        hdr.srcSize       = fp.size;
+        hdr.srcMtime      = 0;            // unused — see SrcFingerprint comment
+        hdr.srcSampleHash = fp.sampleHash;
+        hdr.reserved      = 0;
 
         // Оффсеты вычислимы заранее — атласы идут вплотную после таблиц.
         uint32_t off = hdr.atlasDataOffset;

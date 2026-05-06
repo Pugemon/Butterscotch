@@ -424,11 +424,20 @@ void Runner_drawBackgrounds(Runner* runner, bool foreground) {
         if (0 > bg->backgroundIndex) continue;
 
         int32_t tpagIndex = Renderer_resolveBackgroundTPAGIndex(dataWin, bg->backgroundIndex);
-        if (0 > tpagIndex) continue;
+        // Bound check on BOTH ends: < 0 is the "unresolved" sentinel from
+        // resolveAllTPAGReferences, but a stale/garbage value can still pass
+        // it while being out of range — e.g. when a mod has BGND entries
+        // pointing at TPAG offsets that no longer exist after a vanilla
+        // -> mod merge. Citra catches this as `unmapped Read16 @ 0x12`
+        // (boundingHeight at +18 in TexturePageItem); on real hardware it
+        // would be a hard data abort. Skip cleanly instead.
+        if (0 > tpagIndex || (uint32_t) tpagIndex >= dataWin->tpag.count) continue;
+        if (dataWin->tpag.items == nullptr) continue;
 
         if (bg->stretch) {
             // Stretch to fill room dimensions
             TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
+            if (tpag->boundingWidth == 0 || tpag->boundingHeight == 0) continue;
             float xscale = roomW / (float) tpag->boundingWidth;
             float yscale = roomH / (float) tpag->boundingHeight;
             runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f, xscale, yscale, 0.0f, 0xFFFFFF, bg->alpha);
@@ -715,9 +724,15 @@ void Runner_draw(Runner* runner) {
                         RuntimeBackgroundElement* bg = layerElement->backgroundElement;
                         if (!bg->visible) continue;
                         int32_t tpagIndex = Renderer_resolveSpriteTPAGIndex(dataWin, bg->spriteIndex);
-                        if (0 > tpagIndex) continue;
+                        // See note in the legacy backgrounds path above — the
+                        // resolved TPAG index can pass `< 0` while still being
+                        // out-of-range or pointing at a NULL items table when
+                        // the data.win's TPAG chunk is empty / desynced.
+                        if (0 > tpagIndex || (uint32_t) tpagIndex >= dataWin->tpag.count) continue;
+                        if (dataWin->tpag.items == nullptr) continue;
                         if (bg->stretch) {
                             TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
+                            if (tpag->boundingWidth == 0 || tpag->boundingHeight == 0) continue;
                             float xscale = roomW / (float) tpag->boundingWidth;
                             float yscale = roomH / (float) tpag->boundingHeight;
                             runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f, xscale, yscale, 0.0f, bg->blend, bg->alpha);
@@ -800,11 +815,14 @@ void Runner_draw(Runner* runner) {
                     RoomLayerBackgroundData* data = parsedLayer->backgroundData;
 
                         int32_t tpagIndex = Renderer_resolveSpriteTPAGIndex(dataWin, data->spriteIndex);
-                        if (0 > tpagIndex) continue;
+                        // See note in the legacy backgrounds path above.
+                        if (0 > tpagIndex || (uint32_t) tpagIndex >= dataWin->tpag.count) continue;
+                        if (dataWin->tpag.items == nullptr) continue;
 
                         if (data->stretch) {
                             // Stretch to fill room dimensions
                             TexturePageItem* tpag = &dataWin->tpag.items[tpagIndex];
+                            if (tpag->boundingWidth == 0 || tpag->boundingHeight == 0) continue;
                             float xscale = roomW / (float) tpag->boundingWidth;
                             float yscale = roomH / (float) tpag->boundingHeight;
                             runner->renderer->vtable->drawSprite(runner->renderer, tpagIndex, 0.0f, 0.0f, 0.0f, 0.0f, xscale, yscale, 0.0f, 0xFFFFFF, 1.0);

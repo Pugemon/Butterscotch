@@ -3379,6 +3379,7 @@ VMContext* VM_create(DataWin* dataWin) {
     // This eliminates per-call string hash lookups in handleCall.
     ctx->funcCallCacheCount = dataWin->func.functionCount;
     ctx->funcCallCache = safeMalloc(dataWin->func.functionCount * sizeof(FuncCallCache));
+    uint32_t missingFuncCount = 0;
     repeat(dataWin->func.functionCount, i) {
         const char* name = dataWin->func.functions[i].name;
         BuiltinFunc builtin = VM_findBuiltin(ctx, name);
@@ -3388,10 +3389,59 @@ VMContext* VM_create(DataWin* dataWin) {
         } else {
             ptrdiff_t mapIdx = shgeti(ctx->codeIndexByName, (char*) name);
             ctx->funcCallCache[i].scriptCodeIndex = (mapIdx >= 0) ? ctx->codeIndexByName[mapIdx].value : -1;
+            if (ctx->funcCallCache[i].scriptCodeIndex < 0) missingFuncCount++;
         }
     }
 
     fprintf(stderr, "VM: Initialized with %u global vars, sparse self vars (hashmap), %u functions mapped\n", ctx->globalVarCount, (uint32_t) shlen(ctx->codeIndexByName));
+
+    // Up-front list of FUNC entries the bytecode references but for which we
+    // have neither a registered builtin nor a script implementation. These
+    // are exactly the calls that will silently return undefined at runtime
+    // (often the reason something looks broken — missing fonts, no draw_text
+    // etc.). Printing them once at startup, sorted+deduped, is much more
+    // useful than relying on the per-call "Unknown function" log fire-once,
+    // because most runtime call sites only execute on specific events.
+    if (missingFuncCount > 0) {
+        // Collect, dedupe, sort.
+        const char** missing = safeMalloc(missingFuncCount * sizeof(const char*));
+        uint32_t mc = 0;
+        repeat(dataWin->func.functionCount, i) {
+            if (ctx->funcCallCache[i].builtin == nullptr &&
+                ctx->funcCallCache[i].scriptCodeIndex < 0) {
+                const char* name = dataWin->func.functions[i].name;
+                if (!name) continue;
+                missing[mc++] = name;
+            }
+        }
+        // Insertion sort — list is small (typically a few dozen entries).
+        for (uint32_t a = 1; a < mc; a++) {
+            const char* key = missing[a];
+            int32_t b = (int32_t)a - 1;
+            while (b >= 0 && strcmp(missing[b], key) > 0) {
+                missing[b + 1] = missing[b];
+                b--;
+            }
+            missing[b + 1] = key;
+        }
+        // Dedupe in place (cache pre-resolves usually doesn't repeat names,
+        // but be defensive — bytecode versions occasionally have aliases).
+        uint32_t unique = 0;
+        for (uint32_t a = 0; a < mc; a++) {
+            if (a == 0 || strcmp(missing[a - 1], missing[a]) != 0) {
+                missing[unique++] = missing[a];
+            }
+        }
+
+        fprintf(stderr, "===[ VM: %u UNIMPLEMENTED FUNCTION(S) REFERENCED BY BYTECODE ]===\n", unique);
+        for (uint32_t a = 0; a < unique; a++) {
+            fprintf(stderr, "  %s\n", missing[a]);
+        }
+        fprintf(stderr, "===[ END UNIMPLEMENTED LIST ]===\n");
+        free(missing);
+    } else {
+        fprintf(stderr, "VM: all bytecode-referenced functions resolved (no missing builtins/scripts)\n");
+    }
 
     return ctx;
 }

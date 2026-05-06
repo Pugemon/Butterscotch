@@ -2379,6 +2379,8 @@ static void ctr_draw_sprite_pos(Renderer *ren, int32_t id,
     CtrRenderer *ctx = (CtrRenderer *)ren;
     float c[4]; col2fv(ren->drawColor, alpha, c);
     if (c[3] <= 0.f) return;
+    if (id < 0 || (uint32_t)id >= ren->dataWin->tpag.count) return;
+    if (ren->dataWin->tpag.items == nullptr) return;
     TexturePageItem *item = &ren->dataWin->tpag.items[id];
     draw_region(ctx, (uint32_t)id, 0, 0, item->sourceWidth, item->sourceHeight,
                 x1, y1, x2, y2, x3, y3, x4, y4, c);
@@ -2401,7 +2403,8 @@ static void ctr_draw_tile(Renderer *ren, RoomTile *tile, float ox, float oy) {
     }
 
     int32_t id = Renderer_resolveObjectTPAGIndex(ren->dataWin, tile);
-    if (id < 0) return;
+    if (id < 0 || (uint32_t)id >= ren->dataWin->tpag.count) return;
+    if (ren->dataWin->tpag.items == nullptr) return;
 
     TexturePageItem *tpag = &ren->dataWin->tpag.items[id];
     int sx = tile->sourceX, sy = tile->sourceY;

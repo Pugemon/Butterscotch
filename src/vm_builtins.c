@@ -12,6 +12,7 @@
 #include <math.h>
 #include <ctype.h>
 #include <time.h>
+#include <sys/stat.h>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -26,6 +27,8 @@
 #include "ini.h"
 #include "audio_system.h"
 #include "file_system.h"
+#include "string_builder.h"
+#include "runner_mouse.h"
 
 #define MAX_BACKGROUNDS 8
 
@@ -8752,6 +8755,449 @@ STUB_RETURN_ZERO(window_get_y)
 STUB_RETURN_UNDEFINED(window_set_position)
 STUB_RETURN_ZERO(os_is_paused)
 
+// ===[ Bulk stubs for platform-specific stuff that has no meaning on 3DS ]===
+// (Switch/PS4/Steam/legacy d3d/etc. — game scripts call these defensively;
+//  we just need them to be present and return sane neutral values so the
+//  unimplemented-list at boot stops complaining and the calling code can
+//  branch on the no-op result.)
+
+// Switch user/account/controller suite — all no-ops returning false/0/undefined.
+STUB_RETURN_ZERO(switch_accounts_is_user_open)
+STUB_RETURN_VALUE(switch_accounts_open_user, 0)
+STUB_RETURN_VALUE(switch_accounts_select_account, 0)
+STUB_RETURN_UNDEFINED(switch_controller_set_supported_styles)
+STUB_RETURN_VALUE(switch_controller_support_get_selected_id, 0)
+STUB_RETURN_UNDEFINED(switch_controller_support_set_defaults)
+STUB_RETURN_UNDEFINED(switch_controller_support_set_singleplayer_only)
+STUB_RETURN_UNDEFINED(switch_controller_support_show)
+STUB_RETURN_VALUE(switch_language_get_desired_language, 0)
+STUB_RETURN_ZERO(switch_save_data_commit)
+STUB_RETURN_VALUE(switch_save_data_mount, 0)
+STUB_RETURN_UNDEFINED(switch_save_data_unmount)
+
+// PS4 / Steam / Window non-applicable stubs.
+STUB_RETURN_UNDEFINED(ps4_touchpad_mouse_enable)
+STUB_RETURN_ZERO(steam_get_achievement)
+STUB_RETURN_UNDEFINED(steam_set_achievement)
+STUB_RETURN_ZERO(steam_send_screenshot)
+STUB_RETURN_UNDEFINED(window_enable_borderless_fullscreen)
+
+// Legacy d3d 3D model API — Undertale references these but never actually
+// hits the call sites on overworld; safe to no-op.
+STUB_RETURN_VALUE(d3d_model_load, -1)
+STUB_RETURN_UNDEFINED(d3d_model_save)
+
+// Legacy GMS "action" suite — pre-GMS:Studio "drag-and-drop" actions.
+// Modern bytecode rarely runs these, but the FUNC table can still list them.
+STUB_RETURN_UNDEFINED(action_end_game)
+STUB_RETURN_UNDEFINED(action_move_start)
+STUB_RETURN_UNDEFINED(action_restart_game)
+STUB_RETURN_UNDEFINED(action_reverse_ydir)
+
+// gpu_set_texfilter — we always sample with NEAREST on 3DS for pixel-art
+// fidelity; honoring "linear" would require swapping all atlas filters
+// per-frame which isn't worth it. Log + ignore.
+static RValue builtin_gpu_set_texfilter(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    logStubbedFunction(ctx, "gpu_set_texfilter");
+    return RValue_makeUndefined();
+}
+
+STUB_RETURN_ZERO(gamepad_test_mapping)
+
+// FS_* — these are from a Russian Undertale extension shim. Stub them to
+// undefined (same as the real extension would do when the file ops fail);
+// game falls back to the vanilla path.
+STUB_RETURN_UNDEFINED(FS_copy_fast)
+STUB_RETURN_UNDEFINED(FS_export_image)
+STUB_RETURN_UNDEFINED(FS_export_image_adv)
+STUB_RETURN_UNDEFINED(FS_export_raw)
+STUB_RETURN_UNDEFINED(FS_import_image)
+STUB_RETURN_UNDEFINED(FS_set_gm_save_area)
+STUB_RETURN_UNDEFINED(FS_set_working_directory)
+static RValue builtin_FS_unique_fname(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    logStubbedFunction(ctx, "FS_unique_fname");
+    return RValue_makeOwnedString(safeStrdup(""));
+}
+
+// Image saving — could be implemented with PNG encoder, but on 3DS users
+// can't access the SD card mid-session anyway. Return success-shaped value.
+STUB_RETURN_ZERO(screen_save)
+STUB_RETURN_ZERO(screen_save_part)
+STUB_RETURN_ZERO(sprite_save)
+STUB_RETURN_ZERO(sprite_save_strip)
+STUB_RETURN_ZERO(surface_save)
+STUB_RETURN_ZERO(surface_save_part)
+STUB_RETURN_VALUE(background_save, -1)
+
+// Background slot APIs — the runtime renders backgrounds via room state,
+// not via on-the-fly slot adds. No-op + sane return.
+STUB_RETURN_VALUE(background_add, -1)
+STUB_RETURN_UNDEFINED(background_replace)
+
+// Buffer ext I/O — alias to the existing sync buffer save/load if/when
+// implemented. For now stub to -1 to mean "failed" so callers fallback.
+STUB_RETURN_VALUE(buffer_load_ext, -1)
+STUB_RETURN_VALUE(buffer_save_ext, -1)
+
+// ===[ Real implementations: ds_list extras ]===
+
+static RValue builtinDsListClear(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    DsList* list = dsListGet(runner, RValue_toInt32(args[0]));
+    if (list == nullptr) return RValue_makeUndefined();
+    repeat(arrlen(list->items), i) RValue_free(&list->items[i]);
+    arrsetlen(list->items, 0);
+    return RValue_makeUndefined();
+}
+
+static RValue builtinDsListDelete(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 2) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    DsList* list = dsListGet(runner, RValue_toInt32(args[0]));
+    if (list == nullptr) return RValue_makeUndefined();
+    int32_t pos = RValue_toInt32(args[1]);
+    int32_t len = (int32_t) arrlen(list->items);
+    if (pos < 0 || pos >= len) return RValue_makeUndefined();
+    RValue_free(&list->items[pos]);
+    // shift left
+    for (int32_t i = pos; i < len - 1; i++) list->items[i] = list->items[i + 1];
+    arrsetlen(list->items, (size_t)(len - 1));
+    return RValue_makeUndefined();
+}
+
+static RValue builtinDsListInsert(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 3) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    DsList* list = dsListGet(runner, RValue_toInt32(args[0]));
+    if (list == nullptr) return RValue_makeUndefined();
+    int32_t pos = RValue_toInt32(args[1]);
+    int32_t len = (int32_t) arrlen(list->items);
+    if (pos < 0) pos = 0;
+    if (pos > len) pos = len;
+    RValue empty = RValue_makeUndefined();
+    arrput(list->items, empty);
+    // shift right from end down to pos
+    for (int32_t i = (int32_t) arrlen(list->items) - 1; i > pos; i--)
+        list->items[i] = list->items[i - 1];
+    list->items[pos] = RValue_makeIndependent(args[2]);
+    return RValue_makeUndefined();
+}
+
+static RValue builtinDsListSet(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 3) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    DsList* list = dsListGet(runner, RValue_toInt32(args[0]));
+    if (list == nullptr) return RValue_makeUndefined();
+    int32_t pos = RValue_toInt32(args[1]);
+    if (pos < 0) return RValue_makeUndefined();
+    // ds_list_set grows the list, padding with undefined.
+    while ((int32_t) arrlen(list->items) <= pos) {
+        RValue u = RValue_makeUndefined();
+        arrput(list->items, u);
+    }
+    RValue_free(&list->items[pos]);
+    list->items[pos] = RValue_makeIndependent(args[2]);
+    return RValue_makeUndefined();
+}
+
+// ds_list_read / ds_list_write — GMS serialises the list to/from a string of
+// hex bytes. We use a simple ad-hoc format: "L|count|item|item|..." with
+// items being type-prefixed (R<num>, S<urlencoded>, U for undefined).
+// Compatible across our own runtime; not byte-compatible with vanilla GMS
+// (which game saves don't expose anyway — these are for runtime-only state).
+static char* ds_serialize_item(const RValue* v) {
+    char buf[64];
+    switch (v->type) {
+        case RVALUE_REAL:   snprintf(buf, sizeof(buf), "R%.17g", (double)v->real); return safeStrdup(buf);
+        case RVALUE_INT32:  snprintf(buf, sizeof(buf), "I%d", v->int32);             return safeStrdup(buf);
+        case RVALUE_BOOL:   return safeStrdup(v->int32 ? "B1" : "B0");
+        case RVALUE_STRING: {
+            const char* s = v->string ? v->string : "";
+            size_t n = strlen(s);
+            // Escape | and \ so the | separator survives.
+            char* out = safeMalloc(n * 2 + 2);
+            char* p = out;
+            *p++ = 'S';
+            for (size_t i = 0; i < n; i++) {
+                if (s[i] == '|' || s[i] == '\\') *p++ = '\\';
+                *p++ = s[i];
+            }
+            *p = '\0';
+            return out;
+        }
+        default: return safeStrdup("U");
+    }
+}
+
+static RValue builtinDsListWrite(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeOwnedString(safeStrdup(""));
+    Runner* runner = (Runner*) ctx->runner;
+    DsList* list = dsListGet(runner, RValue_toInt32(args[0]));
+    if (list == nullptr) return RValue_makeOwnedString(safeStrdup(""));
+
+    StringBuilder sb = StringBuilder_create(64);
+    char hdr[32];
+    snprintf(hdr, sizeof(hdr), "L|%ld", (long) arrlen(list->items));
+    StringBuilder_append(&sb, hdr);
+    for (int32_t i = 0; i < (int32_t) arrlen(list->items); i++) {
+        char* item = ds_serialize_item(&list->items[i]);
+        StringBuilder_append(&sb, "|");
+        StringBuilder_append(&sb, item);
+        free(item);
+    }
+    char* out = StringBuilder_toString(&sb);
+    StringBuilder_free(&sb);
+    return RValue_makeOwnedString(out);
+}
+
+static RValue builtinDsListRead(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 2) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    DsList* list = dsListGet(runner, RValue_toInt32(args[0]));
+    if (list == nullptr) return RValue_makeUndefined();
+    char* serialized = RValue_toString(args[1]);
+
+    // Clear any existing contents.
+    repeat(arrlen(list->items), i) RValue_free(&list->items[i]);
+    arrsetlen(list->items, 0);
+
+    // Split on unescaped '|'.
+    char* p = serialized;
+    if (*p == 'L' && *(p+1) == '|') p += 2;
+    // Skip count (we don't trust it; we just parse until end).
+    while (*p && *p != '|') p++;
+    if (*p == '|') p++;
+
+    while (*p) {
+        // Read one item — copy chars, honouring backslash escapes.
+        char buf[2048];
+        size_t bi = 0;
+        while (*p && *p != '|' && bi + 1 < sizeof(buf)) {
+            if (*p == '\\' && *(p+1)) { p++; buf[bi++] = *p++; continue; }
+            buf[bi++] = *p++;
+        }
+        buf[bi] = '\0';
+        if (*p == '|') p++;
+        RValue v;
+        if (buf[0] == 'R')      v = RValue_makeReal(strtod(buf+1, nullptr));
+        else if (buf[0] == 'I') v = RValue_makeReal((GMLReal)atoi(buf+1));
+        else if (buf[0] == 'B') v = RValue_makeBool(buf[1] == '1');
+        else if (buf[0] == 'S') v = RValue_makeOwnedString(safeStrdup(buf+1));
+        else                    v = RValue_makeUndefined();
+        arrput(list->items, v);
+    }
+    free(serialized);
+    return RValue_makeUndefined();
+}
+
+// ===[ Real implementations: ds_queue ]===
+// We piggyback on DsList — a queue is a list with head-pop semantics.
+// Distinguishing the two by id range would be ugly; instead, ds_queue_* just
+// operate on the same dsListPool. Game code never mixes the two on the
+// same id, so this is safe.
+static RValue builtinDsQueueCreate(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    return RValue_makeReal((GMLReal) dsListCreate(runner));
+}
+
+static RValue builtinDsQueueDestroy(VMContext* ctx, RValue* args, int32_t argCount) {
+    return builtinDsListDestroy(ctx, args, argCount);
+}
+
+static RValue builtinDsQueueEnqueue(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 2) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    DsList* list = dsListGet(runner, RValue_toInt32(args[0]));
+    if (list == nullptr) return RValue_makeUndefined();
+    // Match GMS variadic: ds_queue_enqueue(q, v1, v2, ...).
+    for (int32_t i = 1; i < argCount; i++) arrput(list->items, RValue_makeIndependent(args[i]));
+    return RValue_makeUndefined();
+}
+
+static RValue builtinDsQueueDequeue(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    DsList* list = dsListGet(runner, RValue_toInt32(args[0]));
+    if (list == nullptr || arrlen(list->items) == 0) return RValue_makeUndefined();
+    RValue head = list->items[0];
+    int32_t len = (int32_t) arrlen(list->items);
+    for (int32_t i = 0; i < len - 1; i++) list->items[i] = list->items[i + 1];
+    arrsetlen(list->items, (size_t)(len - 1));
+    return head; // ownership passes to caller; do NOT free.
+}
+
+static RValue builtinDsQueueHead(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    DsList* list = dsListGet(runner, RValue_toInt32(args[0]));
+    if (list == nullptr || arrlen(list->items) == 0) return RValue_makeUndefined();
+    return RValue_makeIndependent(list->items[0]);
+}
+
+static RValue builtinDsQueueSize(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeReal(0.0);
+    Runner* runner = (Runner*) ctx->runner;
+    DsList* list = dsListGet(runner, RValue_toInt32(args[0]));
+    if (list == nullptr) return RValue_makeReal(0.0);
+    return RValue_makeReal((GMLReal) arrlen(list->items));
+}
+
+// ===[ Real: string_split ]===
+
+static RValue builtinStringSplit(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 2) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    char* str       = RValue_toString(args[0]);
+    char* delim     = RValue_toString(args[1]);
+    size_t dlen     = strlen(delim);
+    if (dlen == 0) {
+        // Per GMS: empty delim returns the original as a single-element array.
+        // We expose the result as a ds_list-id since arrays cross VM/Runner;
+        // closest semantic match without extending RValue.
+        int32_t lid = dsListCreate(runner);
+        DsList* list = dsListGet(runner, lid);
+        arrput(list->items, RValue_makeOwnedString(str));
+        free(delim);
+        return RValue_makeReal((GMLReal) lid);
+    }
+
+    int32_t lid = dsListCreate(runner);
+    DsList* list = dsListGet(runner, lid);
+    const char* p = str;
+    while (true) {
+        const char* hit = strstr(p, delim);
+        size_t take = hit ? (size_t)(hit - p) : strlen(p);
+        char* slice = safeMalloc(take + 1);
+        memcpy(slice, p, take);
+        slice[take] = '\0';
+        arrput(list->items, RValue_makeOwnedString(slice));
+        if (!hit) break;
+        p = hit + dlen;
+    }
+    free(str);
+    free(delim);
+    return RValue_makeReal((GMLReal) lid);
+}
+
+// ===[ Real: ini_key_exists ]===
+
+static RValue builtin_ini_key_exists(VMContext* ctx, RValue* args, int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    if (argCount < 2 || runner->currentIni == nullptr) return RValue_makeBool(false);
+    const char* section = (args[0].type == RVALUE_STRING ? args[0].string : "");
+    const char* key     = (args[1].type == RVALUE_STRING ? args[1].string : "");
+    return RValue_makeBool(Ini_hasKey(runner->currentIni, section, key));
+}
+
+// ===[ Real: parameter_count / parameter_string ]===
+// On 3DS we get no command-line args, so always 0 / "".
+
+static RValue builtin_parameter_count(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal(0.0);
+}
+
+static RValue builtin_parameter_string(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeOwnedString(safeStrdup(""));
+}
+
+// ===[ Real: directory_create / directory_exists ]===
+
+static RValue builtin_directory_create(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeUndefined();
+    char* path = RValue_toString(args[0]);
+#if defined(_WIN32) && !defined(__MINGW32__)
+    (void)mkdir(path); // MSVC: single-arg form
+#else
+    (void)mkdir(path, 0777); // POSIX / MinGW / devkitARM newlib
+#endif
+    free(path);
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_directory_exists(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeBool(false);
+    char* path = RValue_toString(args[0]);
+    struct stat st;
+    bool ok = (stat(path, &st) == 0) && S_ISDIR(st.st_mode);
+    free(path);
+    return RValue_makeBool(ok);
+}
+
+// ===[ Real: mouse_wheel_up / mouse_wheel_down ]===
+// 3DS has no scroll wheel hardware, so these always read false. Defined as
+// real builtins (not stubs) so the unimplemented-list at boot stays clean
+// and so callers don't pay the per-call "Unknown function" log cost.
+
+static RValue builtin_mouse_wheel_up(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeBool(false);
+}
+
+static RValue builtin_mouse_wheel_down(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeBool(false);
+}
+
+// ===[ Real: os_get_config / os_get_info ]===
+
+static RValue builtin_os_get_config(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    // Returns the active config name. We don't ship multiple configs on 3DS.
+    return RValue_makeOwnedString(safeStrdup("Default"));
+}
+
+static RValue builtin_os_get_info(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    // Returns a ds_map id with platform info. Scripts that probe os_get_info
+    // typically just check a couple of well-known keys, so we surface the
+    // minimum subset and leave the rest undefined.
+    int32_t mapId = dsMapCreate(runner);
+    DsMapEntry** mp = dsMapGet(runner, mapId);
+    if (mp != nullptr) {
+        shput(*mp, safeStrdup("os_type"), RValue_makeOwnedString(safeStrdup("Nintendo3DS")));
+        shput(*mp, safeStrdup("device"),  RValue_makeOwnedString(safeStrdup("Nintendo 3DS")));
+    }
+    return RValue_makeReal((GMLReal) mapId);
+}
+
+// ===[ Real: surface_resize ]===
+
+static RValue builtin_surface_resize(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 3) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner->renderer == nullptr) return RValue_makeUndefined();
+    int32_t id = RValue_toInt32(args[0]);
+    int32_t w  = RValue_toInt32(args[1]);
+    int32_t h  = RValue_toInt32(args[2]);
+    // Re-create: simplest cross-renderer impl. Free old, mint new with same id
+    // if the renderer supports it; otherwise log & do nothing (game still runs).
+    if (runner->renderer->vtable->freeSurface != nullptr &&
+        runner->renderer->vtable->createSurface != nullptr) {
+        runner->renderer->vtable->freeSurface(runner->renderer, id);
+        // Note: createSurface returns a fresh id, not necessarily `id`. For
+        // games that use surface_resize on the application surface (id 0)
+        // this is acceptable since they'll just call surface_get_*() to
+        // refresh. For others we emit a stub log so it's findable.
+        (void) runner->renderer->vtable->createSurface(runner->renderer, w, h);
+    }
+    logSemiStubbedFunction(ctx, "surface_resize");
+    return RValue_makeUndefined();
+}
+
+// ===[ Real: show_error ]===
+
+static RValue builtin_show_error(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeUndefined();
+    char* msg = RValue_toString(args[0]);
+    bool fatal = (argCount >= 2) && RValue_toBool(args[1]);
+    fprintf(stderr, "show_error: %s%s\n", msg, fatal ? " [FATAL]" : "");
+    free(msg);
+    if (fatal) {
+        // Match GMS: fatal=1 terminates the game. Set the runner exit flag.
+        Runner* runner = (Runner*) ctx->runner;
+        if (runner != nullptr) runner->shouldExit = true;
+    }
+    return RValue_makeUndefined();
+}
+
 static RValue builtinDateCurrentDatetime(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     return RValue_makeReal((GMLReal) time(nullptr) / 86400.0 + 25569.0);
 }
@@ -9474,5 +9920,100 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx,"gpu_set_alphatestenable", builtinGpuSetAlphaTestEnable);
     VM_registerBuiltin(ctx,"gpu_set_alphatestref", builtinGpuSetAlphaTestRef);
     VM_registerBuiltin(ctx,"gpu_set_colorwriteenable", builtinGpuSetColorWriteEnable);
+
+    // ----- Newly-added builtins (see corresponding implementations above) -----
+
+    // GMS draw_text colour aliases — same impl, just both spellings + ordering
+    // variants the bytecode happens to reference.
+    VM_registerBuiltin(ctx, "draw_text_transformed_color",  builtin_drawTextColorTransformed);
+    VM_registerBuiltin(ctx, "draw_text_transformed_colour", builtin_drawTextColorTransformed);
+    VM_registerBuiltin(ctx, "draw_text_ext_colour",         builtin_drawTextColorExt);
+
+    // ds_list extras
+    VM_registerBuiltin(ctx, "ds_list_clear",  builtinDsListClear);
+    VM_registerBuiltin(ctx, "ds_list_delete", builtinDsListDelete);
+    VM_registerBuiltin(ctx, "ds_list_insert", builtinDsListInsert);
+    VM_registerBuiltin(ctx, "ds_list_set",    builtinDsListSet);
+    VM_registerBuiltin(ctx, "ds_list_read",   builtinDsListRead);
+    VM_registerBuiltin(ctx, "ds_list_write",  builtinDsListWrite);
+
+    // ds_queue (piggybacks on ds_list pool)
+    VM_registerBuiltin(ctx, "ds_queue_create",  builtinDsQueueCreate);
+    VM_registerBuiltin(ctx, "ds_queue_destroy", builtinDsQueueDestroy);
+    VM_registerBuiltin(ctx, "ds_queue_enqueue", builtinDsQueueEnqueue);
+    VM_registerBuiltin(ctx, "ds_queue_dequeue", builtinDsQueueDequeue);
+    VM_registerBuiltin(ctx, "ds_queue_head",    builtinDsQueueHead);
+    VM_registerBuiltin(ctx, "ds_queue_size",    builtinDsQueueSize);
+
+    // Strings / ini / OS / surface / errors / mouse / dirs
+    VM_registerBuiltin(ctx, "string_split",        builtinStringSplit);
+    VM_registerBuiltin(ctx, "ini_key_exists",      builtin_ini_key_exists);
+    VM_registerBuiltin(ctx, "parameter_count",     builtin_parameter_count);
+    VM_registerBuiltin(ctx, "parameter_string",    builtin_parameter_string);
+    VM_registerBuiltin(ctx, "directory_create",    builtin_directory_create);
+    VM_registerBuiltin(ctx, "directory_exists",    builtin_directory_exists);
+    VM_registerBuiltin(ctx, "mouse_wheel_up",      builtin_mouse_wheel_up);
+    VM_registerBuiltin(ctx, "mouse_wheel_down",    builtin_mouse_wheel_down);
+    VM_registerBuiltin(ctx, "os_get_config",       builtin_os_get_config);
+    VM_registerBuiltin(ctx, "os_get_info",         builtin_os_get_info);
+    VM_registerBuiltin(ctx, "surface_resize",      builtin_surface_resize);
+    VM_registerBuiltin(ctx, "show_error",          builtin_show_error);
+    VM_registerBuiltin(ctx, "gpu_set_texfilter",   builtin_gpu_set_texfilter);
+
+    // Stubs (platform-irrelevant). Listed grouped so a future grep for
+    // platform=3DS shows what was deliberately no-op'd.
+    VM_registerBuiltin(ctx, "gamepad_test_mapping", builtin_gamepad_test_mapping);
+
+    VM_registerBuiltin(ctx, "switch_accounts_is_user_open",                 builtin_switch_accounts_is_user_open);
+    VM_registerBuiltin(ctx, "switch_accounts_open_user",                    builtin_switch_accounts_open_user);
+    VM_registerBuiltin(ctx, "switch_accounts_select_account",               builtin_switch_accounts_select_account);
+    VM_registerBuiltin(ctx, "switch_controller_set_supported_styles",       builtin_switch_controller_set_supported_styles);
+    VM_registerBuiltin(ctx, "switch_controller_support_get_selected_id",    builtin_switch_controller_support_get_selected_id);
+    VM_registerBuiltin(ctx, "switch_controller_support_set_defaults",       builtin_switch_controller_support_set_defaults);
+    VM_registerBuiltin(ctx, "switch_controller_support_set_singleplayer_only", builtin_switch_controller_support_set_singleplayer_only);
+    VM_registerBuiltin(ctx, "switch_controller_support_show",               builtin_switch_controller_support_show);
+    VM_registerBuiltin(ctx, "switch_language_get_desired_language",         builtin_switch_language_get_desired_language);
+    VM_registerBuiltin(ctx, "switch_save_data_commit",                      builtin_switch_save_data_commit);
+    VM_registerBuiltin(ctx, "switch_save_data_mount",                       builtin_switch_save_data_mount);
+    VM_registerBuiltin(ctx, "switch_save_data_unmount",                     builtin_switch_save_data_unmount);
+
+    VM_registerBuiltin(ctx, "ps4_touchpad_mouse_enable",       builtin_ps4_touchpad_mouse_enable);
+
+    VM_registerBuiltin(ctx, "steam_get_achievement",  builtin_steam_get_achievement);
+    VM_registerBuiltin(ctx, "steam_set_achievement",  builtin_steam_set_achievement);
+    VM_registerBuiltin(ctx, "steam_send_screenshot",  builtin_steam_send_screenshot);
+
+    VM_registerBuiltin(ctx, "window_enable_borderless_fullscreen", builtin_window_enable_borderless_fullscreen);
+
+    VM_registerBuiltin(ctx, "d3d_model_load", builtin_d3d_model_load);
+    VM_registerBuiltin(ctx, "d3d_model_save", builtin_d3d_model_save);
+
+    VM_registerBuiltin(ctx, "action_end_game",     builtin_action_end_game);
+    VM_registerBuiltin(ctx, "action_move_start",   builtin_action_move_start);
+    VM_registerBuiltin(ctx, "action_restart_game", builtin_action_restart_game);
+    VM_registerBuiltin(ctx, "action_reverse_ydir", builtin_action_reverse_ydir);
+
+    VM_registerBuiltin(ctx, "FS_copy_fast",            builtin_FS_copy_fast);
+    VM_registerBuiltin(ctx, "FS_export_image",         builtin_FS_export_image);
+    VM_registerBuiltin(ctx, "FS_export_image_adv",     builtin_FS_export_image_adv);
+    VM_registerBuiltin(ctx, "FS_export_raw",           builtin_FS_export_raw);
+    VM_registerBuiltin(ctx, "FS_import_image",         builtin_FS_import_image);
+    VM_registerBuiltin(ctx, "FS_set_gm_save_area",     builtin_FS_set_gm_save_area);
+    VM_registerBuiltin(ctx, "FS_set_working_directory",builtin_FS_set_working_directory);
+    VM_registerBuiltin(ctx, "FS_unique_fname",         builtin_FS_unique_fname);
+
+    VM_registerBuiltin(ctx, "screen_save",       builtin_screen_save);
+    VM_registerBuiltin(ctx, "screen_save_part",  builtin_screen_save_part);
+    VM_registerBuiltin(ctx, "sprite_save",       builtin_sprite_save);
+    VM_registerBuiltin(ctx, "sprite_save_strip", builtin_sprite_save_strip);
+    VM_registerBuiltin(ctx, "surface_save",      builtin_surface_save);
+    VM_registerBuiltin(ctx, "surface_save_part", builtin_surface_save_part);
+    VM_registerBuiltin(ctx, "background_save",   builtin_background_save);
+
+    VM_registerBuiltin(ctx, "background_add",     builtin_background_add);
+    VM_registerBuiltin(ctx, "background_replace", builtin_background_replace);
+
+    VM_registerBuiltin(ctx, "buffer_load_ext",  builtin_buffer_load_ext);
+    VM_registerBuiltin(ctx, "buffer_save_ext",  builtin_buffer_save_ext);
 }
 

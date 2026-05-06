@@ -885,7 +885,12 @@ static void parseFONT(BinaryReader* reader, DataWin* dw) {
         }
     }
 
+    // Zero-init: parseFONT can bail out of the per-font loop early when a
+    // mod-broken layout is detected, leaving the tail of fonts[] untouched.
+    // Downstream code (Font_buildGlyphLUT call sites, glyph LUT teardown)
+    // checks for NULL pointers, so zeroing is enough to make those safe.
     f->fonts = safeMalloc(count * sizeof(Font));
+    memset(f->fonts, 0, count * sizeof(Font));
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
         Font* font = &f->fonts[i];
@@ -934,30 +939,36 @@ static void parseFONT(BinaryReader* reader, DataWin* dw) {
         font->isSpriteFont = false;
         font->spriteIndex = -1;
 
-        // Glyphs PointerList
-        uint32_t glyphCount;
-        uint32_t* glyphPtrs = readPointerTable(reader, &glyphCount);
-
-        // Sanity: a single font has at most a few thousand glyphs in real
-        // games (CJK / Hangul are the high end at ~12k). Anything way past
-        // that is a parser desync, almost always caused by a mod that
-        // shuffled the FONT layout (extra optional fields, sprite-font
-        // marker etc.) and kicked our `fontOptionalCount` probe off-track.
-        // Skip the rest of this font cleanly so the remaining fonts still
-        // load, instead of allocating a hundred MB of FontGlyph and dying.
-        if (glyphCount > 65536u) {
+        // Glyphs PointerList. Peek the count first so we can refuse a
+        // 4-billion-entry table outright, instead of blowing safeMalloc
+        // straight from readPointerTable. Real games top out around 12k
+        // glyphs (CJK fonts); anything past 65k is a parser desync (mod
+        // injected an unexpected optional field, sprite-font marker, etc.).
+        size_t glyphTableStart = BinaryReader_getPosition(reader);
+        uint32_t peekCount = BinaryReader_readUint32(reader);
+        if (peekCount > 65536u) {
             fprintf(stderr,
                     "FONT: insane glyphCount=%u for font '%s' (idx %zu); skipping its glyphs.\n",
-                    glyphCount,
+                    peekCount,
                     font->name ? font->name : "(null)",
                     (size_t)i);
             font->glyphCount = 0;
             font->glyphs = nullptr;
             font->maxGlyphHeight = 0;
             Font_buildGlyphLUT(font);
-            free(glyphPtrs);
-            continue;
+            // Don't try to skip past the (bogus) pointer list — we'd
+            // walk into garbage. Truncate the FONT count to "fonts parsed
+            // so far including this one" and resync via the chunk-end seek
+            // that the dispatcher does after parseFONT returns.
+            (void)glyphTableStart;
+            f->count = (uint32_t)(i + 1);
+            free(ptrs);
+            return;
         }
+        // Rewind back to the count and let readPointerTable do its thing.
+        BinaryReader_seek(reader, glyphTableStart);
+        uint32_t glyphCount;
+        uint32_t* glyphPtrs = readPointerTable(reader, &glyphCount);
         font->glyphCount = glyphCount;
 
         uint32_t maxGlyphHeight = 0;
@@ -1721,8 +1732,6 @@ static int32_t findTPAGIndexByOffset(const TpagSortPair* sorted, uint32_t count,
 }
 
 static void resolveAllTPAGReferences(DataWin* dw, uint32_t* ptrs, uint32_t count) {
-    // Build a sorted (offset, originalIndex) view that survives mod-broken
-    // pointer tables. Skip when count is 0 — nothing to resolve.
     TpagSortPair* sorted = NULL;
     bool wasSorted = true;
     if (count > 0) {
@@ -1748,7 +1757,8 @@ static void resolveAllTPAGReferences(DataWin* dw, uint32_t* ptrs, uint32_t count
         repeat(spr->textureCount, j) {
             uint32_t off = (uint32_t) spr->tpagIndices[j];
             int32_t resolved = findTPAGIndexByOffset(sorted, count, off);
-            spr->tpagIndices[j] = resolved;
+            // Если индекс -1, подсовываем фейковый элемент (находится по индексу count)
+            spr->tpagIndices[j] = (resolved < 0) ? (int32_t)count : resolved;
             if (off != 0 && resolved < 0) sprtMisses++;
         }
     }
@@ -1756,20 +1766,20 @@ static void resolveAllTPAGReferences(DataWin* dw, uint32_t* ptrs, uint32_t count
         Background* bg = &dw->bgnd.backgrounds[i];
         uint32_t off = (uint32_t) bg->tpagIndex;
         int32_t resolved = findTPAGIndexByOffset(sorted, count, off);
-        bg->tpagIndex = resolved;
+        bg->tpagIndex = (resolved < 0) ? (int32_t)count : resolved;
         if (off != 0 && resolved < 0) bgndMisses++;
     }
     repeat(dw->font.count, i) {
         Font* fnt = &dw->font.fonts[i];
         uint32_t off = (uint32_t) fnt->tpagIndex;
         int32_t resolved = findTPAGIndexByOffset(sorted, count, off);
-        fnt->tpagIndex = resolved;
+        fnt->tpagIndex = (resolved < 0) ? (int32_t)count : resolved;
         if (off != 0 && resolved < 0) fontMisses++;
     }
 
     if (sprtMisses || bgndMisses || fontMisses) {
         fprintf(stderr,
-                "TPAG: unresolved references — sprt=%u bgnd=%u font=%u (likely modded entries pointing outside TPAG)\n",
+                "TPAG: unresolved references mapped to dummy item — sprt=%u bgnd=%u font=%u\n",
                 sprtMisses, bgndMisses, fontMisses);
     }
 
@@ -1781,11 +1791,19 @@ static void parseTPAG(BinaryReader* reader, DataWin* dw) {
 
     uint32_t count;
     uint32_t* ptrs = readPointerTable(reader, &count);
-    t->count = count;
 
-    if (count == 0) { free(ptrs); t->items = nullptr; return; }
+    if (count == 0) {
+        free(ptrs);
+        t->count = 0;
+        t->items = nullptr;
+        return;
+    }
 
-    t->items = safeMalloc(count * sizeof(TexturePageItem));
+    // Выделяем на 1 элемент больше. Этот последний слот будет "фейковым" для всех -1 индексов.
+    // Это лечит краш движка (unmapped Read16 @ 0x00000012) из-за попытки прочитать boundingHeight по NULL указателю.
+    t->count = count + 1;
+    t->items = safeMalloc(t->count * sizeof(TexturePageItem));
+
     repeat(count, i) {
         BinaryReader_seek(reader, ptrs[i]);
         TexturePageItem* item = &t->items[i];
@@ -1802,6 +1820,11 @@ static void parseTPAG(BinaryReader* reader, DataWin* dw) {
         item->texturePageId = BinaryReader_readInt16(reader);
     }
 
+    // Инициализируем наш фейковый элемент нулями
+    memset(&t->items[count], 0, sizeof(TexturePageItem));
+    t->items[count].texturePageId = -1; // -1 чтобы не пытался грузить из реальной текстуры
+
+    // Передаем оригинальный count (без фейкового), чтобы сортировка прошла правильно
     resolveAllTPAGReferences(dw, ptrs, count);
 
     free(ptrs);
@@ -2219,10 +2242,25 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
     uint32_t bigBlobs = 0;
     uint64_t fsz = (uint64_t)reader->fileSize;
     for (uint32_t s = 0; s < realCount; s++) {
-        uint32_t curOff  = sorted[s].off;
-        uint64_t nextOff = (s + 1 < realCount) ? (uint64_t)sorted[s + 1].off : fsz;
-        if (nextOff <= curOff) nextOff = fsz; // duplicate / corrupted entry
-        if (nextOff > fsz)     nextOff = fsz; // can't read past EOF
+        uint32_t curOff = sorted[s].off;
+        bool inChunk   = ((size_t)curOff < chunkEnd);
+
+        // The "boundary" for this blob's region: TXTR end if the blob lives
+        // inside the chunk, otherwise fileSize (mod-appended blobs that sit
+        // past TXTR — handled by my earlier sorted-offset fix).
+        //
+        // This is the critical clamp for games like VA-11 Hall-A whose AUDO
+        // chunk is sandwiched between two halves of TXTR blob data: the last
+        // blob inside TXTR has a "next sorted offset" that lies AFTER AUDO
+        // (the appended blob at file end), and naively diffing the two would
+        // include the entire AUDO chunk in the first blob's size — that was
+        // the 191 MB clamp warning the user kept hitting, producing garbage
+        // PNG decode for the affected page and a black/empty atlas slot.
+        uint64_t boundary = inChunk ? (uint64_t)chunkEnd : fsz;
+        uint64_t nextOff  = (s + 1 < realCount) ? (uint64_t)sorted[s + 1].off : boundary;
+        if (nextOff <= curOff) nextOff = boundary; // duplicate / corrupted entry
+        if (nextOff > boundary) nextOff = boundary; // don't cross region boundary
+        if (nextOff > fsz)      nextOff = fsz;     // and never past EOF
 
         uint64_t sz = nextOff - curOff;
         // Hard sanity cap: a single texture page > 64 MB is almost certainly
@@ -2238,7 +2276,7 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
         }
 
         t->textures[sorted[s].idx].blobSize = (uint32_t)sz;
-        if ((size_t)curOff >= chunkEnd) outOfChunk++;
+        if (!inChunk) outOfChunk++;
     }
 
     if (outOfChunk > 0 || bigBlobs > 0) {
