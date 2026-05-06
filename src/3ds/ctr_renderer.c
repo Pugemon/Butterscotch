@@ -1498,8 +1498,6 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
     GPU_TEXCOLOR texFormat = GPU_RGBA4;
     if (page->format == CTR_TEXTURE_CACHE_FORMAT_LA4) texFormat = GPU_LA4;
     else if (page->format == CTR_TEXTURE_CACHE_FORMAT_A4) texFormat = GPU_A4;
-    else if (page->format == CTR_TEXTURE_CACHE_FORMAT_ETC1) texFormat = GPU_ETC1;
-    else if (page->format == CTR_TEXTURE_CACHE_FORMAT_ETC1A4) texFormat = GPU_ETC1A4;
 
     bool texOk = C3D_TexInit(&page->tex,
                              (u16)CTR_TEXTURE_CACHE_ATLAS_SIZE,

@@ -3297,6 +3297,20 @@ static AudioSystem* getAudioSystem(VMContext* ctx) {
 }
 
 
+
+static RValue builtin_audioExists(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    AudioSystem* audio = getAudioSystem(ctx);
+    if (audio == nullptr || audio->vtable == nullptr || argCount < 1) return RValue_makeBool(false);
+    if (args[0].type == RVALUE_UNDEFINED) return RValue_makeBool(false);
+
+    int32_t soundIndex = RValue_toInt32(args[0]);
+    if (soundIndex < 0) return RValue_makeBool(false);
+
+    DataWin* dw = audio->audioGroups != nullptr && arrlen(audio->audioGroups) > 0 ? audio->audioGroups[0] : nullptr;
+    if (dw == nullptr) return RValue_makeBool(false);
+    return RValue_makeBool((uint32_t) soundIndex < dw->sond.count);
+}
+
 static RValue builtin_audioChannelNum(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     AudioSystem* audio = getAudioSystem(ctx);
     if (audio == nullptr) return RValue_makeUndefined();
@@ -4294,12 +4308,10 @@ static RValue builtinWindowGetHeight(VMContext* ctx, MAYBE_UNUSED RValue* args, 
 
 static RValue builtinWindowSetCaption(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     char* val = RValue_toString(args[0]);
-    char windowTitle[256];
-    snprintf(windowTitle, sizeof(windowTitle), "Butterscotch - %s", val);
 
     Runner* runner = (Runner*) ctx->runner;
-    if (runner->setWindowTitle && runner->nativeWindow) {
-        runner->setWindowTitle(runner->nativeWindow, windowTitle);
+    if (runner->setWindowTitle) {
+        runner->setWindowTitle(runner->nativeWindow, val);
         printf("GL: Window title set to: %s\n", val);
     }
 
@@ -4309,12 +4321,7 @@ static RValue builtinWindowSetCaption(VMContext* ctx, MAYBE_UNUSED RValue* args,
 
 static RValue builtinWindowHasFocus(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
-    // Always return true when not on GLFW
-    if (runner == nullptr || runner->nativeWindow == nullptr) {
-        return RValue_makeBool(true);
-    }
-
-    if (runner->windowHasFocus) {
+    if (runner != nullptr && runner->windowHasFocus) {
         return RValue_makeBool(runner->windowHasFocus(runner->nativeWindow));
     }
 
@@ -7631,6 +7638,34 @@ static RValue builtinLayerBackgroundAlpha(VMContext* ctx, RValue* args, MAYBE_UN
 }
 
 #if IS_BC17_OR_HIGHER_ENABLED
+static RValue builtinLayerTilemapGetId(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (1 > argCount) return RValue_makeReal(-1.0);
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t layerId = resolveLayerIdArg(runner, args[0]);
+    if (0 > layerId) return RValue_makeReal(-1.0);
+
+    RoomLayer* foundLayer = Runner_findRoomLayerById(runner, layerId);
+    if (foundLayer != nullptr && foundLayer->type == RoomLayerType_Tiles) {
+        return RValue_makeReal(layerId);
+    }
+
+    return RValue_makeReal(-1.0);
+}
+
+static RValue builtinDrawTilemap(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    if (3 > argCount) return RValue_makeUndefined();
+    Runner* runner = (Runner*) ctx->runner;
+    int32_t tilemapLayerId = RValue_toInt32(args[0]);
+    GMLReal x = RValue_toReal(args[1]);
+    GMLReal y = RValue_toReal(args[2]);
+
+    RoomLayer* foundLayer = Runner_findRoomLayerById(runner, tilemapLayerId);
+    if (foundLayer != nullptr && foundLayer->type == RoomLayerType_Tiles) {
+        Runner_drawTileLayer(runner, foundLayer->tilesData, x, y);
+    }
+
+    return RValue_makeUndefined();
+}
 static RValue builtinLayerGetAllElements(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     int32_t id = resolveLayerIdArg(runner, args[0]);
@@ -8992,6 +9027,8 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "steam_file_write_file", builtin_steam_file_write_file);
 
     // Audio
+    VM_registerBuiltin(ctx, "audio_exists", builtin_audioExists);
+    VM_registerBuiltin(ctx, "sound_exists", builtin_audioExists);
     VM_registerBuiltin(ctx, "audio_channel_num", builtin_audioChannelNum);
     VM_registerBuiltin(ctx, "audio_play_sound", builtin_audioPlaySound);
     VM_registerBuiltin(ctx, "audio_stop_sound", builtin_audioStopSound);
@@ -9369,6 +9406,8 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "layer_sprite_destroy", builtinLayerSpriteDestroy);
 #if IS_BC17_OR_HIGHER_ENABLED
     VM_registerBuiltin(ctx, "layer_get_id_at_depth", builtinLayerGetIdAtDepth);
+    VM_registerBuiltin(ctx, "layer_tilemap_get_id", builtinLayerTilemapGetId);
+    VM_registerBuiltin(ctx, "draw_tilemap", builtinDrawTilemap);
 #endif
     VM_registerBuiltin(ctx, "layer_create", builtinLayerCreate);
     VM_registerBuiltin(ctx, "layer_destroy", builtinLayerDestroy);
