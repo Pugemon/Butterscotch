@@ -406,6 +406,51 @@ static void parseEXTN(BinaryReader* reader, DataWin* dw) {
 
         // Files: SimpleList (count followed by inline structs — NOT a pointer list)
         uint32_t fileCount = BinaryReader_readUint32(reader);
+
+        // Sanity: real games have at most a handful of extension files. A count
+        // in the millions means the parser is desynced (this is what crashes
+        // Deltarune Steamworks builds with FATAL: malloc(349628352)). Dump a
+        // few bytes of context and skip the rest of EXTN gracefully instead
+        // of OOM-ing.
+        if (fileCount > 4096u) {
+            size_t pos = BinaryReader_getPosition(reader);
+            size_t back = pos >= 8 ? pos - 8 : 0;
+            fprintf(stderr,
+                    "EXTN: insane fileCount=%u for extension '%s' at pos 0x%zX; aborting EXTN parse.\n",
+                    fileCount, ext->name ? ext->name : "(null)", pos);
+
+            // Hex dump 64 bytes of context. Pull from the active source —
+            // either the bulk-loaded chunk buffer, or FILE* directly. Avoid
+            // BinaryReader_readBytesAt because it abort()s on short read.
+            uint8_t sniff[64] = {0};
+            size_t got = 0;
+            if (reader->buffer != nullptr &&
+                back >= reader->bufferBase &&
+                back < reader->bufferBase + reader->bufferSize) {
+                size_t off = back - reader->bufferBase;
+                size_t avail = reader->bufferSize - off;
+                got = avail < sizeof(sniff) ? avail : sizeof(sniff);
+                memcpy(sniff, reader->buffer + off, got);
+            } else {
+                long saved = ftell(reader->file);
+                if (fseek(reader->file, (long)back, SEEK_SET) == 0) {
+                    got = fread(sniff, 1, sizeof(sniff), reader->file);
+                    fseek(reader->file, saved, SEEK_SET);
+                }
+            }
+            fprintf(stderr, "EXTN: %zu bytes around pos (file offset 0x%zX):\n  ", got, back);
+            for (size_t b = 0; b < got; b++) {
+                fprintf(stderr, "%02X%s", sniff[b], ((b & 7) == 7) ? "\n  " : " ");
+            }
+            fprintf(stderr, "\n");
+
+            ext->fileCount = 0;
+            ext->files = nullptr;
+            // Truncate the rest of EXTN; later chunks resync via dispatcher.
+            e->count = (uint32_t)i;
+            return;
+        }
+
         ext->fileCount = fileCount;
 
         if (fileCount > 0) {
@@ -420,6 +465,12 @@ static void parseEXTN(BinaryReader* reader, DataWin* dw) {
 
                 // Functions: SimpleList
                 uint32_t funcCount = BinaryReader_readUint32(reader);
+                if (funcCount > 65536u) {
+                    fprintf(stderr,
+                            "EXTN: insane funcCount=%u in file '%s'; truncating.\n",
+                            funcCount, file->filename ? file->filename : "(null)");
+                    funcCount = 0;
+                }
                 file->functionCount = funcCount;
 
                 if (funcCount > 0) {
@@ -435,6 +486,12 @@ static void parseEXTN(BinaryReader* reader, DataWin* dw) {
 
                         // Arguments: SimpleList<uint32>
                         func->argumentCount = BinaryReader_readUint32(reader);
+                        if (func->argumentCount > 4096u) {
+                            fprintf(stderr,
+                                    "EXTN: insane argumentCount=%u in func '%s'; truncating.\n",
+                                    func->argumentCount, func->name ? func->name : "(null)");
+                            func->argumentCount = 0;
+                        }
                         if (func->argumentCount > 0) {
                             func->arguments = safeMalloc(func->argumentCount * sizeof(uint32_t));
                             repeat(func->argumentCount, a) {
@@ -880,11 +937,33 @@ static void parseFONT(BinaryReader* reader, DataWin* dw) {
         // Glyphs PointerList
         uint32_t glyphCount;
         uint32_t* glyphPtrs = readPointerTable(reader, &glyphCount);
+
+        // Sanity: a single font has at most a few thousand glyphs in real
+        // games (CJK / Hangul are the high end at ~12k). Anything way past
+        // that is a parser desync, almost always caused by a mod that
+        // shuffled the FONT layout (extra optional fields, sprite-font
+        // marker etc.) and kicked our `fontOptionalCount` probe off-track.
+        // Skip the rest of this font cleanly so the remaining fonts still
+        // load, instead of allocating a hundred MB of FontGlyph and dying.
+        if (glyphCount > 65536u) {
+            fprintf(stderr,
+                    "FONT: insane glyphCount=%u for font '%s' (idx %zu); skipping its glyphs.\n",
+                    glyphCount,
+                    font->name ? font->name : "(null)",
+                    (size_t)i);
+            font->glyphCount = 0;
+            font->glyphs = nullptr;
+            font->maxGlyphHeight = 0;
+            Font_buildGlyphLUT(font);
+            free(glyphPtrs);
+            continue;
+        }
         font->glyphCount = glyphCount;
 
         uint32_t maxGlyphHeight = 0;
         if (glyphCount > 0) {
             font->glyphs = safeMalloc(glyphCount * sizeof(FontGlyph));
+            memset(font->glyphs, 0, glyphCount * sizeof(FontGlyph));
             repeat(glyphCount, j) {
                 BinaryReader_seek(reader, glyphPtrs[j]);
                 FontGlyph* glyph = &font->glyphs[j];
@@ -898,8 +977,19 @@ static void parseFONT(BinaryReader* reader, DataWin* dw) {
 
                 if (glyph->sourceHeight > maxGlyphHeight) maxGlyphHeight = glyph->sourceHeight;
 
-                // Kerning SimpleListShort (uint16 count)
+                // Kerning SimpleListShort (uint16 count). uint16 max is 65535
+                // so we can't get a literal OOM here, but a bogus 30k-entry
+                // kerning list still wastes 120 KB and reads garbage strings.
+                // Cap at a generous 4096 — real fonts never exceed a few
+                // hundred kerning pairs per glyph.
                 glyph->kerningCount = BinaryReader_readUint16(reader);
+                if (glyph->kerningCount > 4096u) {
+                    fprintf(stderr,
+                            "FONT: insane kerningCount=%u for glyph U+%04X in '%s'; truncating.\n",
+                            glyph->kerningCount, glyph->character,
+                            font->name ? font->name : "(null)");
+                    glyph->kerningCount = 0;
+                }
                 if (glyph->kerningCount > 0) {
                     glyph->kerning = safeMalloc(glyph->kerningCount * sizeof(KerningPair));
                     for (uint16_t k = 0; glyph->kerningCount > k; k++) {
@@ -1589,36 +1679,101 @@ static void parseROOM(BinaryReader* reader, DataWin* dw, bool lazyLoadRooms, Str
     free(ptrs);
 }
 
-// Sprite/Background/Font initially store an absolute file offset to their TexturePageItem (since SPRT/BGND/FONT are parsed before TPAG).
-// resolveAllTPAGReferences translates those offsets to TPAG indices once the table is known. ptrs[] is the TPAG pointer table in monotonically increasing file order, so we can binary search it.
+// Sprite/Background/Font initially store an absolute file offset to their
+// TexturePageItem (since SPRT/BGND/FONT are parsed before TPAG).
+// resolveAllTPAGReferences translates those offsets to TPAG indices once the
+// table is known.
+//
+// Vanilla GMS data.win files keep the TPAG pointer table sorted by file offset,
+// which lets us binary-search. Mods (Russian Undertale/Deltarune translations,
+// Pizza Tower mods etc.) routinely break that invariant: they append new TPAG
+// entries at the end of the file and patch the pointer table without
+// resorting, or they substitute pointers in-place pointing into their own
+// appended data section. Then a binary search returns -1 for the moved entry
+// and the corresponding font/sprite renders as garbage.
+//
+// To stay correct under mods, we build a sorted index of (offset, originalIdx)
+// pairs once and binary-search that. The `originalIdx` mapping is what gets
+// returned, so callers see the same TPAG indices vanilla and modded.
+//
 // Offsets that don't resolve (or are 0) become -1.
-static int32_t findTPAGIndexByOffset(uint32_t* ptrs, uint32_t count, uint32_t offset) {
-    if (offset == 0) return -1;
+typedef struct {
+    uint32_t off;
+    uint32_t idx;
+} TpagSortPair;
+
+static int cmp_tpag_sort(const void* a, const void* b) {
+    uint32_t oa = ((const TpagSortPair*)a)->off;
+    uint32_t ob = ((const TpagSortPair*)b)->off;
+    return (oa > ob) - (oa < ob);
+}
+
+static int32_t findTPAGIndexByOffset(const TpagSortPair* sorted, uint32_t count, uint32_t offset) {
+    if (offset == 0 || count == 0) return -1;
     uint32_t lo = 0, hi = count;
     while (hi > lo) {
         uint32_t mid = (lo + hi) >> 1;
-        uint32_t v = ptrs[mid];
-        if (v == offset) return (int32_t) mid;
+        uint32_t v = sorted[mid].off;
+        if (v == offset) return (int32_t) sorted[mid].idx;
         if (offset > v) lo = mid + 1; else hi = mid;
     }
     return -1;
 }
 
 static void resolveAllTPAGReferences(DataWin* dw, uint32_t* ptrs, uint32_t count) {
+    // Build a sorted (offset, originalIndex) view that survives mod-broken
+    // pointer tables. Skip when count is 0 — nothing to resolve.
+    TpagSortPair* sorted = NULL;
+    bool wasSorted = true;
+    if (count > 0) {
+        sorted = safeMalloc(count * sizeof(TpagSortPair));
+        for (uint32_t i = 0; i < count; i++) {
+            sorted[i].off = ptrs[i];
+            sorted[i].idx = i;
+            if (i > 0 && ptrs[i] < ptrs[i - 1]) wasSorted = false;
+        }
+        if (!wasSorted) {
+            qsort(sorted, count, sizeof(TpagSortPair), cmp_tpag_sort);
+            fprintf(stderr,
+                    "TPAG: pointer table not monotonic (mod-style); using sorted lookup\n");
+        }
+    }
+
+    uint32_t fontMisses = 0;
+    uint32_t sprtMisses = 0;
+    uint32_t bgndMisses = 0;
+
     repeat(dw->sprt.count, i) {
         Sprite* spr = &dw->sprt.sprites[i];
         repeat(spr->textureCount, j) {
-            spr->tpagIndices[j] = findTPAGIndexByOffset(ptrs, count, (uint32_t) spr->tpagIndices[j]);
+            uint32_t off = (uint32_t) spr->tpagIndices[j];
+            int32_t resolved = findTPAGIndexByOffset(sorted, count, off);
+            spr->tpagIndices[j] = resolved;
+            if (off != 0 && resolved < 0) sprtMisses++;
         }
     }
     repeat(dw->bgnd.count, i) {
         Background* bg = &dw->bgnd.backgrounds[i];
-        bg->tpagIndex = findTPAGIndexByOffset(ptrs, count, (uint32_t) bg->tpagIndex);
+        uint32_t off = (uint32_t) bg->tpagIndex;
+        int32_t resolved = findTPAGIndexByOffset(sorted, count, off);
+        bg->tpagIndex = resolved;
+        if (off != 0 && resolved < 0) bgndMisses++;
     }
     repeat(dw->font.count, i) {
         Font* fnt = &dw->font.fonts[i];
-        fnt->tpagIndex = findTPAGIndexByOffset(ptrs, count, (uint32_t) fnt->tpagIndex);
+        uint32_t off = (uint32_t) fnt->tpagIndex;
+        int32_t resolved = findTPAGIndexByOffset(sorted, count, off);
+        fnt->tpagIndex = resolved;
+        if (off != 0 && resolved < 0) fontMisses++;
     }
+
+    if (sprtMisses || bgndMisses || fontMisses) {
+        fprintf(stderr,
+                "TPAG: unresolved references — sprt=%u bgnd=%u font=%u (likely modded entries pointing outside TPAG)\n",
+                sprtMisses, bgndMisses, fontMisses);
+    }
+
+    free(sorted);
 }
 
 static void parseTPAG(BinaryReader* reader, DataWin* dw) {
@@ -2023,23 +2178,75 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
     }
     free(ptrs);
 
-    // Compute blob sizes from successive offsets
+    // Compute blob sizes by sorting offsets across the WHOLE FILE rather than
+    // assuming TXTR-internal sequential layout. This is what mods like the
+    // Russian translations of Undertale/Deltarune need: they append fresh PNG
+    // blobs to the file outside the TXTR chunk and rewrite the pointer table.
+    // The previous "next - this" trick blew up because:
+    //   - the pointer table isn't necessarily sorted by file offset, and
+    //   - one entry could point inside TXTR while the next pointed 200 MB
+    //     downstream, producing a bogus huge "size" that allocated garbage.
+    //
+    // Algorithm: take every non-zero blobOffset (regardless of where it lives
+    // in the file), sort, then size[i] = next_sorted_offset - offset[i] (or
+    // fileSize - offset[i] for the last one).
+    typedef struct { uint32_t off; uint32_t idx; } TxtrOffPair;
+    TxtrOffPair* sorted = (TxtrOffPair*)safeMalloc(count * sizeof(TxtrOffPair));
+    uint32_t realCount = 0;
     repeat(count, i) {
         if (t->textures[i].blobOffset == 0) {
-            t->textures[i].blobSize = 0; // external texture
+            t->textures[i].blobSize = 0; // external (.png alongside data.win)
             continue;
         }
-        if (count > i + 1 && t->textures[i + 1].blobOffset != 0) {
-            t->textures[i].blobSize = t->textures[i + 1].blobOffset - t->textures[i].blobOffset;
-        } else {
-            // ФИКС для модов: если текстура улетает за границы чанка, используем fileSize
-            size_t endPos = chunkEnd;
-            if (t->textures[i].blobOffset >= chunkEnd) {
-                endPos = reader->fileSize;
-            }
-            t->textures[i].blobSize = (uint32_t)(endPos - t->textures[i].blobOffset);
-        }
+        sorted[realCount].off = t->textures[i].blobOffset;
+        sorted[realCount].idx = (uint32_t)i;
+        realCount++;
     }
+
+    // Inline insertion sort by offset — counts here are small (≤ a few
+    // thousand) and we'd rather not pull in qsort comparators for one site.
+    for (uint32_t a = 1; a < realCount; a++) {
+        TxtrOffPair key = sorted[a];
+        int32_t b = (int32_t)a - 1;
+        while (b >= 0 && sorted[b].off > key.off) {
+            sorted[b + 1] = sorted[b];
+            b--;
+        }
+        sorted[b + 1] = key;
+    }
+
+    uint32_t outOfChunk = 0;
+    uint32_t bigBlobs = 0;
+    uint64_t fsz = (uint64_t)reader->fileSize;
+    for (uint32_t s = 0; s < realCount; s++) {
+        uint32_t curOff  = sorted[s].off;
+        uint64_t nextOff = (s + 1 < realCount) ? (uint64_t)sorted[s + 1].off : fsz;
+        if (nextOff <= curOff) nextOff = fsz; // duplicate / corrupted entry
+        if (nextOff > fsz)     nextOff = fsz; // can't read past EOF
+
+        uint64_t sz = nextOff - curOff;
+        // Hard sanity cap: a single texture page > 64 MB is almost certainly
+        // a parser desync (or a broken/truncated mod). Clamp + warn instead
+        // of trusting the number into safeMalloc.
+        if (sz > 64u * 1024u * 1024u) {
+            fprintf(stderr,
+                    "TXTR: suspicious blob size for texture %u: %.2f MB (off=0x%X next=0x%llX); clamping to 16 MB\n",
+                    sorted[s].idx, (double)sz / (1024.0 * 1024.0),
+                    curOff, (unsigned long long)nextOff);
+            sz = 16u * 1024u * 1024u;
+            bigBlobs++;
+        }
+
+        t->textures[sorted[s].idx].blobSize = (uint32_t)sz;
+        if ((size_t)curOff >= chunkEnd) outOfChunk++;
+    }
+
+    if (outOfChunk > 0 || bigBlobs > 0) {
+        fprintf(stderr,
+                "TXTR: %u/%u texture blobs live OUTSIDE the TXTR chunk (mod-style append); %u oversized clamped\n",
+                outOfChunk, count, bigBlobs);
+    }
+    free(sorted);
 
     if (!options.skipTextureBlobData) {
         repeat(count, i) {

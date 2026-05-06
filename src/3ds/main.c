@@ -275,7 +275,7 @@ int main(int argc, char **argv) {
             .spanPercent = 99.f - fullBase
         };
         DataWinParserOptions full_opt = {
-            .parseGen8=1, .parseOptn=1, .parseLang=1, .parseExtn=1, .parseSond=1,
+            .parseGen8=1, .parseOptn=1, .parseLang=1, .parseExtn=0, .parseSond=1,
             .parseAgrp=1, .parseSprt=1, .parseBgnd=1, .parsePath=1, .parseScpt=1,
             .parseGlob=1, .parseShdr=1, .parseFont=1, .parseTmln=1, .parseObjt=1,
             .parseRoom=1, .parseTpag=1, .parseCode=1, .parseVari=1, .parseFunc=1,
