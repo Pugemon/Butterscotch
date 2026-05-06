@@ -16,7 +16,7 @@ Next, you'll need to copy your game files to your SD card into the following dir
 
 ### Launcher features
 
-The 3DS build ships with a built-in launcher that scans `sdmc:/3ds/butterscotch` for installed games and lets you tweak how they run. Press **Select** on the grid to open settings, **Start** while in-game to bring up the pause menu.
+The 3DS build ships with a built-in launcher that scans `sdmc:/3ds/butterscotch` for installed games and lets you tweak how they run. Press **Select** on the grid to open settings, **L + R + A** while in-game to bring up the pause menu.
 
 * **Themes** — 5 colour palettes that retint the whole launcher UI (background gradient, particles, accents, text). Choices: `BUTTERSCOTCH`, `MIDNIGHT`, `FOREST`, `ROSE`, `CARBON`.
 * **Game screen** — render the game on the **top** or **bottom** screen. The other screen automatically shows the same backdrop / letterbox.
@@ -72,7 +72,7 @@ However, that doesn't mean that a game that uses a compatible version WILL run! 
 
 Of course, there are exceptions that break game compatibility altogether:
 
-* Games compiled with YYC, because they use native code instead of bytecode. 
+* Games compiled with YYC, because they use native code instead of bytecode.
 * Games compiled with the new [GMRT](https://github.com/YoYoGames/GMRT-Beta/tree/main), because they use native code instead of bytecode.
 
 ## Supported Platforms
@@ -162,7 +162,7 @@ Performance is pretty good on any modern computer, but when running on low end t
 
 ## Then why not have a transpiler?
 
-The issue with a transpiler is that, if you try transpiling the game in the "naive" way, that is, emitting VM calls like it was the original bytecode, you won't get any 
+The issue with a transpiler is that, if you try transpiling the game in the "naive" way, that is, emitting VM calls like it was the original bytecode, you won't get any
 *improvement* from it, you would need to create a *good* transpiler that actually transpiles it into *good* code, and that's way harder.
 
 Having a transpiler also have other disadvantages:
