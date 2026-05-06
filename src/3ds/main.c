@@ -1,6 +1,5 @@
 #include <3ds.h>
 #include <citro3d.h>
-#include "al_audio_system.h"
 #include <SDL/SDL.h>
 
 #include <stdio.h>
@@ -48,6 +47,26 @@ static void printMemoryStats(void) {
     float heapUsedMB   = (float)mi.uordblks / 1024.0f / 1024.0f;
     float linearFreeMB = (float)linearFree  / 1024.0f / 1024.0f;
     printf("[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n", heapUsedMB, linearFreeMB);
+}
+
+// Per-second FPS + memory snapshot, written to sdmc:/3ds/butter_out.txt via the
+// stdout redirect set up in setup_logging(). We accumulate frame count between
+// stamps instead of computing instantaneous FPS so the number is stable.
+static void logPerfSample(int *frames, u64 *windowStart) {
+    (*frames)++;
+    u64 now = osGetTime();
+    u64 elapsed = now - *windowStart;
+    if (elapsed >= 1000) {
+        float fps = (float)(*frames) * 1000.0f / (float)elapsed;
+        struct mallinfo mi = mallinfo();
+        u32 linearFree = linearSpaceFree();
+        printf("[PERF] FPS=%.1f  Heap=%.2fMB  LinearFree=%.2fMB\n",
+               fps,
+               (float)mi.uordblks / 1024.0f / 1024.0f,
+               (float)linearFree / 1024.0f / 1024.0f);
+        *frames = 0;
+        *windowStart = now;
+    }
 }
 
 typedef struct {
@@ -136,6 +155,14 @@ int main(int argc, char **argv) {
     launcher_load_settings();
     printf("[BOOT] launcher_load_settings OK\n");
 
+    // Init SDL+mixer once for the whole app. Cycling Mix_OpenAudio/Mix_CloseAudio
+    // between game launches deadlocks/crashes on 3DS, so we keep them alive.
+    if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
+        printf("[BOOT] SDL_Init failed: %s\n", SDL_GetError());
+    } else if (!SdlMixer_globalInit()) {
+        printf("[BOOT] SdlMixer_globalInit failed (audio disabled)\n");
+    }
+
     printf("[BOOT] Entering launcher_run_menu...\n");
     int selected_game = launcher_run_menu(&gfx);
     printf("[BOOT] launcher_run_menu returned: %d\n", selected_game);
@@ -147,6 +174,9 @@ int main(int argc, char **argv) {
 
         shaderProgramFree(&g_shaderProg);
         DVLB_Free(g_vshaderDvlb);
+
+        SdlMixer_globalShutdown();
+        SDL_Quit();
 
         C3D_Fini();
         cfguExit();
@@ -162,6 +192,8 @@ int main(int argc, char **argv) {
     while (keep_playing && aptMainLoop()) {
         g_game_change_requested = false;
         int frameCounter = 0;
+        int perfFrameCount = 0;
+        u64 perfWindowStart = osGetTime();
         char base_game_dir[256];
         char *slash = strrchr(g_current_data_path, '/');
         size_t baselen = slash ? (size_t)(slash - g_current_data_path) : 0;
@@ -261,7 +293,7 @@ int main(int argc, char **argv) {
             launcher_render_loading(&gfx, display_name, "LOADING DATA.WIN", 0, 0, fullBase);
         }
         DataWin *dw = DataWin_parse(g_current_data_path, full_opt);
-        if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0 || !dw) {
+        if (!dw) {
             printf("\nBoot failed.\nCheck data.win at %s\nPress START to quit.\n", g_current_data_path);
             while (aptMainLoop()) {
                 hidScanInput();
@@ -420,8 +452,9 @@ int main(int argc, char **argv) {
 
             run->viewCurrent = 0;
             ren->vtable->endFrame(ren);
-            if (frameCounter % 60 == 0) printMemoryStats();
+            if (frameCounter % 600 == 0) printMemoryStats();
             frameCounter++;
+            logPerfSample(&perfFrameCount, &perfWindowStart);
 
             while (osGetTime() - t_start < 33) gspWaitForVBlank();
         }
@@ -432,12 +465,32 @@ int main(int argc, char **argv) {
         N3dsFileSystem_destroy(fs);
         VM_free(vm);
         DataWin_free(dw);
-        SDL_Quit();
+        // SDL/Mix stays alive — see SdlMixer_globalInit().
 
         if (!gfx_ready) gfx_ready = launcher_gfx_init(&gfx);
 
         if (g_game_change_requested && !quit_to_launcher) {
-            launcher_resolve_new_game_path(g_next_game_path, g_current_data_path, sizeof(g_current_data_path));
+            char resolved[256];
+            launcher_resolve_new_game_path(g_next_game_path, resolved, sizeof(resolved));
+            // Bail out to the menu if the requested path is bogus — better than
+            // running DataWin_parse on a missing file and aborting.
+            FILE *probe = fopen(resolved, "rb");
+            if (probe) {
+                fclose(probe);
+                strncpy(g_current_data_path, resolved, sizeof(g_current_data_path) - 1);
+                g_current_data_path[sizeof(g_current_data_path) - 1] = '\0';
+            } else {
+                fprintf(stderr, "[GAME_CHANGE] cannot open '%s' (request '%s'); back to menu\n",
+                        resolved, g_next_game_path);
+                g_game_change_requested = false;
+                int new_selection = launcher_run_menu(&gfx);
+                if (new_selection < 0) {
+                    keep_playing = false;
+                } else {
+                    strncpy(g_current_data_path, launcher_game(new_selection)->path, 255);
+                    g_current_data_path[255] = '\0';
+                }
+            }
         } else {
             int new_selection = launcher_run_menu(&gfx);
             if (new_selection < 0) {
@@ -454,6 +507,9 @@ int main(int argc, char **argv) {
 
     shaderProgramFree(&g_shaderProg);
     DVLB_Free(g_vshaderDvlb);
+
+    SdlMixer_globalShutdown();
+    SDL_Quit();
 
     C3D_Fini();
     cfguExit();

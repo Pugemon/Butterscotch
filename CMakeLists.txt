@@ -69,6 +69,7 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
         src/binary_reader.c
         src/data_win.c
         src/3ds/ctr_texture_cache.c
+        src/3ds/etc1_encoder.c
         src/gl/image_decoder.c
         src/glfw/stb_impl.c
         ${BZIP2_SOURCES}
@@ -107,6 +108,10 @@ endif()
 file(GLOB SOURCES src/*.c)
 # Platform specific files builds
 file(GLOB PLATFORM_SOURCES src/${PLATFORM}/*.c)
+if(PLATFORM STREQUAL "3ds")
+    list(APPEND PLATFORM_SOURCES ${CMAKE_SOURCE_DIR}/src/3ds/etc1_encoder.c)
+    list(REMOVE_DUPLICATES PLATFORM_SOURCES)
+endif()
 
 # OpenGL ES 3.0 / WebGL2 compatibility
 option(ENABLE_GLES "Build the gl_renderer against OpenGL ES 3.0 / WebGL2 instead of desktop GL 4.1 Core" OFF)
@@ -431,7 +436,9 @@ elseif(PLATFORM STREQUAL "3ds")
         add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
     endif()
 
-    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" OFF)
+    # Enabled by default on 3DS so logs of unknown GML builtins/scripts go to
+    # sdmc:/3ds/butter_err.txt. Helps diagnose missing functions per game.
+    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" ON)
     if(ENABLE_VM_STUB_LOGS)
         add_compile_definitions(ENABLE_VM_STUB_LOGS)
     endif()

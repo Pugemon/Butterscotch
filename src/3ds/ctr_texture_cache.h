@@ -7,14 +7,19 @@
 #include <stdint.h>
 
 #define CTR_TEXTURE_CACHE_MAGIC      0x4B415052u
-#define CTR_TEXTURE_CACHE_VERSION    11u
+#define CTR_TEXTURE_CACHE_VERSION    14u
 #define CTR_TEXTURE_CACHE_ATLAS_SIZE 256u
 #define CTR_TEXTURE_CACHE_FILE       "atlas.bin"
-#define CTR_TEXTURE_CACHE_READY_FLAG "cache_ready_v12.flag"
+#define CTR_TEXTURE_CACHE_READY_FLAG "cache_ready_v15.flag"
 
-#define CTR_TEXTURE_CACHE_FORMAT_RGBA4 4u
-#define CTR_TEXTURE_CACHE_FORMAT_LA4   9u
-#define CTR_TEXTURE_CACHE_FORMAT_A4    11u
+// On-disk format constants. Values intentionally match the GPU_TEXCOLOR enum
+// from libctru so the renderer can pass them straight through.
+#define CTR_TEXTURE_CACHE_FORMAT_RGBA8  0u
+#define CTR_TEXTURE_CACHE_FORMAT_RGBA4  4u
+#define CTR_TEXTURE_CACHE_FORMAT_LA4    9u
+#define CTR_TEXTURE_CACHE_FORMAT_A4     11u
+#define CTR_TEXTURE_CACHE_FORMAT_ETC1   12u
+#define CTR_TEXTURE_CACHE_FORMAT_ETC1A4 13u
 
 typedef struct CtrRenderer CtrRenderer;
 
