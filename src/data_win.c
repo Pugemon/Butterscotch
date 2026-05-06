@@ -2032,7 +2032,12 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
         if (count > i + 1 && t->textures[i + 1].blobOffset != 0) {
             t->textures[i].blobSize = t->textures[i + 1].blobOffset - t->textures[i].blobOffset;
         } else {
-            t->textures[i].blobSize = (uint32_t)(chunkEnd - t->textures[i].blobOffset);
+            // ФИКС для модов: если текстура улетает за границы чанка, используем fileSize
+            size_t endPos = chunkEnd;
+            if (t->textures[i].blobOffset >= chunkEnd) {
+                endPos = reader->fileSize;
+            }
+            t->textures[i].blobSize = (uint32_t)(endPos - t->textures[i].blobOffset);
         }
     }
 
@@ -2212,24 +2217,10 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
             (options.parseTxtr && memcmp(chunkName, "TXTR", 4) == 0) ||
             (options.parseAudo && memcmp(chunkName, "AUDO", 4) == 0);
 
-        // Bulk-read the chunk into RAM for fast parsing — но ТОЛЬКО если
-        // чанк меньше hard-cap'а. На 3DS heap фрагментирован и одиночная
-        // malloc на 30+ MiB (привет AUDO/TXTR/CODE крупных GameMaker игр)
-        // надёжно убивает процесс.
-        //
-        // Если чанк больше — оставляем chunkBuffer = NULL, и BinaryReader
-        // в этом случае fallback'ится на FILE*-режим (см. binary_reader.c
-        // readCheck/BinaryReader_seek). Парсер ходит по чанку через fseek
-        // прямо по SD-карте. Медленнее на пару секунд, но НЕ падает.
-        //
-        // Парсеры, которым нужны сами blob'ы (parseTXTR/parseAUDO), либо
-        // получают skipTextureBlobData/skipAudioBlobData=1 (тогда blob'ы
-        // вообще не читаются — стримятся уже потом через blobOffset), либо
-        // делают свою отдельную DW_BIG_ALLOC (parseCODE для bytecodeBuffer).
-        enum { BULK_LOAD_CAP = 4u * 1024u * 1024u };
+        enum { BULK_LOAD_CAP = 8u * 1024u * 1024u };
         uint8_t* chunkBuffer = nullptr;
         if (shouldParse && chunkLength > 0 && chunkLength <= BULK_LOAD_CAP) {
-            chunkBuffer = safeMalloc(chunkLength);
+            chunkBuffer = DW_BIG_ALLOC(chunkLength);
             size_t read = fread(chunkBuffer, 1, chunkLength, reader.file);
             if (read != chunkLength) {
                 fprintf(stderr, "DataWin: short read on chunk %.4s (expected %u, got %zu)\n", chunkName, chunkLength, read);
@@ -2310,7 +2301,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         // Free the chunk buffer and revert to FILE*-based reads for the next header
         if (chunkBuffer != nullptr) {
             BinaryReader_clearBuffer(&reader);
-            free(chunkBuffer);
+            DW_BIG_FREE(chunkBuffer);
         }
 
         // Seek to chunk end (skip any unread data or trailing padding)

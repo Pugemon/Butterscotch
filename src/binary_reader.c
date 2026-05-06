@@ -31,24 +31,30 @@ void BinaryReader_clearBuffer(BinaryReader* reader) {
 
 static void readCheck(BinaryReader* reader, void* dest, size_t bytes) {
     if (reader->buffer != nullptr) {
-        if (reader->bufferPos + bytes > reader->bufferSize) {
+        // Если чтение полностью умещается в буфер чанка
+        if (reader->bufferPos <= reader->bufferSize && (reader->bufferPos + bytes) <= reader->bufferSize) {
+            memcpy(dest, reader->buffer + reader->bufferPos, bytes);
+            reader->bufferPos += bytes;
+            return;
+        } else {
+            // Вышли за пределы буфера (привет модам) - фоллбэк на чтение из файла!
             size_t absPos = reader->bufferBase + reader->bufferPos;
-            const char* context = reader->bufferContext != nullptr ? reader->bufferContext : "unknown";
-            size_t remaining = reader->bufferPos <= reader->bufferSize ? reader->bufferSize - reader->bufferPos : 0;
-            fprintf(stderr,
-                    "BinaryReader: buffer read error in %s at 0x%zX (requested %zu bytes, buffer has %zu remaining, range [0x%zX, 0x%zX), file size 0x%zX)\n",
-                    context, absPos, bytes, remaining, reader->bufferBase, reader->bufferBase + reader->bufferSize, reader->fileSize);
-            abort();
+            fseek(reader->file, (long)absPos, SEEK_SET);
+
+            size_t read = fread(dest, 1, bytes, reader->file);
+            if (read != bytes) {
+                fprintf(stderr, "BinaryReader: fallback read error at 0x%zX (req %zu, got %zu)\n", absPos, bytes, read);
+                abort();
+            }
+            reader->bufferPos += bytes; // Поддерживаем виртуальную позицию
+            return;
         }
-        memcpy(dest, reader->buffer + reader->bufferPos, bytes);
-        reader->bufferPos += bytes;
-        return;
     }
 
     size_t read = fread(dest, 1, bytes, reader->file);
     if (read != bytes) {
         long pos = ftell(reader->file) - (long) read;
-        fprintf(stderr, "BinaryReader: read error at position 0x%lX (requested %zu bytes, got %zu, file size 0x%zX)\n", pos, bytes, read, reader->fileSize);
+        fprintf(stderr, "BinaryReader: read error at 0x%lX (req %zu, got %zu)\n", pos, bytes, read);
         abort();
     }
 }
@@ -116,35 +122,25 @@ uint8_t* BinaryReader_readBytesAt(BinaryReader* reader, size_t offset, size_t co
     uint8_t* buf = safeMalloc(count);
 
     if (reader->buffer != nullptr) {
-        if (offset < reader->bufferBase || offset + count > reader->bufferBase + reader->bufferSize) {
-            const char* context = reader->bufferContext != nullptr ? reader->bufferContext : "unknown";
-            fprintf(stderr, "BinaryReader: readBytesAt in %s offset 0x%zX+%zu out of buffer range [0x%zX, 0x%zX)\n", context, offset, count, reader->bufferBase, reader->bufferBase + reader->bufferSize);
-            abort();
+        if (offset >= reader->bufferBase && (offset + count) <= (reader->bufferBase + reader->bufferSize)) {
+            memcpy(buf, reader->buffer + (offset - reader->bufferBase), count);
+            return buf;
         }
-        size_t savedPos = reader->bufferPos;
-        memcpy(buf, reader->buffer + (offset - reader->bufferBase), count);
-        reader->bufferPos = savedPos;
-        return buf;
     }
 
     long savedPos = ftell(reader->file);
     fseek(reader->file, (long) offset, SEEK_SET);
-    readCheck(reader, buf, count);
+    size_t read = fread(buf, 1, count, reader->file);
+    if (read != count) {
+        fprintf(stderr, "BinaryReader: readBytesAt error at 0x%zX\n", offset);
+        abort();
+    }
     fseek(reader->file, savedPos, SEEK_SET);
     return buf;
 }
 
 void BinaryReader_skip(BinaryReader* reader, size_t bytes) {
     if (reader->buffer != nullptr) {
-        if (reader->bufferPos + bytes > reader->bufferSize) {
-            const char* context = reader->bufferContext != nullptr ? reader->bufferContext : "unknown";
-            fprintf(stderr,
-                    "BinaryReader: buffer skip error in %s at 0x%zX (skip %zu bytes, buffer has %zu remaining, range [0x%zX, 0x%zX), file size 0x%zX)\n",
-                    context, reader->bufferBase + reader->bufferPos, bytes,
-                    reader->bufferPos <= reader->bufferSize ? reader->bufferSize - reader->bufferPos : 0,
-                    reader->bufferBase, reader->bufferBase + reader->bufferSize, reader->fileSize);
-            abort();
-        }
         reader->bufferPos += bytes;
         return;
     }
@@ -153,17 +149,13 @@ void BinaryReader_skip(BinaryReader* reader, size_t bytes) {
 
 void BinaryReader_seek(BinaryReader* reader, size_t position) {
     if (reader->buffer != nullptr) {
-        if (position < reader->bufferBase || position > reader->bufferBase + reader->bufferSize) {
-            const char* context = reader->bufferContext != nullptr ? reader->bufferContext : "unknown";
-            fprintf(stderr, "BinaryReader: buffer seek in %s to 0x%zX out of buffer range [0x%zX, 0x%zX]\n", context, position, reader->bufferBase, reader->bufferBase + reader->bufferSize);
-            abort();
-        }
+        // Вычисляем виртуальную позицию. Если вылетит за пределы - readCheck аккуратно всё разрулит!
         reader->bufferPos = position - reader->bufferBase;
         return;
     }
 
     if (position > reader->fileSize) {
-        fprintf(stderr, "BinaryReader: seek to 0x%zX out of bounds (file size 0x%zX)\n", position, reader->fileSize);
+        fprintf(stderr, "BinaryReader: seek to 0x%zX out of bounds\n", position);
         abort();
     }
     fseek(reader->file, (long) position, SEEK_SET);

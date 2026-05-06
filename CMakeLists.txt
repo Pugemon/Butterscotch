@@ -406,7 +406,7 @@ elseif(PLATFORM STREQUAL "3ds")
     add_compile_definitions(NO_RVALUE_INT64)
     add_compile_definitions(PLATFORM_3DS)
 
-    option(ENABLE_VM_GML_PROFILER "Enable Butterscotch VM/interpreter profiler" OFF)
+    option(ENABLE_VM_GML_PROFILER "Enable Butterscotch VM/interpreter profiler" ON)
     if(ENABLE_VM_GML_PROFILER)
         add_compile_definitions(ENABLE_VM_GML_PROFILER)
     endif()
