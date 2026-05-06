@@ -14,6 +14,24 @@ Next, you'll need to copy your game files to your SD card into the following dir
 
 > **Note:** If you want the game's icon to actually show up in the launcher, just drop the original game's `.exe` file into that same folder alongside the other files. The runner will automatically extract the icon from it!
 
+### Launcher features
+
+The 3DS build ships with a built-in launcher that scans `sdmc:/3ds/butterscotch` for installed games and lets you tweak how they run. Press **Select** on the grid to open settings, **Start** while in-game to bring up the pause menu.
+
+* **Themes** — 5 colour palettes that retint the whole launcher UI (background gradient, particles, accents, text). Choices: `BUTTERSCOTCH`, `MIDNIGHT`, `FOREST`, `ROSE`, `CARBON`.
+* **Game screen** — render the game on the **top** or **bottom** screen. The other screen automatically shows the same backdrop / letterbox.
+* **Empty space (backdrop mode)** — what fills the screen around a non-fullscreen game:
+  * `GRADIENT` — themed gradient.
+  * `BLUR` — blurred, scaled-up copy of the game itself (looks great on rooms with a strong palette).
+  * `BLACK` — plain black bars.
+  * `STRETCH` — no letterbox, the game is stretched to fit (breaks aspect ratio).
+* **Side particles / Side blur** — toggle the animated particles and blur effect drawn on top of the backdrop.
+* **OS type** — overrides the value GMS sees from `os_type`. Some games branch on this (e.g. Undertale's Xbox edition needs `xboxone`); leave on `WINDOWS` for the default Steam build.
+* **Input mode** — `KEYBOARD` / `GAMEPAD` / `TOUCH`. Picks which device the runtime exposes to the game; useful for games that hard-code one input style.
+* **Global controls** — remap the buttons used by every game (D-Pad, A/B/X/Y, L/R, Start, Select).
+* **Per-game controls** — open the pause menu while the game is running to remap controls for that game only, without touching the global mapping.
+* **Settings persistence** — everything saves to `sdmc:/3ds/butterscotch/launcher_settings.bin` and is reloaded on next boot. Press **Y** in the settings menu to restore defaults.
+
 ### Preprocessing (`ctr-cache-preprocess`)
 For the game to run on the 3DS hardware, the files need to be preprocessed. You have two ways to do this:
 

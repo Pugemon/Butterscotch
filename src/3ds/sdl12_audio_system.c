@@ -8,7 +8,7 @@
 #include <malloc.h>
 #include <SDL/SDL.h>
 #include <SDL/SDL_mixer.h>
-#include "stb_vorbis.c"
+//#include "stb_vorbis.c"
 
 static bool use_mixer = true;
 
@@ -71,7 +71,7 @@ static bool load_sfx(SysMixer *sm, int id, AudioEntry *ent) {
     if (ent->dataSize > 4 && !memcmp(raw, "OggS", 4)) {
         int chans, srate;
         short *pcm;
-        int smp = stb_vorbis_decode_memory(raw, ent->dataSize, &chans, &srate, &pcm);
+        int smp = 0;//stb_vorbis_decode_memory(raw, ent->dataSize, &chans, &srate, &pcm);
 
         if (smp > 0) {
             int f, mc;

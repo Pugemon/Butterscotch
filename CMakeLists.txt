@@ -49,11 +49,20 @@ if(ENABLE_BC17)
 endif()
 
 if(PLATFORM STREQUAL "ctr-cache-tool")
-    include(CheckIncludeFile)
     add_definitions(-DHAVE_BZLIB_H=1)
-    #add_subdirectory(vendor/bzip2)
-    #check_include_file(bzlib.h HAVE_BZLIB_H)
-    #find_library(BZ2_LIBRARY bz2)
+
+    # Build the bzip2 library sources directly into the executable so the
+    # resulting binary does not depend on a system libbz2.dll. Only the
+    # library .c files - skip the bzip2/bzip2recover/test stubs.
+    set(BZIP2_SOURCES
+        vendor/bzip2/blocksort.c
+        vendor/bzip2/bzlib.c
+        vendor/bzip2/compress.c
+        vendor/bzip2/crctable.c
+        vendor/bzip2/decompress.c
+        vendor/bzip2/huffman.c
+        vendor/bzip2/randtable.c
+    )
 
     add_executable(ctr-cache-preprocess
         tools/ctr_cache_preprocess.c
@@ -62,8 +71,12 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
         src/3ds/ctr_texture_cache.c
         src/gl/image_decoder.c
         src/glfw/stb_impl.c
+        ${BZIP2_SOURCES}
     )
-    target_compile_definitions(ctr-cache-preprocess PRIVATE CTR_TEXTURE_CACHE_HOST)
+    target_compile_definitions(ctr-cache-preprocess PRIVATE
+        CTR_TEXTURE_CACHE_HOST
+        IMAGE_DECODER_ENABLE_BZ2
+    )
     target_include_directories(ctr-cache-preprocess PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/3ds
@@ -73,12 +86,21 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
         ${CMAKE_SOURCE_DIR}/vendor/stb/image
     )
     target_link_libraries(ctr-cache-preprocess m)
-    #if(HAVE_BZLIB_H AND BZ2_LIBRARY)
-        target_compile_definitions(ctr-cache-preprocess PRIVATE IMAGE_DECODER_ENABLE_BZ2)
-        target_link_libraries(ctr-cache-preprocess bz2)
-    #else()
-    #    message(WARNING "bzlib.h/libbz2 not found; ctr-cache-preprocess will skip BZip2-compressed 2zoq textures")
-    #endif()
+
+    # Silence the slew of warnings the upstream bzip2 sources emit (unused
+    # parameters, sign conversions etc.) - they are not our code to clean up.
+    if(NOT MSVC)
+        set_source_files_properties(${BZIP2_SOURCES} PROPERTIES
+            COMPILE_FLAGS "-w")
+    endif()
+
+    # Static link on MinGW so the resulting .exe does not depend on
+    # libwinpthread-1.dll / libgcc_s_*.dll / libstdc++-6.dll being on PATH.
+    if(MINGW)
+        target_link_options(ctr-cache-preprocess PRIVATE
+            -static -static-libgcc -static-libstdc++)
+    endif()
+
     return()
 endif()
 
@@ -435,6 +457,8 @@ elseif(PLATFORM STREQUAL "3ds")
 
     target_link_libraries(butterscotch
         SDL_mixer
+        openal
+        stdc++
         mad
         vorbisidec
         ogg

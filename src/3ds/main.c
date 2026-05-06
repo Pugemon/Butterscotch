@@ -1,5 +1,6 @@
 #include <3ds.h>
 #include <citro3d.h>
+#include "al_audio_system.h"
 #include <SDL/SDL.h>
 
 #include <stdio.h>
@@ -88,7 +89,7 @@ static bool atlas_index_is_current(const char *path) {
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    //setup_logging();
+    setup_logging();
     printf("\n\n========================================\n");
     printf("[BOOT] setup_logging OK\n");
     printMemoryStats();
@@ -282,7 +283,7 @@ int main(int argc, char **argv) {
         VMContext      *vm  = VM_create(dw);
         N3dsFileSystem *fs  = N3dsFileSystem_create(g_current_data_path);
         Renderer       *ren = CtrRenderer_create();
-        AudioSystem    *snd = SdlMixerAudioSystem_create();
+        AudioSystem    *snd = (AudioSystem*)SdlMixerAudioSystem_create();//AlAudioSystem_create();//SdlMixerAudioSystem_create();
         if (snd) snd->dataWin = dw;
 
         Runner *run = Runner_create(dw, vm, ren, (FileSystem *)fs, snd);
@@ -299,7 +300,6 @@ int main(int argc, char **argv) {
             hidScanInput();
             u32 d = hidKeysDown(), u = hidKeysUp(), h = hidKeysHeld();
 
-            // SELECT+START+A is now the pause chord (used to be hard-quit).
             if ((h & KEY_L) && (h & KEY_R) && (h & KEY_A)) {
                 LauncherGfx pauseGfx;
                 bool pauseReady = launcher_gfx_init_borrowed(
