@@ -119,6 +119,12 @@ typedef struct CtrRenderer {
     uint32_t          batchStart;
     uint32_t          batchVerts;
     C3D_Tex          *batchTex;
+    // GPU command buffer pressure counter. Each C3D_DrawArrays adds commands
+    // to citro3d's per-frame cmdbuf; when a single frame spams thousands of
+    // draws (tile-heavy DELTARUNE rooms) the cmdbuf overflows and the GPU
+    // hangs / faults on real 3DS (not on Citra — its cmdbuf is unbounded).
+    // We periodically auto-split to keep this in check.
+    uint32_t          drawsSinceSplit;
 
     // Solid-color texture
     C3D_Tex           whiteTex;

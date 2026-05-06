@@ -1107,6 +1107,10 @@ static void apply_blend(CtrRenderer *ctx, int mode);
 // helper instead of calling C3D_FrameSplit(0) directly.
 static void ctr_safe_frame_split(CtrRenderer *ctx) {
     C3D_FrameSplit(0);
+    // The cmdbuf was just drained — reset the counter so flush_batch's
+    // auto-split heuristic doesn't immediately split again on the very next
+    // draw.
+    ctx->drawsSinceSplit = 0;
     if (ctx->inFrame && ctx->activeTarget) {
         rebind_state(ctx);
         apply_projection(ctx, &ctx->currentProjection);
@@ -1117,6 +1121,12 @@ static void ctr_safe_frame_split(CtrRenderer *ctx) {
         apply_blend(ctx, ctx->currentBlendMode);
     }
 }
+
+// Auto-split threshold — picked empirically. The DELTARUNE Cyber Field /
+// fountain rooms hit ~1500-2000 draws per frame at peak; without periodic
+// splitting that exhausts the citro3d cmdbuf even with the 4× C3D_Init
+// allocation. 256 draws ≈ ~6 KB of cmdbuf, well under any per-segment limit.
+#define CTR_AUTO_SPLIT_DRAWS 256u
 
 static void flush_batch(CtrRenderer *ctx) {
     if (!ctx->batchVerts || !ctx->batchTex || !ctx->inFrame) {
@@ -1132,6 +1142,15 @@ static void flush_batch(CtrRenderer *ctx) {
     ctx->batchStart += ctx->batchVerts;
     ctx->batchVerts  = 0;
     ctx->batchTex    = NULL;
+    ctx->drawsSinceSplit++;
+
+    // Pre-emptive cmdbuf pressure release. Splits are cheap if we already
+    // flushed a batch (no half-built batch to lose), and they keep the
+    // accumulated GPU command list from blowing past citro3d's per-frame cap.
+    if (ctx->drawsSinceSplit >= CTR_AUTO_SPLIT_DRAWS) {
+        ctr_safe_frame_split(ctx);
+        ctx->drawsSinceSplit = 0;
+    }
 }
 
 static inline CtrVertex *vbuf_reserve(CtrRenderer *ctx, uint32_t count, C3D_Tex *tex) {
@@ -1654,7 +1673,11 @@ static bool surface_alloc_storage(CtrSurface *surf, int width, int height) {
     if (!C3D_TexInitVRAM(&surf->tex, (u16)surf->potW, (u16)surf->potH, GPU_RGBA8)) {
         return false;
     }
-    C3D_TexSetFilter(&surf->tex, GPU_LINEAR, GPU_LINEAR);
+    // Default to NEAREST so pixel-art HUDs / mini-maps / damage popups drawn
+    // through surface_create stay crisp. GMS games that genuinely want a
+    // smooth surface (rare — usually post-processing in 2024+ projects) can
+    // toggle filter via gpu_set_texfilter, which our renderer honours.
+    C3D_TexSetFilter(&surf->tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap  (&surf->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     surf->target = C3D_RenderTargetCreateFromTex(&surf->tex, GPU_TEXFACE_2D, 0,
@@ -1704,7 +1727,13 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
     if (!C3D_TexInitVRAM(&ctx->appTex, (u16)ctx->appPotW, (u16)ctx->appPotH, GPU_RGBA8)) {
         return false;
     }
-    C3D_TexSetFilter(&ctx->appTex, GPU_LINEAR, GPU_LINEAR);
+    // The application surface is the game's full framebuffer; we sample it
+    // back to the 3DS screen (400x240 top, 320x240 bottom) every frame in
+    // ctr_endFrame's letterbox blit. Deltarune/Undertale render at 640x480
+    // logical, so the blit downsamples by ~0.625x — LINEAR there gave the
+    // "soapy" look the user complained about (everything inside appTex
+    // sampled with bilinear smear). NEAREST keeps pixel-art fidelity.
+    C3D_TexSetFilter(&ctx->appTex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap  (&ctx->appTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     ctx->appTarget = C3D_RenderTargetCreateFromTex(&ctx->appTex, GPU_TEXFACE_2D, 0,
@@ -1924,6 +1953,7 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
         ctx->batchStart = 0;
         ctx->batchVerts = 0;
         ctx->batchTex   = NULL;
+        ctx->drawsSinceSplit = 0;
     }
 
     C3D_BufInfo *buf = C3D_GetBufInfo();

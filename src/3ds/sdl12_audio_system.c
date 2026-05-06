@@ -139,20 +139,56 @@ static bool load_sfx(SysMixer *sm, int id, AudioEntry *ent, const char *archive)
     return sm->chunks[id] != NULL;
 }
 
-// Tear down whichever music track is currently loaded except `keepId`.
-static void stop_other_music(SysMixer *sm, int keepId) {
+// GMS Sound::flags layout (per UndertaleModTool):
+//   bit 0 (0x01): IsEmbedded         — sample lives in AUDO chunk
+//   bit 1 (0x02): IsCompressed       — OGG/MP3 instead of raw PCM
+//   "Regular" mask is 0x64 (= bits 6 + 5 + 2). When ALL of those bits are set
+//   the sound is a regular cached SFX; when any of them are missing it is a
+//   streamed BGM track. Without this check we used to misclassify long
+//   embedded SFX (impacts, ambient loops, voice clips > 512 KB) as music
+//   tracks, which then cannibalised the actual BGM through stop_other_music.
+static inline bool sound_is_streamed(const Sound *snd) {
+    return (snd->flags & 0x64u) != 0x64u;
+}
+
+// LRU-trim the cached MUSIC tracks down to a small cap. We never touch the
+// currently-playing music here — Mix_PlayMusic naturally replaces it when a
+// new track is started, so there's no reason to halt it pre-emptively.
+//
+// Old behaviour freed every other music slot eagerly (and Halted the playing
+// one if its slot was being freed) — that meant every newly-loaded streamed
+// track would kill BGM mid-play, which is exactly the symptom the user kept
+// hitting (song stops after a flurry of SFX activity).
+#define MAX_CACHED_MUSIC 3
+
+static void evict_old_music(SysMixer *sm, int keepId) {
+    int cnt = 0;
     for (uint32_t i = 0; i < sm->base.dataWin->sond.count; i++) {
-        if ((int) i == keepId || !sm->music[i]) continue;
-        if (sm->curMusicId == (int32_t) i) {
-            Mix_HaltMusic();
-            sm->curMusicId = -1;
+        if (sm->music[i]) cnt++;
+    }
+    if (cnt <= MAX_CACHED_MUSIC) return;
+
+    while (cnt > MAX_CACHED_MUSIC) {
+        int victim = -1;
+        uint32_t oldest = 0xFFFFFFFFu;
+        for (uint32_t i = 0; i < sm->base.dataWin->sond.count; i++) {
+            if (!sm->music[i]) continue;
+            if ((int) i == keepId) continue;
+            if (sm->curMusicId == (int32_t) i) continue; // never evict the playing track
+            if (sm->lastUsed[i] < oldest) {
+                oldest = sm->lastUsed[i];
+                victim = (int) i;
+            }
         }
-        Mix_FreeMusic(sm->music[i]);
-        sm->music[i] = NULL;
-        if (sm->musicBuf[i]) {
-            free(sm->musicBuf[i]);
-            sm->musicBuf[i] = NULL;
+        if (victim < 0) break; // nothing safe to drop
+
+        Mix_FreeMusic(sm->music[victim]);
+        sm->music[victim] = NULL;
+        if (sm->musicBuf[victim]) {
+            free(sm->musicBuf[victim]);
+            sm->musicBuf[victim] = NULL;
         }
+        cnt--;
     }
 }
 
@@ -190,8 +226,16 @@ static bool ensure_snd(SysMixer *sm, int id) {
         AudioEntry *ent = &gw->audo.entries[snd->audioFile];
         if (!ent->dataSize) return false;
 
-        if (ent->dataSize > STREAM_THRES) {
-            stop_other_music(sm, id);
+        // GMS-flag-driven classification (see sound_is_streamed comment).
+        // Size threshold remains as a safety net for sounds that DON'T have
+        // proper Regular flagging (older bytecode or hand-rolled mods) so
+        // we don't decode a 50 MB OGG into RAM by mistake — but we no longer
+        // demote a long Regular SFX into the music slot, which is what was
+        // killing BGM in Deltarune/Undertale on this port.
+        bool asStream = sound_is_streamed(snd) && ent->dataSize > STREAM_THRES;
+
+        if (asStream) {
+            evict_old_music(sm, id);
 
             uint8_t *mb = malloc(ent->dataSize);
             if (!mb) {
@@ -227,10 +271,15 @@ static bool ensure_snd(SysMixer *sm, int id) {
                  strchr(snd->file, '.') ? "" : ".ogg");
         char *path = sm->fs->vtable->resolvePath(sm->fs, name);
         if (path) {
-            if (strstr(path, ".wav")) {
+            // External .wav -> always SFX. Anything else (typically .ogg
+            // per the synth above) is treated as a stream UNLESS the GMS
+            // Regular flag explicitly tags it as a regular sound, in which
+            // case we still pull it into a Mix_Chunk so it doesn't take
+            // over the music channel.
+            if (strstr(path, ".wav") || !sound_is_streamed(snd)) {
                 sm->chunks[id] = Mix_LoadWAV(path);
             } else {
-                stop_other_music(sm, id);
+                evict_old_music(sm, id);
                 sm->music[id] = Mix_LoadMUS(path);
             }
             free(path);
