@@ -28,6 +28,8 @@ typedef struct {
     // Grown lazily by groupLoad. Stored as a stb_ds dynamic array.
     char **archivePaths;
 
+    FILE **archiveFiles;
+
     int32_t  curMusicId;
     uint32_t frame;
 } SysMixer;

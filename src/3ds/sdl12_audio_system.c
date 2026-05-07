@@ -22,7 +22,7 @@ bool SdlMixer_globalInit(void) {
             return false;
         }
     }
-    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 4096) < 0) {
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 1024) < 0) {
         fprintf(stderr, "[AUDIO] Mix_OpenAudio failed: %s\n", Mix_GetError());
         return false;
     }
@@ -59,21 +59,28 @@ static const char* archiveOf(SysMixer *sm, int32_t groupIndex) {
     return sm->archivePaths[groupIndex];
 }
 
-static bool readEntryBytes(const char *archive, uint32_t offset, uint32_t size, uint8_t *out) {
+static bool readEntryBytes(SysMixer *sm, int32_t groupIndex, const char *archive, uint32_t offset, uint32_t size, uint8_t *out) {
     if (!archive || !size || !out) return false;
-    FILE *fp = fopen(archive, "rb");
+
+    while (arrlen(sm->archiveFiles) <= groupIndex) {
+        arrput(sm->archiveFiles, NULL);
+    }
+
+    FILE *fp = sm->archiveFiles[groupIndex];
     if (!fp) {
-        fprintf(stderr, "[AUDIO] open archive failed: %s\n", archive);
-        return false;
+        fp = fopen(archive, "rb");
+        if (!fp) {
+            fprintf(stderr, "[AUDIO] open archive failed: %s\n", archive);
+            return false;
+        }
+        sm->archiveFiles[groupIndex] = fp;
     }
-    if (fseek(fp, offset, SEEK_SET) != 0) { fclose(fp); return false; }
+
+    if (fseek(fp, offset, SEEK_SET) != 0) return false;
+
     size_t got = fread(out, 1, size, fp);
-    fclose(fp);
-    if (got != size) {
-        fprintf(stderr, "[AUDIO] short read %u/%u from %s @%u\n",
-                (unsigned) got, (unsigned) size, archive, (unsigned) offset);
-        return false;
-    }
+    if (got != size) return false;
+
     return true;
 }
 
@@ -114,7 +121,8 @@ static void evict_old(SysMixer *sm) {
 }
 
 // Read a SFX entry from its audiogroup archive into a Mix_Chunk.
-static bool load_sfx(SysMixer *sm, int id, AudioEntry *ent, const char *archive) {
+// Добавили int32_t groupIndex в конец аргументов
+static bool load_sfx(SysMixer *sm, int id, AudioEntry *ent, const char *archive, int32_t groupIndex) {
     evict_old(sm);
 
     uint8_t *raw = linearAlloc(ent->dataSize);
@@ -123,7 +131,9 @@ static bool load_sfx(SysMixer *sm, int id, AudioEntry *ent, const char *archive)
                 (unsigned) ent->dataSize, id);
         return false;
     }
-    if (!readEntryBytes(archive, ent->dataOffset, ent->dataSize, raw)) {
+
+    // ИСПРАВЛЕННЫЙ ВЫЗОВ (теперь 6 аргументов)
+    if (!readEntryBytes(sm, groupIndex, archive, ent->dataOffset, ent->dataSize, raw)) {
         linearFree(raw);
         return false;
     }
@@ -195,7 +205,7 @@ static bool ensure_snd(SysMixer *sm, int id) {
                         (unsigned) ent->dataSize, id);
                 return false;
             }
-            if (!readEntryBytes(archive, ent->dataOffset, ent->dataSize, mb)) {
+            if (!readEntryBytes(sm, snd->audioGroup, archive, ent->dataOffset, ent->dataSize, mb)) {
                 free(mb);
                 return false;
             }
@@ -210,7 +220,7 @@ static bool ensure_snd(SysMixer *sm, int id) {
                 free(mb);
             }
         } else {
-            if (!load_sfx(sm, id, ent, archive)) {
+            if (!load_sfx(sm, id, ent, archive, snd->audioGroup)) {
                 fprintf(stderr, "[AUDIO] load_sfx failed for '%s' (group %d, file %d)\n",
                         snd->name ? snd->name : "?", snd->audioGroup, snd->audioFile);
             }
