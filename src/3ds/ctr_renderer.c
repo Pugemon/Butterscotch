@@ -1727,13 +1727,24 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
     if (!C3D_TexInitVRAM(&ctx->appTex, (u16)ctx->appPotW, (u16)ctx->appPotH, GPU_RGBA8)) {
         return false;
     }
-    // The application surface is the game's full framebuffer; we sample it
-    // back to the 3DS screen (400x240 top, 320x240 bottom) every frame in
-    // ctr_endFrame's letterbox blit. Deltarune/Undertale render at 640x480
-    // logical, so the blit downsamples by ~0.625x — LINEAR there gave the
-    // "soapy" look the user complained about (everything inside appTex
-    // sampled with bilinear smear). NEAREST keeps pixel-art fidelity.
-    C3D_TexSetFilter(&ctx->appTex, GPU_NEAREST, GPU_NEAREST);
+    // The application surface is the game's full framebuffer. The blit to
+    // the 3DS screen (400x240 / 320x240) is non-integer for typical GMS
+    // games (Deltarune is 640x480 -> 0.625x).
+    //
+    // Tried both filter choices here, neither is purely "right":
+    //   * NEAREST: sprites stay crisp but the fractional downscale drops
+    //     entire pixel rows — text glyphs lose their fine 1-px features
+    //     and become unreadable, especially the GMS bitmap fonts which
+    //     have anti-aliased ramps that depend on every row contributing.
+    //   * LINEAR: text downscales cleanly because every source row gets
+    //     mixed into the output. Sprites lose a touch of micro-contrast
+    //     but stay way more legible than NEAREST-with-row-drop.
+    //
+    // LINEAR for the final blit + NEAREST everywhere upstream (atlas
+    // chunks at line 1543 are NEAREST, surfaces are NEAREST since the
+    // last fix) gives the best of both: pixel-art-accurate INSIDE
+    // appTex, smooth-but-not-mushy on the final screen sample.
+    C3D_TexSetFilter(&ctx->appTex, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap  (&ctx->appTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
     ctx->appTarget = C3D_RenderTargetCreateFromTex(&ctx->appTex, GPU_TEXFACE_2D, 0,

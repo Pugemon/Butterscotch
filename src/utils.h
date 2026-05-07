@@ -108,6 +108,43 @@ _val; \
     _ptr; \
 })
 
+// Big-array allocator. For multi-megabyte buffers (asset metadata arrays,
+// code/script tables, parsed pools, anything sized by `count * sizeof(T)`
+// where count comes from a multi-thousand asset list) we'd rather burn linear
+// RAM than crowd the 3DS heap. Behaviour falls back to malloc/calloc/free on
+// other platforms so semantics stay identical.
+//
+// IMPORTANT: only call bigFree on pointers obtained from bigMalloc/bigCalloc.
+// Mixing with regular free() corrupts the linear arena.
+#ifdef __3DS__
+#include <3ds.h>
+#define bigMalloc(size) ({ \
+    void* _bp = linearAlloc((size_t)(size)); \
+    if (_bp == nullptr) { \
+        fprintf(stderr, "FATAL: linearAlloc(%zu) for big-buf failed at %s:%d\n", \
+                (size_t)(size), __FILE__, __LINE__); \
+        abort(); \
+    } \
+    _bp; \
+})
+#define bigCalloc(count, size) ({ \
+    size_t _bb = (size_t)(count) * (size_t)(size); \
+    void* _bp = linearAlloc(_bb); \
+    if (_bp == nullptr) { \
+        fprintf(stderr, "FATAL: linearAlloc(%zu) for big-buf failed at %s:%d\n", \
+                _bb, __FILE__, __LINE__); \
+        abort(); \
+    } \
+    memset(_bp, 0, _bb); \
+    _bp; \
+})
+#define bigFree(ptr) do { if ((ptr) != nullptr) linearFree(ptr); } while (0)
+#else
+#define bigMalloc(size)        safeMalloc(size)
+#define bigCalloc(count, size) safeCalloc((count), (size))
+#define bigFree(ptr)           free(ptr)
+#endif
+
 // Truncates to 6 decimal places, matching the HTML5 runner's ClampFloat
 static inline GMLReal clampFloat(GMLReal f) {
     return ((GMLReal) ((int64_t) (f * 1000000.0))) / 1000000.0;

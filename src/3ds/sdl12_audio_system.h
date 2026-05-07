@@ -14,10 +14,14 @@ typedef struct {
     // Per-sound caches indexed by SOND id (base.dataWin->sond.count entries).
     Mix_Chunk **chunks;
     Mix_Music **music;
-    uint8_t   **musicBuf;   // raw ogg/mp3 bytes backing a Mix_Music
+    uint8_t   **musicBuf;   // raw ogg/mp3 bytes backing a Mix_Music (linearAlloc)
     void      **sfxBuf;     // linearAlloc'd PCM backing a Mix_QuickLoad_RAW chunk
     float      *pitches;
     uint32_t   *lastUsed;
+    // One bit per SOND id: set the first time the game asks to play it.
+    // Used by sys_on_room_changed to warm-load anything the player has
+    // already heard at least once, eliminating the in-battle stutter.
+    uint8_t   *playedOnce;
 
     // Per-audiogroup archive paths. archivePaths[N] is the file the AUDO offsets
     // for audioGroups[N] resolve into. archivePaths[0] = data.win/game.unx.

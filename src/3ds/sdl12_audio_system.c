@@ -185,7 +185,7 @@ static void evict_old_music(SysMixer *sm, int keepId) {
         Mix_FreeMusic(sm->music[victim]);
         sm->music[victim] = NULL;
         if (sm->musicBuf[victim]) {
-            free(sm->musicBuf[victim]);
+            linearFree(sm->musicBuf[victim]);
             sm->musicBuf[victim] = NULL;
         }
         cnt--;
@@ -237,14 +237,20 @@ static bool ensure_snd(SysMixer *sm, int id) {
         if (asStream) {
             evict_old_music(sm, id);
 
-            uint8_t *mb = malloc(ent->dataSize);
+            // Music source bytes go straight into linear RAM. The 3DS heap is
+            // tiny (~25 MB and the rest of the engine eats most of it),
+            // whereas the 48 MB linear arena has space to spare. Mix_Music
+            // streams from this buffer for the duration of playback, so it
+            // must stay alive — we hold the pointer in musicBuf[id] and free
+            // it on eviction / destroy.
+            uint8_t *mb = (uint8_t *) linearAlloc(ent->dataSize);
             if (!mb) {
-                fprintf(stderr, "[AUDIO] malloc(%u) failed for music %d\n",
+                fprintf(stderr, "[AUDIO] linearAlloc(%u) failed for music %d\n",
                         (unsigned) ent->dataSize, id);
                 return false;
             }
             if (!readEntryBytes(archive, ent->dataOffset, ent->dataSize, mb)) {
-                free(mb);
+                linearFree(mb);
                 return false;
             }
 
@@ -255,7 +261,7 @@ static bool ensure_snd(SysMixer *sm, int id) {
             } else {
                 fprintf(stderr, "[AUDIO] Mix_LoadMUS_RW failed for '%s': %s\n",
                         snd->name ? snd->name : "?", Mix_GetError());
-                free(mb);
+                linearFree(mb);
             }
         } else {
             if (!load_sfx(sm, id, ent, archive)) {
@@ -300,12 +306,13 @@ static void sys_init(AudioSystem *sys, DataWin *dw, FileSystem *fs) {
     Mix_AllocateChannels(MAX_CHANS);
 
     int cnt = (int) dw->sond.count;
-    sm->chunks   = calloc(cnt, sizeof(Mix_Chunk *));
-    sm->music    = calloc(cnt, sizeof(Mix_Music *));
-    sm->musicBuf = calloc(cnt, sizeof(uint8_t *));
-    sm->sfxBuf   = calloc(cnt, sizeof(void *));
-    sm->lastUsed = calloc(cnt, sizeof(uint32_t));
-    sm->pitches  = calloc(cnt, sizeof(float));
+    sm->chunks     = calloc(cnt, sizeof(Mix_Chunk *));
+    sm->music      = calloc(cnt, sizeof(Mix_Music *));
+    sm->musicBuf   = calloc(cnt, sizeof(uint8_t *));
+    sm->sfxBuf     = calloc(cnt, sizeof(void *));
+    sm->lastUsed   = calloc(cnt, sizeof(uint32_t));
+    sm->pitches    = calloc(cnt, sizeof(float));
+    sm->playedOnce = calloc((size_t)((cnt + 7) >> 3), 1);
     for (int i = 0; i < cnt; i++) sm->pitches[i] = 1.0f;
 
     sm->curMusicId = -1;
@@ -329,7 +336,11 @@ static void sys_destroy(AudioSystem *sys) {
         for (uint32_t i = 0; i < sm->base.dataWin->sond.count; i++) {
             if (sm->chunks[i])   Mix_FreeChunk(sm->chunks[i]);
             if (sm->music[i])    Mix_FreeMusic(sm->music[i]);
-            if (sm->musicBuf[i]) free(sm->musicBuf[i]);
+            // Music source buffers now live in linear memory (see ensure_snd).
+            // Old saves built before this change had musicBuf in the heap; no
+            // mixed mode at runtime — once the program restarts everything is
+            // linear, so the matching free is fine.
+            if (sm->musicBuf[i]) linearFree(sm->musicBuf[i]);
             if (sm->sfxBuf[i])   linearFree(sm->sfxBuf[i]);
         }
     }
@@ -340,6 +351,7 @@ static void sys_destroy(AudioSystem *sys) {
     free(sm->sfxBuf);
     free(sm->lastUsed);
     free(sm->pitches);
+    free(sm->playedOnce);
 
     // Skip group 0 (owned by main); free everything we loaded ourselves.
     if (arrlen(sm->base.audioGroups) > 1) {
@@ -364,6 +376,13 @@ static int32_t sys_play(AudioSystem *sys, int32_t id, MAYBE_UNUSED int32_t prio,
     if (!s_mixerReady) return -1;
     SysMixer *sm = (SysMixer *) sys;
     if (!ensure_snd(sm, id)) return -1;
+
+    // Mark this sound as "ever played" so the next room-change prefetch will
+    // re-warm it after it gets evicted under memory pressure. Cheap one-bit
+    // flag, indexed by SOND id.
+    if (sm->playedOnce && id >= 0 && (uint32_t) id < sm->base.dataWin->sond.count) {
+        sm->playedOnce[id >> 3] |= (uint8_t) (1u << (id & 7));
+    }
 
     int vol = (int) (sm->base.dataWin->sond.sounds[id].volume * MIX_MAX_VOLUME);
     if (vol > MIX_MAX_VOLUME) vol = MIX_MAX_VOLUME;
@@ -590,6 +609,54 @@ static bool sys_destroy_stream(MAYBE_UNUSED AudioSystem *sys, MAYBE_UNUSED int32
     return false;
 }
 
+// Room-change prefetch: walk the "ever played" bitmap and for each marked
+// sound that isn't currently in the cache, force a load now. This eats the
+// decode cost during the room transition (when the player is already looking
+// at a black/loading screen) instead of mid-battle when the same SFX would
+// otherwise spike a 50–200 ms hitch from on-demand decode + linearAlloc +
+// possible eviction churn.
+//
+// We deliberately don't try to be clever about WHICH sounds the new room
+// will need. Doing that right would require either a data.win-wide static
+// scan (per-room audio_play_sound literals in CODE bytecode) or a manifest
+// from the game. The "anything ever heard this session" heuristic is good
+// enough in practice — Deltarune's typical play pattern is that battle SFX
+// fire many times across many rooms, so by the time the player reaches a
+// non-trivial fight every relevant sound is in the bitmap.
+static void sys_on_room_changed(AudioSystem *sys, MAYBE_UNUSED int32_t roomIndex) {
+    if (!s_mixerReady) return;
+    SysMixer *sm = (SysMixer *) sys;
+    if (!sm->playedOnce) return;
+
+    uint32_t total = sm->base.dataWin->sond.count;
+    uint32_t reloaded = 0;
+    uint32_t alreadyResident = 0;
+    uint64_t bytesBefore = (uint64_t) linearSpaceFree();
+
+    for (uint32_t i = 0; i < total; i++) {
+        if (!(sm->playedOnce[i >> 3] & (1u << (i & 7)))) continue;
+        // Already cached? Just bump the LRU stamp so eviction prefers
+        // truly-stale entries.
+        if (sm->chunks[i] || sm->music[i]) {
+            sm->lastUsed[i] = sm->frame;
+            alreadyResident++;
+            continue;
+        }
+        if (ensure_snd(sm, (int) i)) reloaded++;
+    }
+
+    if (reloaded > 0 || alreadyResident > 0) {
+        uint64_t bytesAfter = (uint64_t) linearSpaceFree();
+        long delta = (long) bytesBefore - (long) bytesAfter;
+        fprintf(stderr,
+                "[AUDIO] room prefetch: %lu reloaded, %lu resident, %ld KB linear consumed (free %.2f MB)\n",
+                (unsigned long) reloaded,
+                (unsigned long) alreadyResident,
+                delta / 1024,
+                (double) bytesAfter / (1024.0 * 1024.0));
+    }
+}
+
 static AudioSystemVtable vtable = {
     .init = sys_init, .destroy = sys_destroy, .update = sys_update,
     .playSound = sys_play, .stopSound = sys_stop, .stopAll = sys_stop_all,
@@ -600,7 +667,8 @@ static AudioSystemVtable vtable = {
     .getSoundLength = sys_get_length,
     .setMasterGain = sys_set_master, .setChannelCount = sys_set_chans,
     .groupLoad = sys_grp_load, .groupIsLoaded = sys_grp_loaded,
-    .createStream = sys_create_stream, .destroyStream = sys_destroy_stream
+    .createStream = sys_create_stream, .destroyStream = sys_destroy_stream,
+    .onRoomChanged = sys_on_room_changed,
 };
 
 AudioSystem *SdlMixerAudioSystem_create(void) {

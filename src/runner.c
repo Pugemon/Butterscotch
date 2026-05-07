@@ -1225,6 +1225,15 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         runner->renderer->vtable->onRoomChanged(runner->renderer, roomIndex);
     }
 
+    // Same idea as renderer prefetch: warm any audio that this session has
+    // already touched. Battle scenes get pummelled with audio_play_sound
+    // calls in the same frame as a fresh enemy spawns, so the per-call
+    // decode latency stacks into a ~50-200 ms hitch unless we pre-load.
+    if (runner->audioSystem != nullptr &&
+        runner->audioSystem->vtable->onRoomChanged != nullptr) {
+        runner->audioSystem->vtable->onRoomChanged(runner->audioSystem, roomIndex);
+    }
+
     SavedRoomState* savedState = &runner->savedRoomStates[roomIndex];
 
     runner->currentRoom = room;
