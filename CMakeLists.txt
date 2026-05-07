@@ -71,6 +71,8 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
 
     add_executable(ctr-cache-preprocess
         tools/ctr_cache_preprocess.c
+        tools/ctr_audio_preprocess.c     # audio bundle is part of the same tool
+        tools/ctr_adpcm_encode.c         # DSP-ADPCM encoder for SFX
         src/binary_reader.c
         src/data_win.c
         src/3ds/ctr_texture_cache.c
@@ -89,8 +91,15 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
         ${CMAKE_SOURCE_DIR}/vendor/bzip2
         ${CMAKE_SOURCE_DIR}/vendor/stb/ds
         ${CMAKE_SOURCE_DIR}/vendor/stb/image
+        ${CMAKE_SOURCE_DIR}/vendor/stb/vorbis
     )
     target_link_libraries(ctr-cache-preprocess m)
+    if(NOT MSVC)
+        # stb_vorbis emits a wall of unused-but-set / sign-conversion warnings
+        # we can't fix without forking the upstream single-header.
+        set_source_files_properties(tools/ctr_audio_preprocess.c PROPERTIES
+            COMPILE_FLAGS "-Wno-unused-but-set-variable -Wno-unused-function -Wno-sign-compare -Wno-unused-variable")
+    endif()
 
     # Silence the slew of warnings the upstream bzip2 sources emit (unused
     # parameters, sign conversions etc.) - they are not our code to clean up.
@@ -108,6 +117,7 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
 
     return()
 endif()
+
 
 file(GLOB SOURCES src/*.c)
 # Platform specific files builds

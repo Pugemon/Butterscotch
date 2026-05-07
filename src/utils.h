@@ -139,10 +139,28 @@ _val; \
     _bp; \
 })
 #define bigFree(ptr) do { if ((ptr) != nullptr) linearFree(ptr); } while (0)
+// linearAlloc has no realloc — manually grow: alloc new, memcpy, free old.
+// `oldBytes` MUST be the live data size of the existing allocation; passing
+// the wrong value silently corrupts whatever follows the old block.
+// `newBytes` is the size of the returned buffer.
+#define bigRealloc(ptr, oldBytes, newBytes) ({ \
+    size_t _on = (size_t)(oldBytes); \
+    size_t _nn = (size_t)(newBytes); \
+    void* _np = linearAlloc(_nn); \
+    if (_np == nullptr) { \
+        fprintf(stderr, "FATAL: linearAlloc(%zu) for big-realloc failed at %s:%d\n", \
+                _nn, __FILE__, __LINE__); \
+        abort(); \
+    } \
+    if ((ptr) != nullptr && _on > 0) memcpy(_np, (ptr), _on < _nn ? _on : _nn); \
+    if ((ptr) != nullptr) linearFree(ptr); \
+    _np; \
+})
 #else
-#define bigMalloc(size)        safeMalloc(size)
-#define bigCalloc(count, size) safeCalloc((count), (size))
-#define bigFree(ptr)           free(ptr)
+#define bigMalloc(size)                       safeMalloc(size)
+#define bigCalloc(count, size)                safeCalloc((count), (size))
+#define bigFree(ptr)                          free(ptr)
+#define bigRealloc(ptr, oldBytes, newBytes)   safeRealloc((ptr), (newBytes))
 #endif
 
 // Truncates to 6 decimal places, matching the HTML5 runner's ClampFloat

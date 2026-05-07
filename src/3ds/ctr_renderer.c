@@ -3200,8 +3200,14 @@ static uint32_t findOrAllocTpagSlot(CtrRenderer *ctx) {
         if (dw->tpag.items[i].texturePageId == -1) return i;
     }
     uint32_t newIndex = dw->tpag.count;
+    uint32_t oldCount = dw->tpag.count;
     dw->tpag.count++;
-    dw->tpag.items = safeRealloc(dw->tpag.items, dw->tpag.count * sizeof(TexturePageItem));
+    // tpag.items is bigMalloc'd in parseTPAG (linear arena on 3DS) — must
+    // grow with bigRealloc, not safeRealloc, or we'd be feeding a linear
+    // pointer into the heap allocator and crashing in malloc internals.
+    dw->tpag.items = bigRealloc(dw->tpag.items,
+                                (size_t)oldCount * sizeof(TexturePageItem),
+                                (size_t)dw->tpag.count * sizeof(TexturePageItem));
     memset(&dw->tpag.items[newIndex], 0, sizeof(TexturePageItem));
     dw->tpag.items[newIndex].texturePageId = -1;
 

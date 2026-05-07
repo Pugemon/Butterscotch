@@ -17,6 +17,7 @@
 #include "ctr_texture_cache.h"
 #include "ctr_file_system.h"
 #include "sdl12_audio_system.h"
+//#include "ctr_audio_system.h"
 #include "render2d_shader_shbin.h"
 #include "launcher.h"
 
@@ -155,13 +156,10 @@ int main(int argc, char **argv) {
     launcher_load_settings();
     printf("[BOOT] launcher_load_settings OK\n");
 
-    // Init SDL+mixer once for the whole app. Cycling Mix_OpenAudio/Mix_CloseAudio
-    // between game launches deadlocks/crashes on 3DS, so we keep them alive.
-    if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_AUDIO) != 0) {
-        printf("[BOOT] SDL_Init failed: %s\n", SDL_GetError());
-    } else if (!SdlMixer_globalInit()) {
-        printf("[BOOT] SdlMixer_globalInit failed (audio disabled)\n");
-    }
+    // NDSP-based audio: ndspInit happens lazily inside the audio system's
+    // init() the first time a game is launched, since the ndsp service must
+    // be torn down + restarted between data.win swaps. No global SDL/Mixer
+    // setup needed anymore.
 
     printf("[BOOT] Entering launcher_run_menu...\n");
     int selected_game = launcher_run_menu(&gfx);
@@ -175,8 +173,7 @@ int main(int argc, char **argv) {
         shaderProgramFree(&g_shaderProg);
         DVLB_Free(g_vshaderDvlb);
 
-        SdlMixer_globalShutdown();
-        SDL_Quit();
+        // No SDL teardown — we're on NDSP now.
 
         C3D_Fini();
         cfguExit();
@@ -315,7 +312,9 @@ int main(int argc, char **argv) {
         VMContext      *vm  = VM_create(dw);
         N3dsFileSystem *fs  = N3dsFileSystem_create(g_current_data_path);
         Renderer       *ren = CtrRenderer_create();
-        AudioSystem    *snd = (AudioSystem*)SdlMixerAudioSystem_create();//AlAudioSystem_create();//SdlMixerAudioSystem_create();
+        // Native NDSP path: pre-decoded PCM16 served from cache/audio.bin.
+        // Avoids SDL_mixer's heap pressure + per-call OGG decode stutter.
+        AudioSystem    *snd = SdlMixerAudioSystem_create();//CtrAudioSystem_create();
         if (snd) snd->dataWin = dw;
 
         Runner *run = Runner_create(dw, vm, ren, (FileSystem *)fs, snd);
@@ -465,7 +464,8 @@ int main(int argc, char **argv) {
         N3dsFileSystem_destroy(fs);
         VM_free(vm);
         DataWin_free(dw);
-        // SDL/Mix stays alive — see SdlMixer_globalInit().
+        // CtrAudioSystem's destroy() above already called ndspExit so the
+        // service is fresh for the next game.
 
         if (!gfx_ready) gfx_ready = launcher_gfx_init(&gfx);
 
@@ -510,8 +510,7 @@ int main(int argc, char **argv) {
     shaderProgramFree(&g_shaderProg);
     DVLB_Free(g_vshaderDvlb);
 
-    SdlMixer_globalShutdown();
-    SDL_Quit();
+    // NDSP path: no global SDL teardown.
 
     C3D_Fini();
     cfguExit();

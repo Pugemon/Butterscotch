@@ -2860,8 +2860,15 @@ uint32_t DataWin_allocSpriteSlot(DataWin* dw, uint32_t startIndex) {
         }
     }
     newIndex = dw->sprt.count;
+    uint32_t oldSpritesCount = dw->sprt.count;
     dw->sprt.count++;
-    dw->sprt.sprites = safeRealloc(dw->sprt.sprites, dw->sprt.count * sizeof(Sprite));
+    // sprt.sprites came out of bigCalloc in parseSPRT (linear arena on 3DS),
+    // so we must grow with bigRealloc — feeding the linear pointer into a
+    // regular realloc smashes the heap allocator and crashes in malloc
+    // internals (`_malloc_update_mallinfo`).
+    dw->sprt.sprites = bigRealloc(dw->sprt.sprites,
+                                  (size_t)oldSpritesCount * sizeof(Sprite),
+                                  (size_t)dw->sprt.count * sizeof(Sprite));
     memset(&dw->sprt.sprites[newIndex], 0, sizeof(Sprite));
 assignName:
     // Match the native runner: set a "__newsprite<N>" name so asset_get_index can find it.
