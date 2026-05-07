@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
 
     printf("[BOOT] Calling gfxInitDefault...\n");
     gfxInitDefault();
-    gfxSet3D(false);
+    gfxSet3D(true);
 
     printf("[BOOT] Calling APT_SetAppCpuTimeLimit & osSetSpeedupEnable...\n");
     APT_SetAppCpuTimeLimit(30);
@@ -156,11 +156,6 @@ int main(int argc, char **argv) {
     launcher_load_settings();
     printf("[BOOT] launcher_load_settings OK\n");
 
-    // NDSP-based audio: ndspInit happens lazily inside the audio system's
-    // init() the first time a game is launched, since the ndsp service must
-    // be torn down + restarted between data.win swaps. No global SDL/Mixer
-    // setup needed anymore.
-
     printf("[BOOT] Entering launcher_run_menu...\n");
     int selected_game = launcher_run_menu(&gfx);
     printf("[BOOT] launcher_run_menu returned: %d\n", selected_game);
@@ -172,8 +167,6 @@ int main(int argc, char **argv) {
 
         shaderProgramFree(&g_shaderProg);
         DVLB_Free(g_vshaderDvlb);
-
-        // No SDL teardown — we're on NDSP now.
 
         C3D_Fini();
         cfguExit();
@@ -312,9 +305,7 @@ int main(int argc, char **argv) {
         VMContext      *vm  = VM_create(dw);
         N3dsFileSystem *fs  = N3dsFileSystem_create(g_current_data_path);
         Renderer       *ren = CtrRenderer_create();
-        // Native NDSP path: pre-decoded PCM16 served from cache/audio.bin.
-        // Avoids SDL_mixer's heap pressure + per-call OGG decode stutter.
-        AudioSystem    *snd = SdlMixerAudioSystem_create();//CtrAudioSystem_create();
+        AudioSystem    *snd = SdlMixerAudioSystem_create();
         if (snd) snd->dataWin = dw;
 
         Runner *run = Runner_create(dw, vm, ren, (FileSystem *)fs, snd);
@@ -343,7 +334,6 @@ int main(int argc, char **argv) {
                     action = launcher_run_pause(&pauseGfx);
                     launcher_gfx_destroy(&pauseGfx);
                 }
-                // Apply any layout/theme tweaks the user made.
                 launcher_apply_settings(launcher_get_settings());
                 run->osType = (YoYoOperatingSystem)launcher_get_settings()->os_type;
 
@@ -353,7 +343,7 @@ int main(int argc, char **argv) {
                     run->shouldExit = true;
                     break;
                 }
-                continue; // resume — don't process input from the chord this frame
+                continue;
             }
 
             RunnerKeyboard_beginFrame(run->keyboard);
@@ -406,48 +396,60 @@ int main(int argc, char **argv) {
             }
 
             int winW = (launcher_get_settings()->game_screen == LAUNCHER_GAME_SCREEN_BOTTOM) ? 320 : 400;
+
+            float depthSliderState = osGet3DSliderState();
+
+            int numEyes = (depthSliderState > 0.01f && launcher_get_settings()->game_screen == LAUNCHER_GAME_SCREEN_TOP) ? 2 : 1;
+
             ren->vtable->beginFrame(ren, gw, gh, winW, 240);
-            if (run->drawBackgroundColor) {
-                ren->vtable->clearTarget(ren, run->backgroundColor, 1.f);
-            }
 
-            bool drawn = false;
-            if (views_en) {
-                for (int i = 0; i < MAX_VIEWS; i++) {
-                    RuntimeView *v = &run->views[i];
-                    if (!v->enabled) continue;
-                    run->viewCurrent = i;
+            // Stereoscopic Dual Rendering Engine Main Cycle Injection!
+            for(int eye = 0; eye < numEyes; eye++) {
 
-                    ren->vtable->beginView(ren, v->viewX, v->viewY, v->viewWidth, v->viewHeight,
-                                           v->portX, v->portY, v->portWidth, v->portHeight, v->viewAngle);
+                CtrRenderer_beginEye(ren, eye, depthSliderState);
+
+                if (run->drawBackgroundColor) {
+                    ren->vtable->clearTarget(ren, run->backgroundColor, 1.f);
+                }
+
+                bool drawn = false;
+                if (views_en) {
+                    for (int i = 0; i < MAX_VIEWS; i++) {
+                        RuntimeView *v = &run->views[i];
+                        if (!v->enabled) continue;
+                        run->viewCurrent = i;
+
+                        ren->vtable->beginView(ren, v->viewX, v->viewY, v->viewWidth, v->viewHeight,
+                                            v->portX, v->portY, v->portWidth, v->portHeight, v->viewAngle);
+                        Runner_draw(run);
+                        ren->vtable->endView(ren);
+
+                        ren->vtable->beginGUI(ren,
+                                            run->guiWidth  > 0 ? run->guiWidth  : v->portWidth,
+                                            run->guiHeight > 0 ? run->guiHeight : v->portHeight,
+                                            v->portX, v->portY, v->portWidth, v->portHeight);
+                        Runner_drawGUI(run);
+                        ren->vtable->endGUI(ren);
+                        ren->vtable->flush(ren);
+                        drawn = true;
+                    }
+                }
+
+                if (!drawn) {
+                    run->viewCurrent = 0;
+                    ren->vtable->beginView(ren, 0, 0, gw, gh, 0, 0, gw, gh, 0.f);
                     Runner_draw(run);
                     ren->vtable->endView(ren);
 
                     ren->vtable->beginGUI(ren,
-                                          run->guiWidth  > 0 ? run->guiWidth  : v->portWidth,
-                                          run->guiHeight > 0 ? run->guiHeight : v->portHeight,
-                                          v->portX, v->portY, v->portWidth, v->portHeight);
+                                        run->guiWidth  > 0 ? run->guiWidth  : gw,
+                                        run->guiHeight > 0 ? run->guiHeight : gh,
+                                        0, 0, gw, gh);
                     Runner_drawGUI(run);
                     ren->vtable->endGUI(ren);
                     ren->vtable->flush(ren);
-                    drawn = true;
                 }
-            }
-
-            if (!drawn) {
-                run->viewCurrent = 0;
-                ren->vtable->beginView(ren, 0, 0, gw, gh, 0, 0, gw, gh, 0.f);
-                Runner_draw(run);
-                ren->vtable->endView(ren);
-
-                ren->vtable->beginGUI(ren,
-                                      run->guiWidth  > 0 ? run->guiWidth  : gw,
-                                      run->guiHeight > 0 ? run->guiHeight : gh,
-                                      0, 0, gw, gh);
-                Runner_drawGUI(run);
-                ren->vtable->endGUI(ren);
-                ren->vtable->flush(ren);
-            }
+            } // END DUAL/MONO EYE RENDERING FOR CYCLE!
 
             run->viewCurrent = 0;
             ren->vtable->endFrame(ren);
@@ -464,16 +466,12 @@ int main(int argc, char **argv) {
         N3dsFileSystem_destroy(fs);
         VM_free(vm);
         DataWin_free(dw);
-        // CtrAudioSystem's destroy() above already called ndspExit so the
-        // service is fresh for the next game.
 
         if (!gfx_ready) gfx_ready = launcher_gfx_init(&gfx);
 
         if (g_game_change_requested && !quit_to_launcher) {
             char resolved[256];
             launcher_resolve_new_game_path(g_next_game_path, resolved, sizeof(resolved));
-            // Bail out to the menu if the requested path is bogus — better than
-            // running DataWin_parse on a missing file and aborting.
             FILE *probe = fopen(resolved, "rb");
             if (probe) {
                 fclose(probe);
@@ -509,8 +507,6 @@ int main(int argc, char **argv) {
 
     shaderProgramFree(&g_shaderProg);
     DVLB_Free(g_vshaderDvlb);
-
-    // NDSP path: no global SDL teardown.
 
     C3D_Fini();
     cfguExit();

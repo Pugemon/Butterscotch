@@ -423,6 +423,11 @@ void Runner_drawBackgrounds(Runner* runner, bool foreground) {
         if (!bg->visible || bg->foreground != foreground) continue;
         if (0 > bg->backgroundIndex) continue;
 
+        float assumed_depth = foreground ? -10000.0f : 150000.0f;
+        if (runner->renderer->vtable->set3DDepthOffset) {
+            runner->renderer->vtable->set3DDepthOffset(runner->renderer, assumed_depth);
+        }
+
         int32_t tpagIndex = Renderer_resolveBackgroundTPAGIndex(dataWin, bg->backgroundIndex);
         // Bound check on BOTH ends: < 0 is the "unresolved" sentinel from
         // resolveAllTPAGReferences, but a stale/garbage value can still pass
@@ -490,6 +495,10 @@ static void fireDrawSubtype(Runner* runner, Drawable* drawables, int32_t drawabl
         int32_t ownerObjectIndex = -1;
         int32_t codeId = ResolvedEventTable_lookup(&runner->eventTable, inst->objectIndex, slot, &ownerObjectIndex);
         if (0 > codeId) continue;
+
+        if (runner->renderer->vtable->set3DDepthOffset) {
+            runner->renderer->vtable->set3DDepthOffset(runner->renderer, (float)inst->depth);
+        }
         Runner_executeResolvedEvent(runner, inst, EVENT_DRAW, subtype, codeId, ownerObjectIndex);
     }
 }
@@ -651,6 +660,11 @@ void Runner_draw(Runner* runner) {
     // Draw interleaved tiles and instances
     repeat(drawableCount, i) {
         Drawable* d = &drawables[i];
+
+        if (runner->renderer->vtable->set3DDepthOffset) {
+            runner->renderer->vtable->set3DDepthOffset(runner->renderer, (float)d->depth);
+        }
+
         if (d->type == DRAWABLE_TILE) {
             if (runner->renderer != nullptr) {
                 RoomTile* tile = &room->tiles[d->tileIndex];

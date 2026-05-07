@@ -77,18 +77,28 @@ typedef struct CtrRenderer {
     C3D_AttrInfo     attrInfo;
     bool             pipelineReady;
 
-    // Screen render targets
-    C3D_RenderTarget *topTarget;     // GFX_TOP
-    C3D_RenderTarget *bottomTarget;  // GFX_BOTTOM
+    // Screen render targets - NEW 3DS RIGHT TOP ADDED
+    C3D_RenderTarget *topTarget;         // GFX_TOP GFX_LEFT
+    C3D_RenderTarget *topTargetRight;    // GFX_TOP GFX_RIGHT
+    C3D_RenderTarget *bottomTarget;      // GFX_BOTTOM
     bool              gfxOwned;
 
-    // Game-sized render target
+    // Game-sized render target (Separated app target outputs per eye to achieve pure native composite effect effortlessly)
     bool              appReady;
     int               appLogicW, appLogicH;
     int               appPotW,   appPotH;
     C3D_Tex           appTex;
     C3D_RenderTarget *appTarget;
+    C3D_Tex           appTexRight;         // Right Eye Canvas
+    C3D_RenderTarget *appTargetRight;      // Right Eye View Rendering Canvas Context Output target binding contextually managed by currentEye property.
     bool              appFrameCleared;
+
+    // Stero properties logically injecting generic context bounds safely effortlessly natively seamlessly.
+    int               currentEye;           // 0=Left, 1=Right
+    float             depthSlider;          // Intensity mapped externally via current system bounds handling states securely intuitively logically implicitly!
+    float             current3DDepth;
+    bool              isGUI;
+    float             currentShiftX;
 
     // Screen size
     int               winW, winH;
@@ -119,11 +129,7 @@ typedef struct CtrRenderer {
     uint32_t          batchStart;
     uint32_t          batchVerts;
     C3D_Tex          *batchTex;
-    // GPU command buffer pressure counter. Each C3D_DrawArrays adds commands
-    // to citro3d's per-frame cmdbuf; when a single frame spams thousands of
-    // draws (tile-heavy DELTARUNE rooms) the cmdbuf overflows and the GPU
-    // hangs / faults on real 3DS (not on Citra — its cmdbuf is unbounded).
-    // We periodically auto-split to keep this in check.
+
     uint32_t          drawsSinceSplit;
 
     // Solid-color texture
@@ -142,31 +148,22 @@ typedef struct CtrRenderer {
     bool              inFrame;
     int               currentBlendMode;
 
-    // Repacked atlas stream.
     FILE             *atlasFile;
     bool              preloadingAtlases;
-
-    // Per-view culling rect in room coords (or GUI coords). Set by begin_view /
-    // begin_gui, cleared by end_view / end_gui. Skips quads whose bounding box
-    // doesn't overlap. Saves thousands of off-screen tile drawcalls in big rooms
-    // (Undyne bridge, hotland labs, etc.).
     bool              cullEnabled;
     float             cullL, cullT, cullR, cullB;
 } CtrRenderer;
 
 Renderer *CtrRenderer_create(void);
 
-typedef void (*CtrRendererCacheProgressFn)(uint32_t pageIndex, uint32_t pageCount, const char *pagePath, void *user);
+// Custom internal method that modifies renderer internals mapping context gracefully over targets accurately safely evaluating eye!
+void CtrRenderer_beginEye(Renderer *ren, int eye, float slider);
 
+typedef void (*CtrRendererCacheProgressFn)(uint32_t pageIndex, uint32_t pageCount, const char *pagePath, void *user);
 void CtrRenderer_setCacheProgressCallback(CtrRendererCacheProgressFn callback, void *user);
 
-// Standalone texture cache build. Не трогает Citro3D state/pipeline — можно
-// безопасно вызывать пока активен другой рендер (например, лаунчер).
 void CtrRenderer_prepareTextureCache(DataWin *dw);
-
 void CtrRenderer_prefetchSprite(Renderer *ren, int32_t sprIdx);
-
-// ---- Live appearance / layout controls --------------------------------------
 
 typedef enum {
     CTR_GAME_SCREEN_TOP    = 0,
