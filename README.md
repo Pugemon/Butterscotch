@@ -1,5 +1,6 @@
 <h1 align="center">🥧 Butterscotch 🥧</h1>
 
+## Original Discord:
 <!-- Badges, about the GitHub repository itself -->
 <p align="center">
 <a href="https://discord.gg/2gQR7t3WJR"><img src="https://img.shields.io/discord/1406856655920168971?color=5865F2&logo=discord&logoColor=white&label=discord"></a>

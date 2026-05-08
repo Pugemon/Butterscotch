@@ -1,6 +1,5 @@
 #include <3ds.h>
 #include <citro3d.h>
-#include <SDL/SDL.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,8 +15,8 @@
 #include "ctr_renderer.h"
 #include "ctr_texture_cache.h"
 #include "ctr_file_system.h"
-#include "sdl12_audio_system.h"
 //#include "n3ds_audio_system.h"
+#include "ctr_audio_system.h"
 #include "render2d_shader_shbin.h"
 #include "launcher.h"
 
@@ -305,7 +304,7 @@ int main(int argc, char **argv) {
         VMContext      *vm  = VM_create(dw);
         N3dsFileSystem *fs  = N3dsFileSystem_create(g_current_data_path);
         Renderer       *ren = CtrRenderer_create();
-        AudioSystem    *snd =(AudioSystem*)SdlMixerAudioSystem_create();
+        AudioSystem    *snd =(AudioSystem*)CtrAudioSystem_create();
         if (snd) snd->dataWin = dw;
 
         Runner *run = Runner_create(dw, vm, ren, (FileSystem *)fs, snd);
