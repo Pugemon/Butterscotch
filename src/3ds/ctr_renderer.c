@@ -1777,7 +1777,9 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
     ctx->appPotH = next_pow2(gh);
 
     if (!C3D_TexInitVRAM(&ctx->appTex, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
-        return false;
+        if (!C3D_TexInit(&ctx->appTex, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
+            return false;
+        }
     }
     C3D_TexSetFilter(&ctx->appTex, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&ctx->appTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
@@ -1793,8 +1795,10 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
 
     // Initializing the corresponding right target cleanly generating buffers reliably correctly!
     if (!C3D_TexInitVRAM(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
-        destroy_app_surface(ctx);
-        return false;
+        if (!C3D_TexInit(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
+            destroy_app_surface(ctx);
+            return false;
+        }
     }
     C3D_TexSetFilter(&ctx->appTexRight, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&ctx->appTexRight, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
@@ -2177,7 +2181,7 @@ static void ctr_begin_view(Renderer *ren, int32_t vx, int32_t vy, int32_t vw, in
         bind_target(ctx, canvas);
     }
 
-    set_viewport_logical(ctx, ctx->appTarget, px, py, pw, ph);
+    set_viewport_logical(ctx, canvas, px, py, pw, ph);
 
     C3D_Mtx proj, rot, res;
     Mtx_Identity(&proj);
