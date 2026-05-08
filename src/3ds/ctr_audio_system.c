@@ -145,9 +145,13 @@ static void ctr_update(AudioSystem* sys_base, MAYBE_UNUSED float dt) {
     sys->frame++;
 
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
-        if (sys->chans[i].currentSoundId != -1 && !ndspChnIsPlaying(i) && !ndspChnIsPaused(i)) {
-            sys->chans[i].currentSoundId = -1;
-            sys->chans[i].instanceId = -1;
+        if (sys->chans[i].currentSoundId != -1) {
+            bool isDone = (sys->chans[i].waveBuf.status == NDSP_WBUF_DONE);
+
+            if (isDone && !sys->chans[i].loop) {
+                sys->chans[i].currentSoundId = -1;
+                sys->chans[i].instanceId = -1;
+            }
         }
     }
 }
@@ -256,7 +260,7 @@ static void ctr_stop_all(AudioSystem *base) {
 static bool ctr_is_playing(AudioSystem *base, int32_t id) {
     CtrAudioSystem *sys = (CtrAudioSystem *) base;
     for (int i = 0; i < MAX_CTR_CHANNELS; i++) {
-        if ((sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) && ndspChnIsPlaying(i)) {
+        if (sys->chans[i].currentSoundId == id || sys->chans[i].instanceId == id) {
             return true;
         }
     }
