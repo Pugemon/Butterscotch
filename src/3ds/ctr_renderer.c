@@ -1204,7 +1204,7 @@ static void push_quad_uvgrad(CtrRenderer *ctx, C3D_Tex *tex,
     CtrVertex *v = vbuf_reserve(ctx, 6, tex);
 #define EMIT(idx, ix, uu, vv, cc) \
         do { \
-            v[idx].x = x[ix]; v[idx].y = y[ix]; v[idx].z = 0.f; \
+            v[idx].x = x[ix] + ctx->currentShiftX; v[idx].y = y[ix]; v[idx].z = 0.f; \
             v[idx].u = uu;    v[idx].v = vv; \
             v[idx].r = c[cc][0]; v[idx].g = c[cc][1]; v[idx].b = c[cc][2]; v[idx].a = c[cc][3]; \
         } while (0)
