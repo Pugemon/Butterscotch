@@ -5,6 +5,9 @@
 <a href="https://discord.gg/2gQR7t3WJR"><img src="https://img.shields.io/discord/1406856655920168971?color=5865F2&logo=discord&logoColor=white&label=discord"></a>
 </p>
 
+> [!IMPORTANT]  
+> This project was created using Generative AI
+
 ## Running on Nintendo 3DS
 
 First, install the provided `.cia` file on your console (using FBI or your preferred installer).

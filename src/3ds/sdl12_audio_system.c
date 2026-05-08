@@ -47,19 +47,20 @@ void SdlMixer_globalShutdown(void) {
 
 // ===[ Helpers ]===
 
-static DataWin* groupOf(SysMixer *sm, int32_t groupIndex) {
+static DataWin *groupOf(SysMixer *sm, int32_t groupIndex) {
     if (groupIndex < 0) return NULL;
     if ((size_t) groupIndex >= arrlenu(sm->base.audioGroups)) return NULL;
     return sm->base.audioGroups[groupIndex];
 }
 
-static const char* archiveOf(SysMixer *sm, int32_t groupIndex) {
+static const char *archiveOf(SysMixer *sm, int32_t groupIndex) {
     if (groupIndex < 0) return NULL;
     if ((size_t) groupIndex >= arrlenu(sm->archivePaths)) return NULL;
     return sm->archivePaths[groupIndex];
 }
 
-static bool readEntryBytes(SysMixer *sm, int32_t groupIndex, const char *archive, uint32_t offset, uint32_t size, uint8_t *out) {
+static bool readEntryBytes(SysMixer *sm, int32_t groupIndex, const char *archive, uint32_t offset, uint32_t size,
+                           uint8_t *out) {
     if (!archive || !size || !out) return false;
 
     while (arrlen(sm->archiveFiles) <= groupIndex) {
@@ -121,7 +122,6 @@ static void evict_old(SysMixer *sm) {
 }
 
 // Read a SFX entry from its audiogroup archive into a Mix_Chunk.
-// Добавили int32_t groupIndex в конец аргументов
 static bool load_sfx(SysMixer *sm, int id, AudioEntry *ent, const char *archive, int32_t groupIndex) {
     evict_old(sm);
 
@@ -132,7 +132,6 @@ static bool load_sfx(SysMixer *sm, int id, AudioEntry *ent, const char *archive,
         return false;
     }
 
-    // ИСПРАВЛЕННЫЙ ВЫЗОВ (теперь 6 аргументов)
     if (!readEntryBytes(sm, groupIndex, archive, ent->dataOffset, ent->dataSize, raw)) {
         linearFree(raw);
         return false;
@@ -168,8 +167,6 @@ static bool ensure_snd(SysMixer *sm, int id) {
 
     Sound *snd = &sm->base.dataWin->sond.sounds[id];
 
-    // ФИКС АУДИОГРУПП: Звук может быть Embedded (вшит) ИЛИ Compressed (сжат).
-    // В обоих случаях он лежит в AUDO-чанке своей аудиогруппы!
     bool isEmbedded = (snd->flags & 0x01) != 0;
     bool isCompressed = (snd->flags & 0x02) != 0;
 
@@ -186,25 +183,20 @@ static bool ensure_snd(SysMixer *sm, int id) {
             }
             return false;
         }
-        if (snd->audioFile < 0 || (uint32_t) snd->audioFile >= gw->audo.count) {
-            fprintf(stderr, "[AUDIO] sound '%s' bad audioFile %d (group %d has %u)\n",
-                    snd->name ? snd->name : "?", snd->audioFile, snd->audioGroup,
-                    (unsigned) gw->audo.count);
-            return false;
-        }
+        if (snd->audioFile < 0 || (uint32_t) snd->audioFile >= gw->audo.count) return false;
 
         AudioEntry *ent = &gw->audo.entries[snd->audioFile];
         if (!ent->dataSize) return false;
 
-        if (ent->dataSize > STREAM_THRES) {
+        // ИСПОЛЬЗУЕМ НОВУЮ ПРОВЕРКУ
+        bool stream_as_music = is_track_music(snd, ent->dataSize);
+
+        if (stream_as_music) {
             stop_other_music(sm, id);
 
             uint8_t *mb = malloc(ent->dataSize);
-            if (!mb) {
-                fprintf(stderr, "[AUDIO] malloc(%u) failed for music %d\n",
-                        (unsigned) ent->dataSize, id);
-                return false;
-            }
+            if (!mb) return false;
+
             if (!readEntryBytes(sm, snd->audioGroup, archive, ent->dataOffset, ent->dataSize, mb)) {
                 free(mb);
                 return false;
@@ -215,25 +207,24 @@ static bool ensure_snd(SysMixer *sm, int id) {
             if (sm->music[id]) {
                 sm->musicBuf[id] = mb;
             } else {
-                fprintf(stderr, "[AUDIO] Mix_LoadMUS_RW failed for '%s': %s\n",
-                        snd->name ? snd->name : "?", Mix_GetError());
                 free(mb);
             }
         } else {
+            // Если это SFX - грузим как чанк (звук), даже если он весит гигабайт!
+            // Аналогично: используй версию load_sfx в зависимости от того, применил ли кэш.
             if (!load_sfx(sm, id, ent, archive, snd->audioGroup)) {
-                fprintf(stderr, "[AUDIO] load_sfx failed for '%s' (group %d, file %d)\n",
-                        snd->name ? snd->name : "?", snd->audioGroup, snd->audioFile);
+                fprintf(stderr, "[AUDIO] load_sfx failed for '%s'\n", snd->name ? snd->name : "?");
             }
         }
     } else {
-        // Внешние файлы (External), которых нет в AUDO чанке.
+        // Внешние файлы
         if (!snd->file || !snd->file[0]) return false;
         char name[512];
-        snprintf(name, sizeof(name), "%s%s", snd->file,
-                 strchr(snd->file, '.') ? "" : ".ogg");
+        snprintf(name, sizeof(name), "%s%s", snd->file, strchr(snd->file, '.') ? "" : ".ogg");
         char *path = sm->fs->vtable->resolvePath(sm->fs, name);
         if (path) {
-            if (strstr(path, ".wav")) {
+            // Проверяем умной функцией
+            if (!is_track_music(snd, 0xFFFFFFFF)) {
                 sm->chunks[id] = Mix_LoadWAV(path);
             } else {
                 stop_other_music(sm, id);
@@ -257,12 +248,12 @@ static void sys_init(AudioSystem *sys, DataWin *dw, FileSystem *fs) {
     Mix_AllocateChannels(MAX_CHANS);
 
     int cnt = (int) dw->sond.count;
-    sm->chunks   = calloc(cnt, sizeof(Mix_Chunk *));
-    sm->music    = calloc(cnt, sizeof(Mix_Music *));
+    sm->chunks = calloc(cnt, sizeof(Mix_Chunk *));
+    sm->music = calloc(cnt, sizeof(Mix_Music *));
     sm->musicBuf = calloc(cnt, sizeof(uint8_t *));
-    sm->sfxBuf   = calloc(cnt, sizeof(void *));
+    sm->sfxBuf = calloc(cnt, sizeof(void *));
     sm->lastUsed = calloc(cnt, sizeof(uint32_t));
-    sm->pitches  = calloc(cnt, sizeof(float));
+    sm->pitches = calloc(cnt, sizeof(float));
     for (int i = 0; i < cnt; i++) sm->pitches[i] = 1.0f;
 
     sm->curMusicId = -1;
@@ -282,10 +273,10 @@ static void sys_destroy(AudioSystem *sys) {
         Mix_HaltMusic();
 
         for (uint32_t i = 0; i < sm->base.dataWin->sond.count; i++) {
-            if (sm->chunks[i])   Mix_FreeChunk(sm->chunks[i]);
-            if (sm->music[i])    Mix_FreeMusic(sm->music[i]);
+            if (sm->chunks[i]) Mix_FreeChunk(sm->chunks[i]);
+            if (sm->music[i]) Mix_FreeMusic(sm->music[i]);
             if (sm->musicBuf[i]) free(sm->musicBuf[i]);
-            if (sm->sfxBuf[i])   linearFree(sm->sfxBuf[i]);
+            if (sm->sfxBuf[i]) linearFree(sm->sfxBuf[i]);
         }
     }
 
@@ -331,7 +322,7 @@ static int32_t sys_play(AudioSystem *sys, int32_t id, MAYBE_UNUSED int32_t prio,
     }
 
     if (sm->chunks[id]) {
-        #define MAX_SAME_SFX 4 // Максимум копий одного звука (защита от спама)
+#define MAX_SAME_SFX 4 // Максимум копий одного звука (защита от спама)
 
         int playing_count = 0;
         int oldest_chan = -1;
@@ -392,6 +383,18 @@ static void sys_stop_all(AudioSystem *sys) {
     Mix_HaltChannel(-1);
     Mix_HaltMusic();
     ((SysMixer *) sys)->curMusicId = -1;
+}
+
+static bool is_track_music(Sound *snd, uint32_t dataSize) {
+    if (snd->name) {
+        if (strncmp(snd->name, "mus_", 4) == 0) return true;
+        if (strncmp(snd->name, "bgm_", 4) == 0) return true;
+
+        if (strncmp(snd->name, "snd_", 4) == 0) return false;
+        if (strncmp(snd->name, "obj_", 4) == 0) return false;
+    }
+
+    return dataSize > (1536 * 1024);
 }
 
 static bool sys_is_playing(AudioSystem *sys, int32_t id) {
@@ -537,7 +540,7 @@ static void sys_grp_load(AudioSystem *sys, int32_t grp) {
         return;
     }
 
-    DataWinParserOptions opt = (DataWinParserOptions) {
+    DataWinParserOptions opt = (DataWinParserOptions){
         .parseAudo = 1,
         .skipAudioBlobData = 1,
     };
@@ -548,10 +551,12 @@ static void sys_grp_load(AudioSystem *sys, int32_t grp) {
         return;
     }
 
-    while ((int32_t) arrlen(sm->base.audioGroups) <= grp) arrput(sm->base.audioGroups, NULL);
-    while ((int32_t) arrlen(sm->archivePaths)    <= grp) arrput(sm->archivePaths, NULL);
+    while ((int32_t) arrlen(sm->base.audioGroups) <= grp)
+        arrput(sm->base.audioGroups, NULL);
+    while ((int32_t) arrlen(sm->archivePaths) <= grp)
+        arrput(sm->archivePaths, NULL);
     sm->base.audioGroups[grp] = gw;
-    sm->archivePaths[grp]     = path;
+    sm->archivePaths[grp] = path;
     fprintf(stderr, "[AUDIO] loaded audiogroup %d (%s, %u entries)\n",
             grp, path, (unsigned) gw->audo.count);
 }
