@@ -7,16 +7,18 @@
 #include <stdint.h>
 
 #define CTR_TEXTURE_CACHE_MAGIC      0x4B415052u
-#define CTR_TEXTURE_CACHE_VERSION    15u
+#define CTR_TEXTURE_CACHE_VERSION    16u
 #define CTR_TEXTURE_CACHE_ATLAS_SIZE 512u
 #define CTR_TEXTURE_CACHE_FILE       "atlas.bin"
-#define CTR_TEXTURE_CACHE_READY_FLAG "cache_ready_v16.flag"
+#define CTR_TEXTURE_CACHE_READY_FLAG "cache_ready_v17.flag"
 
 #define CTR_TEXTURE_CACHE_FORMAT_RGBA4 4u
 #define CTR_TEXTURE_CACHE_FORMAT_LA4   9u
 #define CTR_TEXTURE_CACHE_FORMAT_A4    11u
 #define CTR_TEXTURE_CACHE_FORMAT_ETC1   12u
 #define CTR_TEXTURE_CACHE_FORMAT_ETC1A4 13u
+
+#define CTR_TEXTURE_CACHE_FLAG_ETC1 1u
 
 typedef struct CtrRenderer CtrRenderer;
 
@@ -46,6 +48,11 @@ void CtrTextureCache_indexPath(char *out, size_t outSize);
 bool CtrTextureCache_indexIsCurrentPath(const char *path);
 
 void CtrTextureCache_setProgressCallback(CtrTextureCacheProgressFn callback, void *user);
+
+#ifdef CTR_TEXTURE_CACHE_HOST
+void CtrTextureCache_setUseEtc1(bool enabled);
+bool CtrTextureCache_getUseEtc1(void);
+#endif
 
 void CtrTextureCache_prepare(DataWin *dw);
 

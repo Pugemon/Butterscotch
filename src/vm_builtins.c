@@ -31,6 +31,9 @@
 #include "file_system.h"
 #include "string_builder.h"
 #include "runner_mouse.h"
+#ifdef PLATFORM_3DS
+#include "gl/image_decoder.h"
+#endif
 
 #define MAX_BACKGROUNDS 8
 
@@ -3697,7 +3700,224 @@ STUB_RETURN_ZERO(steam_utils_is_steam_running_on_steam_deck)
 STUB_RETURN_VALUE(fmod_init, 1)
 STUB_RETURN_ZERO(fmod_update)
 STUB_RETURN_ZERO(fmod_destroy)
-STUB_RETURN_ZERO(fmod_bank_load)
+
+static bool builtin_file_exists_abs(const char* path) {
+    if (!path || !*path) return false;
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static bool builtin_names_match_ci(const char* a, const char* b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return false;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool builtin_is_path_sep(int c) {
+    return c == '/' || c == '\\';
+}
+
+static bool builtin_paths_match_ci(const char* a, const char* b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        int ca = (unsigned char)*a;
+        int cb = (unsigned char)*b;
+        if (builtin_is_path_sep(ca) && builtin_is_path_sep(cb)) {
+            a++;
+            b++;
+            continue;
+        }
+        if (tolower(ca) != tolower(cb)) return false;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool builtin_path_iends_with_component(const char* path, const char* suffix) {
+    if (!path || !suffix || !*suffix) return false;
+    size_t pathLen = strlen(path);
+    size_t suffixLen = strlen(suffix);
+    if (suffixLen > pathLen) return false;
+    const char* tail = path + pathLen - suffixLen;
+    if (!builtin_paths_match_ci(tail, suffix)) return false;
+    return tail == path || builtin_is_path_sep((unsigned char) tail[-1]);
+}
+
+static bool builtin_try_read_external_image_index(FileSystem* fs, const char* requested,
+                                                  uint8_t** outData, int32_t* outSize,
+                                                  char** outResolvedPath) {
+    if (!fs || !fs->vtable || !fs->vtable->readFileText ||
+        !fs->vtable->readFileBinary || !requested || !*requested) {
+        return false;
+    }
+
+    char* index = fs->vtable->readFileText(fs, "cache/external_images.txt");
+    if (!index) return false;
+
+    const char* slash = strrchr(requested, '/');
+    const char* backslash = strrchr(requested, '\\');
+    if (!slash || (backslash && backslash > slash)) slash = backslash;
+    const char* wantedBase = slash ? slash + 1 : requested;
+
+    for (int pass = 0; pass < 2; pass++) {
+        char* cursor = index;
+        while (*cursor) {
+            char* line = cursor;
+            char* nl = strchr(cursor, '\n');
+            char savedNl = '\0';
+            if (nl) {
+                savedNl = *nl;
+                *nl = '\0';
+                cursor = nl + 1;
+            } else {
+                cursor += strlen(cursor);
+            }
+
+            size_t lineLen = strlen(line);
+            char* cr = nullptr;
+            char savedCr = '\0';
+            if (lineLen > 0 && line[lineLen - 1] == '\r') {
+                cr = &line[lineLen - 1];
+                savedCr = *cr;
+                *cr = '\0';
+            }
+
+            char* tab = strchr(line, '\t');
+            if (!tab) {
+                if (cr) *cr = savedCr;
+                if (nl) *nl = savedNl;
+                continue;
+            }
+            char savedTab = *tab;
+            *tab = '\0';
+            const char* base = line;
+            const char* relPath = tab + 1;
+
+            bool match = false;
+            if (pass == 0) {
+                match = builtin_paths_match_ci(relPath, requested) ||
+                        builtin_path_iends_with_component(relPath, requested);
+            } else {
+                match = builtin_names_match_ci(base, wantedBase);
+            }
+
+            if (match && fs->vtable->readFileBinary(fs, relPath, outData, outSize)) {
+                if (outResolvedPath) *outResolvedPath = safeStrdup(relPath);
+                free(index);
+                return true;
+            }
+
+            *tab = savedTab;
+            if (cr) *cr = savedCr;
+            if (nl) *nl = savedNl;
+        }
+    }
+
+    free(index);
+    return false;
+}
+
+static bool builtin_find_file_recursive(const char* root, const char* wantedBase,
+                                        char* out, size_t outSize, int depth) {
+    if (!root || !wantedBase || !out || outSize == 0 || depth > 16) return false;
+#ifdef _WIN32
+    (void)root;
+    (void)wantedBase;
+    (void)depth;
+    return false;
+#else
+    DIR* dir = opendir(root);
+    if (!dir) return false;
+
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        const char* name = ent->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        if (strcmp(name, "cache") == 0) continue;
+
+        char child[640];
+        snprintf(child, sizeof(child), "%s/%s", root, name);
+        if (builtin_file_exists_abs(child) && builtin_names_match_ci(name, wantedBase)) {
+            snprintf(out, outSize, "%s", child);
+            closedir(dir);
+            return true;
+        }
+    }
+
+    rewinddir(dir);
+    while ((ent = readdir(dir)) != nullptr) {
+        const char* name = ent->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        if (strcmp(name, "cache") == 0) continue;
+
+        char child[640];
+        snprintf(child, sizeof(child), "%s/%s", root, name);
+        struct stat st;
+        if (stat(child, &st) == 0 && S_ISDIR(st.st_mode) &&
+            builtin_find_file_recursive(child, wantedBase, out, outSize, depth + 1)) {
+            closedir(dir);
+            return true;
+        }
+    }
+
+    closedir(dir);
+    return false;
+#endif
+}
+
+static RValue builtin_fmod_bank_load(VMContext* ctx, RValue* args, int32_t argCount) {
+    logSemiStubbedFunction(ctx, "fmod_bank_load");
+    if (argCount < 1) return RValue_makeReal(0.0);
+
+    Runner* runner = (Runner*) ctx->runner;
+    FileSystem* fs = runner ? runner->fileSystem : nullptr;
+    char* requested = RValue_toString(args[0]);
+    if (!requested || !*requested) {
+        free(requested);
+        return RValue_makeReal(0.0);
+    }
+
+    bool found = false;
+    char* resolved = nullptr;
+    if (fs && fs->vtable && fs->vtable->resolvePath) {
+        resolved = fs->vtable->resolvePath(fs, requested);
+        found = builtin_file_exists_abs(resolved);
+    } else {
+        found = builtin_file_exists_abs(requested);
+    }
+
+    if (!found && fs && fs->vtable && fs->vtable->resolvePath) {
+        char* base = fs->vtable->resolvePath(fs, "");
+        const char* slash = strrchr(requested, '/');
+        const char* backslash = strrchr(requested, '\\');
+        if (!slash || (backslash && backslash > slash)) slash = backslash;
+        const char* wantedBase = slash ? slash + 1 : requested;
+        char foundPath[640];
+        if (base && builtin_find_file_recursive(base, wantedBase, foundPath, sizeof(foundPath), 0)) {
+            found = true;
+#ifdef LOG_ALL
+            fprintf(stderr, "VM: fmod_bank_load resolved '%s' recursively -> '%s'\n", requested, foundPath);
+#endif
+        }
+        free(base);
+    }
+
+#ifdef LOG_ALL
+    if (!found) {
+        fprintf(stderr, "VM: fmod_bank_load could not find '%s'%s%s\n",
+                requested, resolved ? " resolved=" : "", resolved ? resolved : "");
+    }
+#endif
+
+    free(resolved);
+    free(requested);
+    return RValue_makeReal(found ? 1.0 : 0.0);
+}
 STUB_RETURN_ZERO(fmod_bank_load_sample_data)
 STUB_RETURN_ZERO(fmod_set_num_listeners)
 STUB_RETURN_ZERO(fmod_set_listener_attributes)
@@ -4362,6 +4582,10 @@ static void collectFileFindMatches(FileSystem* fs, const char* pattern) {
     char* scanDir = nullptr;
     char* mask = nullptr;
     splitFindPath(resolved, &scanDir, &mask);
+    if (mask != nullptr && mask[0] == '\0') {
+        free(mask);
+        mask = safeStrdup("*");
+    }
 
 #ifdef _WIN32
     size_t searchLen = strlen(scanDir) + strlen(mask) + 2;
@@ -4884,8 +5108,16 @@ STUB_RETURN_ZERO(window_handle)
 STUB_RETURN_ZERO(window_get_cursor)
 STUB_RETURN_UNDEFINED(window_set_cursor)
 STUB_RETURN_UNDEFINED(window_set_rectangle)
-STUB_RETURN_ZERO(window_mouse_get_x)
-STUB_RETURN_ZERO(window_mouse_get_y)
+static RValue builtin_window_mouse_get_x(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    return RValue_makeReal(runner && runner->mouse ? runner->mouse->x : 0);
+}
+
+static RValue builtin_window_mouse_get_y(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = (Runner*) ctx->runner;
+    return RValue_makeReal(runner && runner->mouse ? runner->mouse->y : 0);
+}
+
 static RValue builtinWindowGetWidth(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     return RValue_makeReal((GMLReal) ctx->dataWin->gen8.defaultWindowWidth);
 }
@@ -6167,11 +6399,21 @@ static RValue builtin_drawRectangleColor(VMContext* ctx, RValue* args, MAYBE_UNU
     float y1 = (float) RValue_toReal(args[1]);
     float x2 = (float) RValue_toReal(args[2]);
     float y2 = (float) RValue_toReal(args[3]);
-    uint32_t color = (uint32_t) RValue_toInt32(args[4]);
+    uint32_t c1 = (uint32_t) RValue_toInt32(args[4]);
+    uint32_t c2 = (uint32_t) RValue_toInt32(args[5]);
+    uint32_t c3 = (uint32_t) RValue_toInt32(args[6]);
+    uint32_t c4 = (uint32_t) RValue_toInt32(args[7]);
 
     bool outline = RValue_toBool(args[8]);
 
-    runner->renderer->vtable->drawRectangle(runner->renderer, x1, y1, x2, y2, color, runner->renderer->drawAlpha, outline);
+    if (runner->renderer->vtable->drawRectangleColor != nullptr) {
+        runner->renderer->vtable->drawRectangleColor(runner->renderer, x1, y1, x2, y2,
+                                                     c1, c2, c3, c4,
+                                                     runner->renderer->drawAlpha, outline);
+    } else {
+        runner->renderer->vtable->drawRectangle(runner->renderer, x1, y1, x2, y2,
+                                                c1, runner->renderer->drawAlpha, outline);
+    }
     return RValue_makeUndefined();
 }
 
@@ -7010,9 +7252,102 @@ static RValue makeTextureUvsArray(VMContext* ctx) {
 
 // Sprite functions
 static RValue builtin_spriteAdd(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+#ifdef PLATFORM_3DS
+    if (argCount < 1) return RValue_makeInt32(-1);
+    Runner* runner = (Runner*) ctx->runner;
+    if (!runner || !runner->renderer || !runner->renderer->vtable ||
+        !runner->renderer->vtable->createSpriteFromRgba ||
+        !runner->fileSystem || !runner->fileSystem->vtable ||
+        !runner->fileSystem->vtable->readFileBinary) {
+        logStubbedFunction(ctx, "sprite_add");
+        return RValue_makeInt32(-1);
+    }
+
+    char* path = RValue_toString(args[0]);
+    uint8_t* blob = nullptr;
+    int32_t blobSize = 0;
+    bool ok = path && runner->fileSystem->vtable->readFileBinary(runner->fileSystem, path, &blob, &blobSize);
+    char* recursivePath = nullptr;
+    if ((!ok || !blob || blobSize <= 0) && path) {
+        free(blob);
+        blob = nullptr;
+        blobSize = 0;
+        ok = builtin_try_read_external_image_index(runner->fileSystem, path, &blob, &blobSize, &recursivePath);
+    }
+    if ((!ok || !blob || blobSize <= 0) &&
+        path && runner->fileSystem->vtable->resolvePath) {
+        char* base = runner->fileSystem->vtable->resolvePath(runner->fileSystem, "");
+        const char* slash = strrchr(path, '/');
+        const char* backslash = strrchr(path, '\\');
+        if (!slash || (backslash && backslash > slash)) slash = backslash;
+        const char* wantedBase = slash ? slash + 1 : path;
+        char foundPath[640];
+        if (base && builtin_find_file_recursive(base, wantedBase, foundPath, sizeof(foundPath), 0)) {
+            free(blob);
+            blob = nullptr;
+            blobSize = 0;
+            ok = runner->fileSystem->vtable->readFileBinary(runner->fileSystem, foundPath, &blob, &blobSize);
+            if (ok) recursivePath = safeStrdup(foundPath);
+        }
+        free(base);
+    }
+    if (!ok || !blob || blobSize <= 0) {
+        free(path);
+        free(recursivePath);
+        free(blob);
+        return RValue_makeInt32(-1);
+    }
+
+    int imgW = 0, imgH = 0;
+    uint8_t* rgba = ImageDecoder_decodeToRgba(blob, (size_t) blobSize,
+        DataWin_isVersionAtLeast(ctx->dataWin, 2022, 5, 0, 0), &imgW, &imgH);
+    free(blob);
+    if (!rgba || imgW <= 0 || imgH <= 0) {
+        free(path);
+        free(recursivePath);
+        if (rgba) ImageDecoder_freeRgba(rgba);
+        return RValue_makeInt32(-1);
+    }
+
+    int32_t subimages = (argCount > 1) ? RValue_toInt32(args[1]) : 1;
+    if (subimages < 1) subimages = 1;
+    int32_t frameW = imgW;
+    uint8_t* spritePixels = rgba;
+    uint8_t* frameOwned = nullptr;
+    if (subimages > 1 && (imgW % subimages) == 0) {
+        frameW = imgW / subimages;
+        frameOwned = safeMalloc((size_t) frameW * (size_t) imgH * 4u);
+        for (int y = 0; y < imgH; y++) {
+            memcpy(frameOwned + ((size_t) y * (size_t) frameW * 4u),
+                   rgba + ((size_t) y * (size_t) imgW * 4u),
+                   (size_t) frameW * 4u);
+        }
+        spritePixels = frameOwned;
+    }
+    bool removeback = (argCount > 2) ? RValue_toBool(args[2]) : false;
+    bool smooth = (argCount > 3) ? RValue_toBool(args[3]) : false;
+    int32_t xorig = (argCount > 4) ? RValue_toInt32(args[4]) : 0;
+    int32_t yorig = (argCount > 5) ? RValue_toInt32(args[5]) : 0;
+
+    int32_t spriteIndex = runner->renderer->vtable->createSpriteFromRgba(
+        runner->renderer, spritePixels, frameW, imgH, removeback, smooth, xorig, yorig);
+    free(frameOwned);
+    ImageDecoder_freeRgba(rgba);
+#ifdef LOG_ALL
+    fprintf(stderr, "VM: sprite_add('%s'%s%s) -> %d (%dx%d, frames=%ld)\n",
+            path ? path : "",
+            recursivePath ? " resolved=" : "",
+            recursivePath ? recursivePath : "",
+            spriteIndex, frameW, imgH, (long) subimages);
+#endif
+    free(path);
+    free(recursivePath);
+    return RValue_makeInt32(spriteIndex);
+#else
     logStubbedFunction(ctx, "sprite_add");
     // Return 1, so that a sprite_exists check passes
     return RValue_makeInt32(1);
+#endif
 }
 
 static RValue builtin_spriteExists(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {

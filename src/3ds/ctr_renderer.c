@@ -200,7 +200,7 @@ static int clamp_int(int v, int lo, int hi) {
     return v;
 }
 
-static void fit_aspect(int srcW, int srcH, int dstW, int dstH, int *outW, int *outH) {
+static void cover_aspect(int srcW, int srcH, int dstW, int dstH, int *outW, int *outH) {
     if (srcW < 1) srcW = 1;
     if (srcH < 1) srcH = 1;
     if (dstW < 1) dstW = 1;
@@ -209,14 +209,14 @@ static void fit_aspect(int srcW, int srcH, int dstW, int dstH, int *outW, int *o
     float dstAspect = (float) dstW / (float) dstH;
     int w, h;
     if (srcAspect > dstAspect) {
-        w = dstW;
-        h = (int) floorf((float) dstW / srcAspect + 0.5f);
-    } else {
         h = dstH;
         w = (int) floorf((float) dstH * srcAspect + 0.5f);
+    } else {
+        w = dstW;
+        h = (int) floorf((float) dstW / srcAspect + 0.5f);
     }
-    *outW = clamp_int(w, 1, dstW);
-    *outH = clamp_int(h, 1, dstH);
+    *outW = clamp_int(w, 1, 1024);
+    *outH = clamp_int(h, 1, 1024);
 }
 
 static inline uint8_t clamp_u8(float a) {
@@ -1786,7 +1786,7 @@ static void destroy_right_app_surface(CtrRenderer *ctx) {
 static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh, int targetW, int targetH) {
     int renderW = 1;
     int renderH = 1;
-    fit_aspect(gw, gh, targetW, targetH, &renderW, &renderH);
+    cover_aspect(gw, gh, targetW, targetH, &renderW, &renderH);
     if (ctx->appReady &&
         ctx->appLogicW == gw && ctx->appLogicH == gh &&
         ctx->appScreenW == targetW && ctx->appScreenH == targetH) {
@@ -1805,8 +1805,8 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh, int targetW, in
     bool appTargetReady = false;
     for (int divisor = 1; divisor <= 4 && !appTargetReady; divisor <<= 1) {
         if (divisor > 1) {
-            ctx->appRenderW = clamp_int(renderW / divisor, 1, targetW);
-            ctx->appRenderH = clamp_int(renderH / divisor, 1, targetH);
+            ctx->appRenderW = clamp_int(renderW / divisor, targetW, renderW);
+            ctx->appRenderH = clamp_int(renderH / divisor, targetH, renderH);
         }
         ctx->appPotW = next_pow2(ctx->appRenderW);
         ctx->appPotH = next_pow2(ctx->appRenderH);
@@ -2220,29 +2220,19 @@ static void ctr_end_frame(Renderer *ren) {
 
             draw_letterbox_backdrop(ctx);
 
-            int drawW = ctx->winW, drawH = ctx->winH;
-            if (ctx->gameH > 0 && ctx->winH > 0) {
-                float gameAspect = (float) ctx->gameW / (float) ctx->gameH;
-                float screenAspect = (float) ctx->winW / (float) ctx->winH;
+            int drawW = ctx->winW;
+            int drawH = ctx->winH;
+            int drawX = 0;
+            int drawY = 0;
 
-                if (g_ctr_backdrop_mode == CTR_BACKDROP_STRETCH) {
-                    drawW = ctx->winW;
-                    drawH = ctx->winH;
-                } else if (gameAspect < screenAspect) {
-                    drawW = (int) ((float) ctx->winH * gameAspect);
-                    drawH = ctx->winH;
-                } else {
-                    drawW = ctx->winW;
-                    drawH = (int) ((float) ctx->winW / gameAspect);
-                }
-            }
-
-            int drawX = (ctx->winW - drawW) / 2;
-            int drawY = (ctx->winH - drawH) / 2;
-
-            float u1 = (float) ctx->appRenderW / (float) ctx->appPotW;
-            float v0 = (float) (ctx->appPotH - ctx->appRenderH) / (float) ctx->appPotH;
-            float v1 = 1.f;
+            float cropX = fmaxf(0.f, ((float) ctx->appRenderW - (float) ctx->winW) * 0.5f);
+            float cropY = fmaxf(0.f, ((float) ctx->appRenderH - (float) ctx->winH) * 0.5f);
+            float sampleW = fminf((float) ctx->appRenderW, (float) ctx->winW);
+            float sampleH = fminf((float) ctx->appRenderH, (float) ctx->winH);
+            float u0 = cropX / (float) ctx->appPotW;
+            float u1 = (cropX + sampleW) / (float) ctx->appPotW;
+            float v0 = 1.f - (cropY / (float) ctx->appPotH);
+            float v1 = 1.f - ((cropY + sampleH) / (float) ctx->appPotH);
             float white[4] = {1.f, 1.f, 1.f, 1.f};
 
             push_quad(ctx, &ctx->appTex,
@@ -2250,7 +2240,7 @@ static void ctr_end_frame(Renderer *ren) {
                       (float) (drawX + drawW), (float) drawY,
                       (float) (drawX + drawW), (float) (drawY + drawH),
                       (float) drawX, (float) (drawY + drawH),
-                      0.f, v1, u1, v0, white);
+                      u0, v0, u1, v1, white);
             flush_batch(ctx);
 
             if (ctx->depthSlider > 0.01f && primary == ctx->topTarget && ctx->topTargetRight != NULL) {
@@ -2270,7 +2260,7 @@ static void ctr_end_frame(Renderer *ren) {
                           (float) (drawX + drawW), (float) drawY,
                           (float) (drawX + drawW), (float) (drawY + drawH),
                           (float) drawX, (float) (drawY + drawH),
-                          0.f, v1, u1, v0, white);
+                          u0, v0, u1, v1, white);
                 flush_batch(ctx);
             }
 
@@ -3603,6 +3593,103 @@ static int32_t ctr_create_surf(Renderer *ren, int32_t x, int32_t y, int32_t w, i
     return ctr_create_surf_ex(ren, -1, x, y, w, h, rb, sm, xo, yo);
 }
 
+static int32_t ctr_create_sprite_rgba(Renderer *ren, const uint8_t *rgba,
+                                      int32_t w, int32_t h,
+                                      bool removeback, bool smooth,
+                                      int32_t xo, int32_t yo) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    DataWin *dw = ren->dataWin;
+    if (!rgba || w <= 0 || h <= 0) return -1;
+
+    int potW = next_pow2(w);
+    int potH = next_pow2(h);
+    uint16_t *linear = calloc((size_t) potW * (size_t) potH, sizeof(uint16_t));
+    if (!linear) return -1;
+
+    uint8_t keyR = rgba[0], keyG = rgba[1], keyB = rgba[2];
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            const uint8_t *p = &rgba[((size_t) y * (size_t) w + (size_t) x) * 4u];
+            uint8_t a = p[3];
+            if (removeback && p[0] == keyR && p[1] == keyG && p[2] == keyB) a = 0;
+            linear[y * potW + x] = pack_rgba4444(p[0], p[1], p[2], a);
+        }
+    }
+
+    CtrAtlasChunk dstChunk;
+    memset(&dstChunk, 0, sizeof(dstChunk));
+    if (!C3D_TexInit(&dstChunk.tex, (u16) potW, (u16) potH, GPU_RGBA4)) {
+        free(linear);
+        return -1;
+    }
+    C3D_TexSetFilter(&dstChunk.tex,
+                     smooth ? GPU_LINEAR : GPU_NEAREST,
+                     smooth ? GPU_LINEAR : GPU_NEAREST);
+    C3D_TexSetWrap(&dstChunk.tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+
+    uint16_t *tiled = linearAlloc((size_t) potW * (size_t) potH * sizeof(uint16_t));
+    if (!tiled) {
+        C3D_TexDelete(&dstChunk.tex);
+        free(linear);
+        return -1;
+    }
+    tile_rgba4(linear, tiled, potW, potH, potW, potH);
+    free(linear);
+    C3D_TexLoadImage(&dstChunk.tex, tiled, GPU_TEXFACE_2D, 0);
+    C3D_TexFlush(&dstChunk.tex);
+    linearFree(tiled);
+
+    dstChunk.valid = true;
+    dstChunk.srcX = 0;
+    dstChunk.srcY = 0;
+    dstChunk.width = w;
+    dstChunk.height = h;
+    dstChunk.potW = potW;
+    dstChunk.potH = potH;
+
+    uint32_t tpagIndex = findOrAllocTpagSlot(ctx);
+    TexturePageItem *tpag = &dw->tpag.items[tpagIndex];
+    tpag->sourceX = 0;
+    tpag->sourceY = 0;
+    tpag->sourceWidth = (uint16_t) w;
+    tpag->sourceHeight = (uint16_t) h;
+    tpag->targetX = 0;
+    tpag->targetY = 0;
+    tpag->targetWidth = (uint16_t) w;
+    tpag->targetHeight = (uint16_t) h;
+    tpag->boundingWidth = (uint16_t) w;
+    tpag->boundingHeight = (uint16_t) h;
+    tpag->texturePageId = (int16_t) tpagIndex;
+
+    CtrPage *page = &ctx->pages[tpagIndex];
+    memset(page, 0, sizeof(*page));
+    page->loaded = true;
+    page->keepResident = true;
+    page->origW = w;
+    page->origH = h;
+    page->chunksX = 1;
+    page->chunksY = 1;
+    page->chunks[0][0] = dstChunk;
+
+    uint32_t spriteIndex = DataWin_allocSpriteSlot(dw, ctx->originalSpriteCount);
+    Sprite *sprite = &dw->sprt.sprites[spriteIndex];
+    sprite->width = (uint32_t) w;
+    sprite->height = (uint32_t) h;
+    sprite->marginLeft = 0;
+    sprite->marginRight = w - 1;
+    sprite->marginTop = 0;
+    sprite->marginBottom = h - 1;
+    sprite->originX = xo;
+    sprite->originY = yo;
+    sprite->textureCount = 1;
+    sprite->tpagIndices = safeMalloc(sizeof(int32_t));
+    sprite->tpagIndices[0] = (int32_t) tpagIndex;
+    sprite->maskCount = 0;
+    sprite->masks = NULL;
+
+    return (int32_t) spriteIndex;
+}
+
 static void ctr_del_sprite(Renderer *ren, int32_t spriteIndex) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
     DataWin *dw = ren->dataWin;
@@ -3746,6 +3833,7 @@ static RendererVtable vtable = {
     .prefetchSprite = CtrRenderer_prefetchSprite,
     .prefetchSprites = CtrRenderer_prefetchSprites,
     .createSpriteFromSurface = ctr_create_surf_ex,
+    .createSpriteFromRgba = ctr_create_sprite_rgba,
     .deleteSprite = ctr_del_sprite,
     .createSurface = ctr_create_surface, .freeSurface = ctr_free_surface,
     .surfaceExists = ctr_surface_exists, .surfaceGetSize = ctr_surface_get_size,

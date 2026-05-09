@@ -75,6 +75,37 @@ static void logPerfSample(int *frames, u64 *windowStart) {
     }
 }
 
+static void get_runner_draw_size(Runner *run, DataWin *dw, int *outW, int *outH, bool *outViewsEnabled) {
+    int gw = dw ? dw->gen8.defaultWindowWidth : 320;
+    int gh = dw ? dw->gen8.defaultWindowHeight : 240;
+    bool viewsEnabled = false;
+
+    if (run && run->currentRoom) {
+        Room *rm = run->currentRoom;
+        viewsEnabled = (rm->flags & 1) != 0;
+        if (viewsEnabled) {
+            int maxR = 0, maxB = 0;
+            for (int i = 0; i < MAX_VIEWS; i++) {
+                if (!run->views[i].enabled) continue;
+                int r = run->views[i].portX + run->views[i].portWidth;
+                int b = run->views[i].portY + run->views[i].portHeight;
+                if (r > maxR) maxR = r;
+                if (b > maxB) maxB = b;
+            }
+            if (maxR > 0 && maxB > 0) {
+                gw = maxR;
+                gh = maxB;
+            }
+        }
+    }
+
+    if (gw <= 0) gw = 320;
+    if (gh <= 0) gh = 240;
+    if (outW) *outW = gw;
+    if (outH) *outH = gh;
+    if (outViewsEnabled) *outViewsEnabled = viewsEnabled;
+}
+
 typedef struct {
     LauncherGfx *gfx;
     const char *gameName;
@@ -392,12 +423,6 @@ int main(int argc, char **argv) {
                     break;
                 }
                 case LAUNCHER_INPUT_TOUCH: {
-                    touchPosition tp;
-                    hidTouchRead(&tp);
-                    bool touched = (h & KEY_TOUCH) != 0;
-                    launcher_apply_3ds_touch(run->mouse, touched, tp.px, tp.py,
-                                             dw->gen8.defaultWindowWidth,
-                                             dw->gen8.defaultWindowHeight);
                     break;
                 }
                 case LAUNCHER_INPUT_KEYBOARD:
@@ -405,6 +430,14 @@ int main(int argc, char **argv) {
                     launcher_apply_3ds_input(run->keyboard, d, u, h);
                     break;
             }
+            touchPosition tp;
+            hidTouchRead(&tp);
+            int mouseGameW = 0;
+            int mouseGameH = 0;
+            get_runner_draw_size(run, dw, &mouseGameW, &mouseGameH, NULL);
+            launcher_apply_3ds_touch(run->mouse, (h & KEY_TOUCH) != 0, tp.px, tp.py,
+                                     mouseGameW, mouseGameH,
+                                     launcher_get_settings()->game_screen);
             RunnerMouse_endFrame(run->mouse);
 
             if (logFrame)
@@ -417,25 +450,10 @@ int main(int argc, char **argv) {
             if (run->audioSystem)
                 run->audioSystem->vtable->update(run->audioSystem, 1.f / 30.f);
 
-            Room *rm = run->currentRoom;
-            int gw = dw->gen8.defaultWindowWidth;
-            int gh = dw->gen8.defaultWindowHeight;
-            bool views_en = rm->flags & 1;
-
-            if (views_en) {
-                int maxR = 0, maxB = 0;
-                for (int i = 0; i < MAX_VIEWS; i++) {
-                    if (!run->views[i].enabled) continue;
-                    int r = run->views[i].portX + run->views[i].portWidth;
-                    int b = run->views[i].portY + run->views[i].portHeight;
-                    if (r > maxR) maxR = r;
-                    if (b > maxB) maxB = b;
-                }
-                if (maxR > 0 && maxB > 0) {
-                    gw = maxR;
-                    gh = maxB;
-                }
-            }
+            int gw = 0;
+            int gh = 0;
+            bool views_en = false;
+            get_runner_draw_size(run, dw, &gw, &gh, &views_en);
 
             int winW = (launcher_get_settings()->game_screen == LAUNCHER_GAME_SCREEN_BOTTOM) ? 320 : 400;
 

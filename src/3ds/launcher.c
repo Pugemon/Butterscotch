@@ -455,13 +455,40 @@ void launcher_apply_3ds_gamepad(RunnerGamepadState *gp,
 
 void launcher_apply_3ds_touch(RunnerMouseState *mouse,
                               bool touched, int touchX, int touchY,
-                              int gameW, int gameH) {
+                              int gameW, int gameH,
+                              LauncherGameScreen gameScreen) {
     if (!mouse) return;
     if (touched) {
         if (gameW <= 0) gameW = 320;
         if (gameH <= 0) gameH = 240;
-        int x = (touchX * gameW) / 320;
-        int y = (touchY * gameH) / 240;
+        int displayW = (gameScreen == LAUNCHER_GAME_SCREEN_BOTTOM) ? LAUNCHER_BOT_W : LAUNCHER_TOP_W;
+        int displayH = LAUNCHER_TOP_H;
+        float gameAspect = (float) gameW / (float) gameH;
+        float displayAspect = (float) displayW / (float) displayH;
+        float renderW = (float) displayW;
+        float renderH = (float) displayH;
+
+        if (gameAspect > displayAspect) {
+            renderW = (float) displayH * gameAspect;
+        } else {
+            renderH = (float) displayW / gameAspect;
+        }
+        if (renderW < 1.f) renderW = 1.f;
+        if (renderH < 1.f) renderH = 1.f;
+        if (renderW > 1024.f) renderW = 1024.f;
+        if (renderH > 1024.f) renderH = 1024.f;
+
+        float screenX = ((float) touchX + 0.5f) * (float) displayW / (float) LAUNCHER_BOT_W;
+        float screenY = ((float) touchY + 0.5f) * (float) displayH / (float) LAUNCHER_BOT_H;
+        float cropX = fmaxf(0.f, (renderW - (float) displayW) * 0.5f);
+        float cropY = fmaxf(0.f, (renderH - (float) displayH) * 0.5f);
+
+        int x = (int) floorf(((screenX + cropX) * (float) gameW / renderW) + 0.5f);
+        int y = (int) floorf(((screenY + cropY) * (float) gameH / renderH) + 0.5f);
+        if (x < 0) x = 0;
+        if (y < 0) y = 0;
+        if (x >= gameW) x = gameW - 1;
+        if (y >= gameH) y = gameH - 1;
         RunnerMouse_setPosition(mouse, x, y);
     }
     RunnerMouse_setButton(mouse, MB_LEFT, touched);

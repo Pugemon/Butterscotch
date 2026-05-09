@@ -192,7 +192,8 @@ void launcher_apply_3ds_gamepad(RunnerGamepadState *gp,
 
 void launcher_apply_3ds_touch(RunnerMouseState *mouse,
                               bool touched, int touchX, int touchY,
-                              int gameW, int gameH);
+                              int gameW, int gameH,
+                              LauncherGameScreen gameScreen);
 
 const char *launcher_os_type_label(int osType);
 

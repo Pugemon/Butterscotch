@@ -68,6 +68,7 @@ typedef struct {
     void (*prefetchSprite)(Renderer* renderer, int32_t spriteIndex);
     void (*prefetchSprites)(Renderer* renderer, const int32_t* spriteIndices, uint32_t spriteCount);
     int32_t (*createSpriteFromSurface)(Renderer* renderer, int32_t surfaceID, int32_t x, int32_t y, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
+    int32_t (*createSpriteFromRgba)(Renderer* renderer, const uint8_t* rgba, int32_t w, int32_t h, bool removeback, bool smooth, int32_t xorig, int32_t yorig);
     void (*deleteSprite)(Renderer* renderer, int32_t spriteIndex);
     int32_t (*createSurface)(Renderer* renderer, int32_t width, int32_t height);
     void (*freeSurface)(Renderer* renderer, int32_t surfaceId);

@@ -60,6 +60,7 @@ endif()
 
 if(PLATFORM STREQUAL "ctr-cache-tool")
     add_definitions(-DHAVE_BZLIB_H=1)
+    option(CTR_TEXTURE_CACHE_ENABLE_ETC1 "Allow ETC1/ETC1A4 compression in 3DS texture cache output" OFF)
 
     # Build the bzip2 library sources directly into the executable so the
     # resulting binary does not depend on a system libbz2.dll. Only the
@@ -90,6 +91,7 @@ if(PLATFORM STREQUAL "ctr-cache-tool")
     target_compile_definitions(ctr-cache-preprocess PRIVATE
         CTR_TEXTURE_CACHE_HOST
         IMAGE_DECODER_ENABLE_BZ2
+        CTR_TEXTURE_CACHE_ENABLE_ETC1=$<BOOL:${CTR_TEXTURE_CACHE_ENABLE_ETC1}>
     )
     target_include_directories(ctr-cache-preprocess PRIVATE
         ${CMAKE_SOURCE_DIR}/src
@@ -520,6 +522,8 @@ elseif(PLATFORM STREQUAL "vita")
         add_compile_definitions(ENABLE_VM_STUB_LOGS)
     endif()
 
+    target_sources(butterscotch PRIVATE src/gl/image_decoder.c)
+    target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl)
     target_include_directories(butterscotch PUBLIC vendor/stb/image)
     target_include_directories(butterscotch PUBLIC vendor/stb/vorbis)
 

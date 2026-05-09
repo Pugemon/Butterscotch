@@ -24,6 +24,10 @@
 
 extern char g_current_cache_dir[256];
 
+#ifndef CTR_TEXTURE_CACHE_ENABLE_ETC1
+#define CTR_TEXTURE_CACHE_ENABLE_ETC1 1
+#endif
+
 #ifdef CTR_TEXTURE_CACHE_HOST
 static void *linearAlloc(size_t size) { return malloc(size); }
 static void linearFree(void *ptr) { free(ptr); }
@@ -100,6 +104,11 @@ typedef struct {
 static CtrTextureCacheProgressFn g_progressCallback = NULL;
 static void *g_progressUser = NULL;
 static CacheImage *g_sortImages = NULL;
+static bool g_cacheUseEtc1 = CTR_TEXTURE_CACHE_ENABLE_ETC1 != 0;
+
+static uint32_t cache_build_flags(void) {
+    return g_cacheUseEtc1 ? CTR_TEXTURE_CACHE_FLAG_ETC1 : 0u;
+}
 
 void CtrTextureCache_indexPath(char *out, size_t outSize) {
     snprintf(out, outSize, "%s/%s", g_current_cache_dir, CTR_TEXTURE_CACHE_FILE);
@@ -109,6 +118,16 @@ void CtrTextureCache_setProgressCallback(CtrTextureCacheProgressFn callback, voi
     g_progressCallback = callback;
     g_progressUser = user;
 }
+
+#ifdef CTR_TEXTURE_CACHE_HOST
+void CtrTextureCache_setUseEtc1(bool enabled) {
+    g_cacheUseEtc1 = enabled;
+}
+
+bool CtrTextureCache_getUseEtc1(void) {
+    return g_cacheUseEtc1;
+}
+#endif
 
 static void ready_flag_path(char *out, size_t outSize) {
     snprintf(out, outSize, "%s/%s", g_current_cache_dir, CTR_TEXTURE_CACHE_READY_FLAG);
@@ -148,6 +167,7 @@ static void remove_old_ready_flags(void) {
         "cache_ready_v13.flag",
         "cache_ready_v14.flag",
         "cache_ready_v15.flag",
+        "cache_ready_v16.flag",
     };
     char path[CTR_TEXTURE_CACHE_PATH_MAX];
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -288,6 +308,15 @@ bool CtrTextureCache_indexIsCurrentPath(const char *path) {
     bool ok = read_header(f, &hdr);
     fclose(f);
 
+#ifdef CTR_TEXTURE_CACHE_HOST
+    if (ok && hdr.reserved != cache_build_flags()) {
+        fprintf(stderr,
+                "CTR cache: atlas option mismatch in %s (cache flags=%08X, requested=%08X); rebuilding\n",
+                path, (unsigned) hdr.reserved, (unsigned) cache_build_flags());
+        ok = false;
+    }
+#endif
+
     if (ok) {
         char cacheDir[CTR_TEXTURE_CACHE_PATH_MAX];
         snprintf(cacheDir, sizeof(cacheDir), "%s", path);
@@ -342,6 +371,14 @@ static bool index_is_valid_for(DataWin *dw) {
                     hdr.segmentCount < 65536u * 16u;
     fclose(f);
     if (!headerOk) return false;
+#ifdef CTR_TEXTURE_CACHE_HOST
+    if (hdr.reserved != cache_build_flags()) {
+        fprintf(stderr,
+                "CTR cache: atlas option mismatch (cache flags=%08X, requested=%08X); rebuilding\n",
+                (unsigned) hdr.reserved, (unsigned) cache_build_flags());
+        return false;
+    }
+#endif
     SrcFingerprint fp = {0};
     if (!compute_src_fingerprint(dw->filePath, &fp)) {
         fprintf(stderr,
@@ -491,6 +528,7 @@ static uint32_t classify_cache_image_format(const uint8_t *pixels, int srcW, con
     if (whiteAlphaMask || luminanceOk) return CTR_TEXTURE_CACHE_FORMAT_LA4;
     if ((uint32_t) img->w * (uint32_t) img->h <= 64u)
         return CTR_TEXTURE_CACHE_FORMAT_RGBA4;
+    if (!g_cacheUseEtc1) return CTR_TEXTURE_CACHE_FORMAT_RGBA4;
     return anyTransparent
                ? CTR_TEXTURE_CACHE_FORMAT_ETC1A4
                : CTR_TEXTURE_CACHE_FORMAT_ETC1;
@@ -1250,7 +1288,7 @@ void CtrTextureCache_prepare(DataWin *dw) {
         hdr.srcSize = fp.size;
         hdr.srcMtime = 0;
         hdr.srcSampleHash = fp.sampleHash;
-        hdr.reserved = 0;
+        hdr.reserved = cache_build_flags();
 
         uint64_t off = hdr.atlasDataOffset;
         for (uint32_t a = 0; a < atlasCount; a++) {
@@ -1442,7 +1480,7 @@ void CtrTextureCache_prepare(DataWin *dw) {
         hdr.srcSize = fp.size;
         hdr.srcMtime = 0;
         hdr.srcSampleHash = fp.sampleHash;
-        hdr.reserved = 0;
+        hdr.reserved = cache_build_flags();
         uint32_t off = hdr.atlasDataOffset;
         for (uint32_t a = 0; a < atlasCount; a++) {
             atlasInfos[a].offset = off;

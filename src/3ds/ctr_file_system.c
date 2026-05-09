@@ -17,19 +17,98 @@
 #define CTR_FS_LOG(...) ((void)0)
 #endif
 
-static char *buildFullPath(N3dsFileSystem *fs, const char *relativePath) {
-    if (strncmp(relativePath, fs->basePath, strlen(fs->basePath)) == 0) {
-        return safeStrdup(relativePath);
+static void normalizeCtrPath(char *path) {
+    if (!path) return;
+
+    char *read = path;
+    char *write = path;
+    bool previousSlash = false;
+    while (*read) {
+        char ch = (*read == '\\') ? '/' : *read;
+        if (ch == '/') {
+            if (previousSlash) {
+                read++;
+                continue;
+            }
+            previousSlash = true;
+        } else {
+            previousSlash = false;
+        }
+        *write++ = ch;
+        read++;
+    }
+    *write = '\0';
+}
+
+static bool isCtrAbsolutePath(const char *path) {
+    return path && (strncmp(path, "sdmc:/", 6) == 0 ||
+                    strncmp(path, "romfs:/", 7) == 0);
+}
+
+static void n3dsMkdirOne(const char *path) {
+    if (!path || !*path) return;
+    if (mkdir(path, 0777) != 0 && errno != EEXIST) {
+        CTR_FS_LOG("mkdir fail '%s' errno=%s", path, strerror(errno));
+    }
+}
+
+static void n3dsEnsureParentDirs(const char *fullPath) {
+    if (!fullPath || !*fullPath) return;
+
+    char *buf = safeStrdup(fullPath);
+    normalizeCtrPath(buf);
+
+    char *lastSlash = strrchr(buf, '/');
+    if (!lastSlash) {
+        free(buf);
+        return;
+    }
+    *lastSlash = '\0';
+
+    char *scan = buf;
+    char *device = strstr(buf, ":/");
+    if (device) {
+        scan = device + 2;
+    } else {
+        while (*scan == '/') scan++;
     }
 
+    for (char *p = scan; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        n3dsMkdirOne(buf);
+        *p = '/';
+    }
+    n3dsMkdirOne(buf);
+    free(buf);
+}
+
+static char *buildFullPath(N3dsFileSystem *fs, const char *relativePath) {
+    if (!relativePath || !*relativePath) return safeStrdup(fs->basePath);
+
+    char *rel = safeStrdup(relativePath);
+    normalizeCtrPath(rel);
+
     size_t baseLen = strlen(fs->basePath);
-    size_t relLen = strlen(relativePath);
-    char *fullPath = safeMalloc(baseLen + relLen + 1);
+    if (strncmp(rel, fs->basePath, baseLen) == 0 || isCtrAbsolutePath(rel)) {
+        return rel;
+    }
+
+    const char *trimmedRel = rel;
+    while (*trimmedRel == '/') trimmedRel++;
+
+    size_t relLen = strlen(trimmedRel);
+    bool needsSlash = baseLen > 0 && fs->basePath[baseLen - 1] != '/';
+    char *fullPath = safeMalloc(baseLen + (needsSlash ? 1 : 0) + relLen + 1);
 
     memcpy(fullPath, fs->basePath, baseLen);
-    memcpy(fullPath + baseLen, relativePath, relLen);
-    fullPath[baseLen + relLen] = '\0';
+    size_t offset = baseLen;
+    if (needsSlash) fullPath[offset++] = '/';
+    memcpy(fullPath + offset, trimmedRel, relLen);
+    fullPath[offset + relLen] = '\0';
+    normalizeCtrPath(fullPath);
 
+    free(rel);
     return fullPath;
 }
 
@@ -79,6 +158,7 @@ static char *n3dsReadFileText(FileSystem *fs, const char *relativePath) {
 
 static bool n3dsWriteFileText(FileSystem *fs, const char *relativePath, const char *contents) {
     char *fullPath = buildFullPath((N3dsFileSystem *) fs, relativePath);
+    n3dsEnsureParentDirs(fullPath);
     FILE *f = fopen(fullPath, "wb");
 
     if (f == NULL) {
@@ -155,6 +235,7 @@ static bool n3dsReadFileBinary(FileSystem *fs, const char *relativePath, uint8_t
 
 static bool n3dsWriteFileBinary(FileSystem *fs, const char *relativePath, const uint8_t *data, int32_t size) {
     char *fullPath = buildFullPath((N3dsFileSystem *) fs, relativePath);
+    n3dsEnsureParentDirs(fullPath);
     FILE *f = fopen(fullPath, "wb");
     if (f == NULL) {
         CTR_FS_LOG("write_bin open fail '%s' -> '%s' size=%d errno=%s",
@@ -187,18 +268,23 @@ N3dsFileSystem *N3dsFileSystem_create(const char *dataWinPath) {
     N3dsFileSystem *fs = safeCalloc(1, sizeof(N3dsFileSystem));
     fs->base.vtable = &n3dsFileSystemVtable;
 
-    const char *lastSlash = strrchr(dataWinPath, '/');
+    char *normalizedDataWinPath = dataWinPath ? safeStrdup(dataWinPath) : safeStrdup("");
+    normalizeCtrPath(normalizedDataWinPath);
+
+    const char *lastSlash = strrchr(normalizedDataWinPath, '/');
 
     if (lastSlash != NULL) {
-        size_t dirLen = (size_t) (lastSlash - dataWinPath + 1);
+        size_t dirLen = (size_t) (lastSlash - normalizedDataWinPath + 1);
         fs->basePath = safeMalloc(dirLen + 1);
-        memcpy(fs->basePath, dataWinPath, dirLen);
+        memcpy(fs->basePath, normalizedDataWinPath, dirLen);
         fs->basePath[dirLen] = '\0';
     } else {
         fs->basePath = safeStrdup("sdmc:/");
     }
+    normalizeCtrPath(fs->basePath);
 
     CTR_FS_LOG("create dataWin='%s' basePath='%s'", dataWinPath ? dataWinPath : "(null)", fs->basePath ? fs->basePath : "(null)");
+    free(normalizedDataWinPath);
     return fs;
 }
 
