@@ -1,4 +1,10 @@
+#ifndef _FILE_OFFSET_BITS
+#define _FILE_OFFSET_BITS 64
+#endif
+
 #include "ctr_texture_cache.h"
+
+#include "etc1_encoder.h"
 
 #ifndef CTR_TEXTURE_CACHE_HOST
 #include "ctr_renderer.h"
@@ -10,6 +16,7 @@
 #include <3ds.h>
 #endif
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +29,16 @@ static void *linearAlloc(size_t size) { return malloc(size); }
 static void linearFree(void *ptr) { free(ptr); }
 #endif
 
+#ifdef _WIN32
+#define FSEEK64(fp, offset, origin) _fseeki64((fp), (int64_t)(offset), (origin))
+#define FTELL64(fp) _ftelli64((fp))
+#else
+#define FSEEK64(fp, offset, origin) fseeko((fp), (off_t)(offset), (origin))
+#define FTELL64(fp) ftello((fp))
+#endif
+
 #define CACHE_ENTRY_VALID 1u
+#define CTR_TEXTURE_CACHE_PATH_MAX 640
 
 typedef struct {
     uint32_t flags;
@@ -52,6 +68,7 @@ typedef struct {
     int srcX, srcY;
     int localX, localY;
     int w, h;
+    int packW, packH;
     int atlasId;
     int dstX, dstY;
 } CacheImage;
@@ -105,7 +122,7 @@ static void remove_if_exists(const char *path) {
 }
 
 static void ensure_ready_flag(void) {
-    char path[256];
+    char path[CTR_TEXTURE_CACHE_PATH_MAX];
     ready_flag_path(path, sizeof(path));
     FILE *f = fopen(path, "w");
     if (f) {
@@ -128,8 +145,11 @@ static void remove_old_ready_flags(void) {
         "cache_ready_v10.flag",
         "cache_ready_v11.flag",
         "cache_ready_v12.flag",
+        "cache_ready_v13.flag",
+        "cache_ready_v14.flag",
+        "cache_ready_v15.flag",
     };
-    char path[256];
+    char path[CTR_TEXTURE_CACHE_PATH_MAX];
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         snprintf(path, sizeof(path), "%s/%s", g_current_cache_dir, names[i]);
         remove_if_exists(path);
@@ -141,7 +161,7 @@ static void cleanup_legacy_page_files(void) {
     if (!dir) return;
 
     struct dirent *ent;
-    char path[320];
+    char path[CTR_TEXTURE_CACHE_PATH_MAX];
     while ((ent = readdir(dir)) != NULL) {
         const char *name = ent->d_name;
         if (strncmp(name, "page_", 5) != 0) continue;
@@ -183,10 +203,16 @@ static bool copy_file_contents(const char *srcPath, const char *dstPath) {
 static bool commit_tmp_file(const char *tmpPath, const char *finalPath) {
     remove(finalPath);
     if (rename(tmpPath, finalPath) == 0) return true;
+    int renameErr = errno;
 
     // Some SDMC implementations are annoyingly fragile around rename(); a copy
     // fallback keeps the cache from rebuilding forever.
-    if (!copy_file_contents(tmpPath, finalPath)) return false;
+    if (!copy_file_contents(tmpPath, finalPath)) {
+        fprintf(stderr,
+                "CTR cache: commit rename failed (%s), copy fallback also failed (%s)\n",
+                strerror(renameErr), strerror(errno));
+        return false;
+    }
     remove(tmpPath);
     return true;
 }
@@ -236,36 +262,28 @@ static bool compute_src_fingerprint(const char *path, SrcFingerprint *out) {
     out->sampleHash = 0;
 
     struct stat st;
-    if (stat(path, &st) == 0) {
-        out->size  = (uint64_t)st.st_size;
-    }
-
+    if (stat(path, &st) == 0) out->size = (uint64_t)st.st_size;
     FILE *f = fopen(path, "rb");
     if (!f) return false;
 
-    // Sample 1 KiB at five spread-out offsets: 0, 25%, 50%, 75%, end-1KiB.
-    // A 1.5GB modded data.win still completes this in a few ms.
-    fseek(f, 0, SEEK_END);
-    long fileSize = ftell(f);
+    FSEEK64(f, 0, SEEK_END);
+    int64_t fileSize = FTELL64(f);
     if (fileSize <= 0) { fclose(f); return false; }
     if (out->size == 0) out->size = (uint64_t)fileSize;
 
     static const double offsets[5] = {0.0, 0.25, 0.5, 0.75, 1.0};
     uint8_t buf[1024];
-    uint32_t hash = 0x811c9dc5u; // FNV-1a 32-bit init
-
-    // Mix the file size into the hash up front so two files of different
-    // sizes that happen to share sampled regions still hash differently.
+    uint32_t hash = 0x811c9dc5u;
     uint8_t sizeBytes[8];
     for (int i = 0; i < 8; i++) sizeBytes[i] = (uint8_t)(((uint64_t)fileSize) >> (i * 8));
     hash = fnv1a32_update(hash, sizeBytes, sizeof(sizeBytes));
 
     for (int i = 0; i < 5; i++) {
-        long target = (long)((double)fileSize * offsets[i]);
-        long maxStart = fileSize > (long)sizeof(buf) ? fileSize - (long)sizeof(buf) : 0;
+        int64_t target = (int64_t)((double)fileSize * offsets[i]);
+        int64_t maxStart = fileSize > (int64_t)sizeof(buf) ? fileSize - (int64_t)sizeof(buf) : 0;
         if (target > maxStart) target = maxStart;
         if (target < 0) target = 0;
-        if (fseek(f, target, SEEK_SET) != 0) break;
+        if (FSEEK64(f, target, SEEK_SET) != 0) break;
         size_t got = fread(buf, 1, sizeof(buf), f);
         if (got == 0) break;
         hash = fnv1a32_update(hash, buf, got);
@@ -282,12 +300,52 @@ bool CtrTextureCache_indexIsCurrentPath(const char *path) {
     CtrTextureCacheHeader hdr;
     bool ok = read_header(f, &hdr);
     fclose(f);
+
+    if (ok) {
+        char cacheDir[CTR_TEXTURE_CACHE_PATH_MAX];
+        snprintf(cacheDir, sizeof(cacheDir), "%s", path);
+        char *slash = strrchr(cacheDir, '/');
+        char *backslash = strrchr(cacheDir, '\\');
+        if (!slash || (backslash && backslash > slash)) slash = backslash;
+        if (!slash) return ok;
+        *slash = '\0';
+
+        char gameDir[CTR_TEXTURE_CACHE_PATH_MAX];
+        snprintf(gameDir, sizeof(gameDir), "%s", cacheDir);
+        slash = strrchr(gameDir, '/');
+        backslash = strrchr(gameDir, '\\');
+        if (!slash || (backslash && backslash > slash)) slash = backslash;
+        if (!slash) return ok;
+        *slash = '\0';
+
+        char dataPath[CTR_TEXTURE_CACHE_PATH_MAX];
+        size_t gameDirLen = strlen(gameDir);
+        static const char dataWinSuffix[] = "/data.win";
+        if (gameDirLen + sizeof(dataWinSuffix) > sizeof(dataPath)) return ok;
+        memcpy(dataPath, gameDir, gameDirLen);
+        memcpy(dataPath + gameDirLen, dataWinSuffix, sizeof(dataWinSuffix));
+
+        SrcFingerprint fp = {0};
+        if (!compute_src_fingerprint(dataPath, &fp)) {
+            fprintf(stderr, "CTR cache: cannot fingerprint '%s'; accepting header-only %s\n",
+                    dataPath, path);
+            return ok;
+        }
+        ok = (hdr.srcSize == fp.size && hdr.srcSampleHash == fp.sampleHash);
+        if (!ok) {
+            fprintf(stderr,
+                    "CTR cache: stale atlas %s for '%s' (cache size=%llu hash=%08X, file size=%llu hash=%08X)\n",
+                    path, dataPath,
+                    (unsigned long long)hdr.srcSize, (unsigned)hdr.srcSampleHash,
+                    (unsigned long long)fp.size, (unsigned)fp.sampleHash);
+        }
+    }
     return ok;
 }
 
 static bool index_is_valid_for(DataWin *dw) {
     if (!dw) return false;
-    char path[256];
+    char path[CTR_TEXTURE_CACHE_PATH_MAX];
     CtrTextureCache_indexPath(path, sizeof(path));
     FILE *f = fopen(path, "rb");
     if (!f) return false;
@@ -316,8 +374,8 @@ static bool index_is_valid_for(DataWin *dw) {
         hdr.srcSampleHash != fp.sampleHash) {
         fprintf(stderr,
                 "CTR cache: data.win fingerprint mismatch — cache (size=%llu hash=%08X) vs file (size=%llu hash=%08X); rebuilding\n",
-                (unsigned long long)hdr.srcSize, hdr.srcSampleHash,
-                (unsigned long long)fp.size,    fp.sampleHash);
+                (unsigned long long)hdr.srcSize, (unsigned)hdr.srcSampleHash,
+                (unsigned long long)fp.size,    (unsigned)fp.sampleHash);
         return false;
     }
 
@@ -337,6 +395,8 @@ static size_t cache_format_bytes(uint32_t format, uint32_t w, uint32_t h) {
     switch (format) {
         case CTR_TEXTURE_CACHE_FORMAT_A4:   return (pixels + 1u) >> 1;
         case CTR_TEXTURE_CACHE_FORMAT_LA4:  return pixels;
+        case CTR_TEXTURE_CACHE_FORMAT_ETC1: return pixels / 2u;
+        case CTR_TEXTURE_CACHE_FORMAT_ETC1A4: return pixels;
         case CTR_TEXTURE_CACHE_FORMAT_RGBA4:
         default:                            return pixels * 2u;
     }
@@ -345,7 +405,38 @@ static size_t cache_format_bytes(uint32_t format, uint32_t w, uint32_t h) {
 static bool cache_format_valid(uint32_t format) {
     return format == CTR_TEXTURE_CACHE_FORMAT_RGBA4 ||
            format == CTR_TEXTURE_CACHE_FORMAT_LA4 ||
-           format == CTR_TEXTURE_CACHE_FORMAT_A4;
+           format == CTR_TEXTURE_CACHE_FORMAT_A4 ||
+           format == CTR_TEXTURE_CACHE_FORMAT_ETC1 ||
+           format == CTR_TEXTURE_CACHE_FORMAT_ETC1A4;
+}
+
+static bool cache_format_is_etc(uint32_t format) {
+    return format == CTR_TEXTURE_CACHE_FORMAT_ETC1 ||
+           format == CTR_TEXTURE_CACHE_FORMAT_ETC1A4;
+}
+
+static uint32_t next_cache_dim(uint32_t v) {
+    uint32_t out = 8;
+    while (out < v && out < CTR_TEXTURE_CACHE_ATLAS_SIZE) out <<= 1;
+    if (out > CTR_TEXTURE_CACHE_ATLAS_SIZE) out = CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    return out;
+}
+
+static uint32_t pack_atlas_dims(uint32_t w, uint32_t h) {
+    if (w == 0) w = 8;
+    if (h == 0) h = 8;
+    if (w > CTR_TEXTURE_CACHE_ATLAS_SIZE) w = CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    if (h > CTR_TEXTURE_CACHE_ATLAS_SIZE) h = CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    return (w & 0xFFFFu) | ((h & 0xFFFFu) << 16);
+}
+
+static void unpack_atlas_dims(uint32_t packed, uint32_t *w, uint32_t *h) {
+    uint32_t pw = packed & 0xFFFFu;
+    uint32_t ph = (packed >> 16) & 0xFFFFu;
+    if (pw == 0 || pw > CTR_TEXTURE_CACHE_ATLAS_SIZE) pw = CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    if (ph == 0 || ph > CTR_TEXTURE_CACHE_ATLAS_SIZE) ph = CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    if (w) *w = pw;
+    if (h) *h = ph;
 }
 
 static void set_nibble(uint8_t *data, size_t pixelIndex, uint8_t value) {
@@ -397,39 +488,36 @@ static void cache_set_tiled_pixel(uint8_t *tiled, uint32_t format, size_t pixelI
     }
 }
 
-static uint32_t classify_cache_image_format(const uint8_t *pixels, int srcW,
-                                            const CacheImage *img) {
+static uint32_t classify_cache_image_format(const uint8_t *pixels, int srcW, const CacheImage *img) {
     bool anyOpaque = false;
+    bool anyTransparent = false;
     bool whiteAlphaMask = true;
     bool luminanceOk = true;
 
     for (int y = 0; y < img->h; y++) {
-        const uint8_t *row = pixels + (((size_t)(img->srcY + y) * (size_t)srcW +
-                                         (size_t)img->srcX) * 4u);
+        const uint8_t *row = pixels + (((size_t)(img->srcY + y) * (size_t)srcW + (size_t)img->srcX) * 4u);
         for (int x = 0; x < img->w; x++) {
-            uint8_t r = row[x * 4 + 0];
-            uint8_t g = row[x * 4 + 1];
-            uint8_t b = row[x * 4 + 2];
-            uint8_t a = row[x * 4 + 3];
-            if (a == 0) continue;
+            uint8_t r = row[x * 4 + 0], g = row[x * 4 + 1], b = row[x * 4 + 2], a = row[x * 4 + 3];
+            if (a == 0) { anyTransparent = true; continue; }
+            if (a < 255) anyTransparent = true;
             anyOpaque = true;
-
             uint8_t max = r > g ? (r > b ? r : b) : (g > b ? g : b);
             uint8_t min = r < g ? (r < b ? r : b) : (g < b ? g : b);
             if (r < 240 || g < 240 || b < 240) whiteAlphaMask = false;
             if (max - min > 10 && max > 32) luminanceOk = false;
         }
     }
-
     if (!anyOpaque) return CTR_TEXTURE_CACHE_FORMAT_LA4;
-    if (whiteAlphaMask) return CTR_TEXTURE_CACHE_FORMAT_LA4;
-    if (luminanceOk) return CTR_TEXTURE_CACHE_FORMAT_LA4;
-    return CTR_TEXTURE_CACHE_FORMAT_RGBA4;
+    if (whiteAlphaMask || luminanceOk) return CTR_TEXTURE_CACHE_FORMAT_LA4;
+    if ((uint32_t)img->w * (uint32_t)img->h <= 64u)
+        return CTR_TEXTURE_CACHE_FORMAT_RGBA4;
+    return anyTransparent ? CTR_TEXTURE_CACHE_FORMAT_ETC1A4
+                          : CTR_TEXTURE_CACHE_FORMAT_ETC1;
 }
 
 static uint8_t *read_blob(FILE *fp, uint32_t off, uint32_t size) {
     if (!fp || !size) return NULL;
-    if (fseek(fp, (long)off, SEEK_SET) != 0) return NULL;
+    if (FSEEK64(fp, off, SEEK_SET) != 0) return NULL;
     uint8_t *buf = malloc(size);
     if (buf && fread(buf, 1, size, fp) != size) {
         free(buf);
@@ -496,6 +584,18 @@ static int cmp_image_size_desc(const void *a, const void *b) {
     int mb = ib->w > ib->h ? ib->w : ib->h;
     if (ma != mb) return mb - ma;
     return (ib->w * ib->h) - (ia->w * ia->h);
+}
+
+static int cmp_image_atlas_src(const void *a, const void *b) {
+    const CacheImage *ia = &g_sortImages[*(const uint32_t *)a];
+    const CacheImage *ib = &g_sortImages[*(const uint32_t *)b];
+    if (ia->atlasId < ib->atlasId) return -1;
+    if (ia->atlasId > ib->atlasId) return 1;
+    if (ia->srcPage < ib->srcPage) return -1;
+    if (ia->srcPage > ib->srcPage) return 1;
+    if (ia->tpagIndex < ib->tpagIndex) return -1;
+    if (ia->tpagIndex > ib->tpagIndex) return 1;
+    return 0;
 }
 
 static void packer_init(MaxRectsPacker *p) {
@@ -826,7 +926,7 @@ static void trim_cache_images(DataWin *dw, FILE *dwFile, CacheImage *images,
         if (images[i].w <= 0 || images[i].h <= 0) continue;
         if (!cache_format_valid(images[i].formatHint))
             images[i].formatHint = CTR_TEXTURE_CACHE_FORMAT_RGBA4;
-        images[i].groupId = images[i].groupId * 4u + images[i].formatHint;
+        images[i].groupId = (images[i].groupId << 4) | (images[i].formatHint & 0x0Fu);
         if (out != i) images[out] = images[i];
         out++;
     }
@@ -840,23 +940,54 @@ static void trim_cache_images(DataWin *dw, FILE *dwFile, CacheImage *images,
     }
 }
 
-static inline void blit_cache_image_mem(uint8_t *atlas, uint32_t atlasFormat,
-                                        const CacheImage *img,
-                                        const uint8_t *srcPixels, int srcW) {
+static inline void blit_cache_image_rgba8(uint8_t *atlasRgba,
+                                          int atlasStride,
+                                          const CacheImage *img,
+                                          const uint8_t *srcPixels, int srcW) {
     for (int y = 0; y < img->h; y++) {
         const uint8_t *src = srcPixels + (((size_t)(img->srcY + y) * (size_t)srcW +
                                            (size_t)img->srcX) * 4u);
-        size_t dst = ((size_t)(img->dstY + y) * (size_t)CTR_TEXTURE_CACHE_ATLAS_SIZE +
-                      (size_t)img->dstX);
-        for (int x = 0; x < img->w; x++) {
-            uint8_t r = src[x * 4 + 0];
-            uint8_t g = src[x * 4 + 1];
-            uint8_t b = src[x * 4 + 2];
-            uint8_t a = src[x * 4 + 3];
+        uint8_t *dst = atlasRgba + (((size_t)(img->dstY + y) * (size_t)atlasStride +
+                                     (size_t)img->dstX) * 4u);
+        memcpy(dst, src, (size_t)img->w * 4u);
+    }
+}
 
-            cache_set_pixel(atlas, atlasFormat, dst + (size_t)x, r, g, b, a);
+static void convert_rgba8_to_cache_linear(const uint8_t *rgba, uint8_t *linear,
+                                          uint32_t format, int w, int h) {
+    size_t bytes = cache_format_bytes(format, (uint32_t)w, (uint32_t)h);
+    memset(linear, 0, bytes);
+    for (int y = 0; y < h; y++) {
+        const uint8_t *row = rgba + ((size_t)y * (size_t)w * 4u);
+        for (int x = 0; x < w; x++) {
+            cache_set_pixel(linear, format, (size_t)y * (size_t)w + (size_t)x,
+                            row[x * 4 + 0], row[x * 4 + 1],
+                            row[x * 4 + 2], row[x * 4 + 3]);
         }
     }
+}
+
+static bool write_final_atlas_from_rgba8(FILE *f, uint32_t format,
+                                         const uint8_t *atlasRgba,
+                                         uint8_t *linearBuf,
+                                         uint8_t *tiledBuf,
+                                         int atlasW, int atlasH) {
+    const size_t outBytes = cache_format_bytes(format,
+                                               (uint32_t)atlasW,
+                                               (uint32_t)atlasH);
+    if (cache_format_is_etc(format)) {
+        bool withAlpha = (format == CTR_TEXTURE_CACHE_FORMAT_ETC1A4);
+        if (!Etc1_encodeImageTiled(atlasRgba, atlasW, atlasH,
+                                   withAlpha, tiledBuf)) {
+            return false;
+        }
+    } else {
+        convert_rgba8_to_cache_linear(atlasRgba, linearBuf, format,
+                                      atlasW, atlasH);
+        tile_cache(linearBuf, tiledBuf, format, atlasW, atlasH,
+                   atlasW, atlasH);
+    }
+    return fwrite(tiledBuf, 1, outBytes, f) == outBytes;
 }
 
 static bool create_disk_tables(DataWin *dw, CacheImage *images, uint32_t imageCount,
@@ -951,8 +1082,14 @@ void CtrTextureCache_prepare(DataWin *dw) {
         remove_old_ready_flags();
         return;
     }
+    if (dw->txtr.count == 0 || !dw->txtr.textures) {
+        fprintf(stderr,
+                "CTR cache: cannot build atlas.bin without TXTR metadata; "
+                "preprocess this game or parse data.win with parseTxtr=1 for cache generation.\n");
+        return;
+    }
 
-    char atlasPath[256], tmpPath[256];
+    char atlasPath[CTR_TEXTURE_CACHE_PATH_MAX], tmpPath[CTR_TEXTURE_CACHE_PATH_MAX];
     const char *failReason = "unknown";
     CtrTextureCache_indexPath(atlasPath, sizeof(atlasPath));
     snprintf(tmpPath, sizeof(tmpPath), "%s/atlas.tmp", g_current_cache_dir);
@@ -1039,15 +1176,13 @@ void CtrTextureCache_prepare(DataWin *dw) {
     }
 
     CacheAtlasDisk *atlasInfos = NULL;
-    uint32_t rgba4Count = 0, la4Count = 0, a4Count = 0;
+    uint32_t rgba4Count = 0, la4Count = 0, a4Count = 0, etc1Count = 0, etc1a4Count = 0;
     if (ok) {
         atlasInfos = calloc(atlasCount ? atlasCount : 1, sizeof(CacheAtlasDisk));
         if (!atlasInfos) { ok = false; failReason = "atlas info allocation failed"; }
     }
     if (ok) {
-        for (uint32_t a = 0; a < atlasCount; a++) {
-            atlasInfos[a].format = CTR_TEXTURE_CACHE_FORMAT_LA4;
-        }
+        for (uint32_t a = 0; a < atlasCount; a++) atlasInfos[a].format = 0;
         for (uint32_t i = 0; i < imageCount; i++) {
             CacheImage *img = &images[i];
             if (img->atlasId < 0 || (uint32_t)img->atlasId >= atlasCount) continue;
@@ -1055,26 +1190,47 @@ void CtrTextureCache_prepare(DataWin *dw) {
                                ? img->formatHint
                                : CTR_TEXTURE_CACHE_FORMAT_RGBA4;
             uint32_t *atlasFmt = &atlasInfos[img->atlasId].format;
-            if (fmt == CTR_TEXTURE_CACHE_FORMAT_RGBA4 ||
-                *atlasFmt == CTR_TEXTURE_CACHE_FORMAT_RGBA4) {
+            uint32_t usedW = (uint32_t)(img->dstX + img->w);
+            uint32_t usedH = (uint32_t)(img->dstY + img->h);
+            uint32_t curW = atlasInfos[img->atlasId].reserved & 0xFFFFu;
+            uint32_t curH = (atlasInfos[img->atlasId].reserved >> 16) & 0xFFFFu;
+            if (usedW > curW) curW = usedW;
+            if (usedH > curH) curH = usedH;
+            atlasInfos[img->atlasId].reserved = pack_atlas_dims(curW, curH);
+            if (*atlasFmt == 0 || *atlasFmt == fmt) {
+                *atlasFmt = fmt;
+            } else if (fmt == CTR_TEXTURE_CACHE_FORMAT_RGBA4 ||
+                       *atlasFmt == CTR_TEXTURE_CACHE_FORMAT_RGBA4) {
                 *atlasFmt = CTR_TEXTURE_CACHE_FORMAT_RGBA4;
             } else if (fmt == CTR_TEXTURE_CACHE_FORMAT_LA4 ||
-                       *atlasFmt == CTR_TEXTURE_CACHE_FORMAT_LA4) {
-                *atlasFmt = CTR_TEXTURE_CACHE_FORMAT_LA4;
+                       fmt == CTR_TEXTURE_CACHE_FORMAT_A4 ||
+                       *atlasFmt == CTR_TEXTURE_CACHE_FORMAT_LA4 ||
+                       *atlasFmt == CTR_TEXTURE_CACHE_FORMAT_A4) {
+                *atlasFmt = CTR_TEXTURE_CACHE_FORMAT_RGBA4;
+            } else if (fmt == CTR_TEXTURE_CACHE_FORMAT_ETC1A4 ||
+                       *atlasFmt == CTR_TEXTURE_CACHE_FORMAT_ETC1A4) {
+                *atlasFmt = CTR_TEXTURE_CACHE_FORMAT_ETC1A4;
             } else {
-                *atlasFmt = CTR_TEXTURE_CACHE_FORMAT_LA4;
+                *atlasFmt = CTR_TEXTURE_CACHE_FORMAT_ETC1;
             }
         }
         for (uint32_t a = 0; a < atlasCount; a++) {
             if (!cache_format_valid(atlasInfos[a].format))
                 atlasInfos[a].format = CTR_TEXTURE_CACHE_FORMAT_RGBA4;
+            uint32_t atlasW = 0, atlasH = 0;
+            unpack_atlas_dims(atlasInfos[a].reserved, &atlasW, &atlasH);
+            atlasW = next_cache_dim(atlasW);
+            atlasH = next_cache_dim(atlasH);
+            atlasInfos[a].reserved = pack_atlas_dims(atlasW, atlasH);
             atlasInfos[a].size = (uint32_t)cache_format_bytes(
                 atlasInfos[a].format,
-                CTR_TEXTURE_CACHE_ATLAS_SIZE,
-                CTR_TEXTURE_CACHE_ATLAS_SIZE);
+                atlasW,
+                atlasH);
             if (atlasInfos[a].format == CTR_TEXTURE_CACHE_FORMAT_RGBA4) rgba4Count++;
             else if (atlasInfos[a].format == CTR_TEXTURE_CACHE_FORMAT_LA4) la4Count++;
             else if (atlasInfos[a].format == CTR_TEXTURE_CACHE_FORMAT_A4) a4Count++;
+            else if (atlasInfos[a].format == CTR_TEXTURE_CACHE_FORMAT_ETC1) etc1Count++;
+            else if (atlasInfos[a].format == CTR_TEXTURE_CACHE_FORMAT_ETC1A4) etc1a4Count++;
         }
     }
 
@@ -1089,6 +1245,185 @@ void CtrTextureCache_prepare(DataWin *dw) {
     // что в него вкладывает (типично 1–3 раза). Время растёт, но плотность
     // MaxRects сохраняется полностью — атласы могут содержать TPAG'и из любых
     // source-страниц без ограничений.
+    const size_t atlasRgbaBytes = (size_t)CTR_TEXTURE_CACHE_ATLAS_SIZE *
+                                  (size_t)CTR_TEXTURE_CACHE_ATLAS_SIZE * 4u;
+    const size_t maxAtlasBytes = cache_format_bytes(CTR_TEXTURE_CACHE_FORMAT_RGBA4,
+                                                    CTR_TEXTURE_CACHE_ATLAS_SIZE,
+                                                    CTR_TEXTURE_CACHE_ATLAS_SIZE);
+
+    FILE *atlasFile = NULL;
+    CtrTextureCacheHeader hdr;
+    memset(&hdr, 0, sizeof(hdr));
+
+    uint64_t atlasDataBytes = 0;
+    if (ok) {
+        hdr.magic = CTR_TEXTURE_CACHE_MAGIC;
+        hdr.version = CTR_TEXTURE_CACHE_VERSION;
+        hdr.tpagCount = dw->tpag.count;
+        hdr.basePageId = dw->txtr.count;
+        hdr.atlasCount = atlasCount;
+        hdr.atlasSize = CTR_TEXTURE_CACHE_ATLAS_SIZE;
+        hdr.segmentCount = segmentCount;
+        hdr.itemsOffset = sizeof(CtrTextureCacheHeader);
+        hdr.segmentsOffset = hdr.itemsOffset + (uint32_t)(dw->tpag.count * sizeof(CacheItemDisk));
+        hdr.atlasInfosOffset = hdr.segmentsOffset + (uint32_t)(segmentCount * sizeof(CacheSegmentDisk));
+        hdr.atlasDataOffset = hdr.atlasInfosOffset + (uint32_t)(atlasCount * sizeof(CacheAtlasDisk));
+
+        SrcFingerprint fp = {0};
+        compute_src_fingerprint(dw->filePath, &fp);
+        hdr.srcSize       = fp.size;
+        hdr.srcMtime      = 0;
+        hdr.srcSampleHash = fp.sampleHash;
+        hdr.reserved      = 0;
+
+        uint64_t off = hdr.atlasDataOffset;
+        for (uint32_t a = 0; a < atlasCount; a++) {
+            atlasInfos[a].offset = (uint32_t)off;
+            off += atlasInfos[a].size;
+            atlasDataBytes += atlasInfos[a].size;
+        }
+        if (off > 0xFFFFFFFFull) {
+            ok = false;
+            failReason = "atlas.bin would exceed 4GB";
+        } else {
+            fprintf(stderr,
+                    "CTR cache: packing %lu images into %lu atlases, final atlas data %.2f MB "
+                    "(RGBA4=%lu LA4=%lu A4=%lu ETC1=%lu ETC1A4=%lu)\n",
+                    (unsigned long)imageCount, (unsigned long)atlasCount,
+                    (double)atlasDataBytes / (1024.0 * 1024.0),
+                    (unsigned long)rgba4Count, (unsigned long)la4Count,
+                    (unsigned long)a4Count, (unsigned long)etc1Count,
+                    (unsigned long)etc1a4Count);
+        }
+    }
+
+    if (ok) {
+        atlasFile = fopen(tmpPath, "wb");
+        if (!atlasFile) { ok = false; failReason = "cannot create atlas.tmp"; }
+    }
+    if (ok) {
+        setvbuf(atlasFile, NULL, _IOFBF, 512 * 1024);
+        if (!(fwrite(&hdr, sizeof(hdr), 1, atlasFile) == 1 &&
+              fwrite(items, sizeof(CacheItemDisk), dw->tpag.count, atlasFile) == dw->tpag.count &&
+              fwrite(segments, sizeof(CacheSegmentDisk), segmentCount, atlasFile) == segmentCount &&
+              fwrite(atlasInfos, sizeof(CacheAtlasDisk), atlasCount, atlasFile) == atlasCount)) {
+            ok = false; failReason = "failed writing atlas tables";
+        }
+    }
+
+    uint32_t *imgOrder = NULL;
+    AtlasMem atlasRgba = {NULL, false};
+    AtlasMem linearBuf = {NULL, false};
+    AtlasMem tiledBuf = {NULL, false};
+    if (ok && imageCount > 0) {
+        imgOrder = malloc((size_t)imageCount * sizeof(uint32_t));
+        if (!imgOrder) { ok = false; failReason = "image order alloc"; }
+    }
+    if (ok && imgOrder) {
+        for (uint32_t i = 0; i < imageCount; i++) imgOrder[i] = i;
+        g_sortImages = images;
+        qsort(imgOrder, imageCount, sizeof(uint32_t), cmp_image_atlas_src);
+        g_sortImages = NULL;
+    }
+    if (ok && atlasCount > 0) {
+        atlasRgba = alloc_atlas_mem(atlasRgbaBytes);
+        linearBuf = alloc_atlas_mem(maxAtlasBytes);
+        tiledBuf = alloc_atlas_mem(maxAtlasBytes);
+        if (!atlasRgba.data || !linearBuf.data || !tiledBuf.data) {
+            ok = false;
+            failReason = "atlas encode buffer alloc";
+        }
+    }
+
+    uint32_t orderPos = 0;
+    for (uint32_t a = 0; ok && a < atlasCount; a++) {
+        if (g_progressCallback) g_progressCallback(a, atlasCount, atlasPath, g_progressUser);
+        uint32_t atlasW = 0, atlasH = 0;
+        unpack_atlas_dims(atlasInfos[a].reserved, &atlasW, &atlasH);
+        memset(atlasRgba.data, 0, (size_t)atlasW * (size_t)atlasH * 4u);
+
+        while (orderPos < imageCount) {
+            CacheImage *peek = &images[imgOrder[orderPos]];
+            if (peek->atlasId < 0 || (uint32_t)peek->atlasId < a) {
+                orderPos++;
+                continue;
+            }
+            break;
+        }
+
+        uint32_t atlasStart = orderPos;
+        while (orderPos < imageCount &&
+               images[imgOrder[orderPos]].atlasId == (int)a) {
+            orderPos++;
+        }
+        uint32_t atlasEnd = orderPos;
+
+        for (uint32_t i = atlasStart; ok && i < atlasEnd;) {
+            int srcPage = images[imgOrder[i]].srcPage;
+            uint32_t groupStart = i;
+            while (i < atlasEnd && images[imgOrder[i]].srcPage == srcPage) i++;
+            uint32_t groupEnd = i;
+
+            if (srcPage < 0 || (uint32_t)srcPage >= dw->txtr.count) continue;
+            Texture *t = &dw->txtr.textures[srcPage];
+            uint8_t *pixels = NULL;
+            int w = 0, h = 0;
+            if (t->blobSize) {
+                uint8_t *blob = read_blob(dwFile, t->blobOffset, t->blobSize);
+                if (blob) {
+                    pixels = ImageDecoder_decodeToRgba(blob, t->blobSize, gm2022, &w, &h);
+                    free(blob);
+                } else {
+                    fprintf(stderr, "CTR cache: failed to read TXTR page %d blob\n", srcPage);
+                }
+            } else {
+                fprintf(stderr, "CTR cache: TXTR page %d has no embedded blob\n", srcPage);
+            }
+            if (!pixels) {
+                fprintf(stderr,
+                        "CTR cache: failed to decode TXTR page %d; atlas entries stay blank\n",
+                        srcPage);
+                continue;
+            }
+
+            for (uint32_t k = groupStart; k < groupEnd; k++) {
+                CacheImage *img = &images[imgOrder[k]];
+                if (img->srcX < 0 || img->srcY < 0 ||
+                    img->srcX + img->w > w || img->srcY + img->h > h) {
+                    fprintf(stderr,
+                            "CTR cache: skipping out-of-bounds TPAG %lu on TXTR page %d (%d,%d %dx%d over %dx%d)\n",
+                            (unsigned long)img->tpagIndex, srcPage,
+                            img->srcX, img->srcY, img->w, img->h, w, h);
+                    continue;
+                }
+                if (img->dstX + img->w > (int)CTR_TEXTURE_CACHE_ATLAS_SIZE ||
+                    img->dstY + img->h > (int)CTR_TEXTURE_CACHE_ATLAS_SIZE) {
+                    fprintf(stderr,
+                            "CTR cache: TPAG %lu dst out of atlas (%d,%d %dx%d, atlas %d)\n",
+                            (unsigned long)img->tpagIndex,
+                            img->dstX, img->dstY, img->w, img->h, img->atlasId);
+                    continue;
+                }
+                blit_cache_image_rgba8(atlasRgba.data, (int)atlasW, img, pixels, w);
+            }
+            ImageDecoder_freeRgba(pixels);
+        }
+
+        if (!write_final_atlas_from_rgba8(atlasFile, atlasInfos[a].format,
+                                          atlasRgba.data, linearBuf.data,
+                                          tiledBuf.data,
+                                          (int)atlasW, (int)atlasH)) {
+            ok = false;
+            failReason = "atlas encode/write failed";
+        }
+    }
+
+    free_atlas_mem(&atlasRgba);
+    free_atlas_mem(&linearBuf);
+    free_atlas_mem(&tiledBuf);
+    free(imgOrder);
+
+#if 0
     const size_t maxAtlasBytes = cache_format_bytes(CTR_TEXTURE_CACHE_FORMAT_RGBA4,
                                                     CTR_TEXTURE_CACHE_ATLAS_SIZE,
                                                     CTR_TEXTURE_CACHE_ATLAS_SIZE);
@@ -1310,11 +1645,18 @@ void CtrTextureCache_prepare(DataWin *dw) {
 
     free_atlas_mem(&atlasBuf);
     free(imgOrder);
+#endif
 
-    if (atlasFile) fclose(atlasFile);
+    if (atlasFile) {
+        if (fclose(atlasFile) != 0 && ok) {
+            ok = false;
+            failReason = "failed flushing atlas.tmp";
+        }
+        atlasFile = NULL;
+    }
     if (dwFile) fclose(dwFile);
 
-    if (ok && g_progressCallback) g_progressCallback(dw->txtr.count, dw->txtr.count, atlasPath, g_progressUser);
+    if (ok && g_progressCallback) g_progressCallback(atlasCount, atlasCount, atlasPath, g_progressUser);
 
     if (ok) {
         if (!commit_tmp_file(tmpPath, atlasPath)) {
@@ -1327,10 +1669,12 @@ void CtrTextureCache_prepare(DataWin *dw) {
         remove_old_ready_flags();
         cleanup_legacy_page_files();
         fprintf(stderr,
-                "CTR cache: committed %s (%lu atlases, %lu segments, %upx pages; RGBA4=%lu LA4=%lu A4=%lu)\n",
+                "CTR cache: committed %s (%lu atlases, %lu segments, max %upx pages; "
+                "RGBA4=%lu LA4=%lu A4=%lu ETC1=%lu ETC1A4=%lu)\n",
                 CTR_TEXTURE_CACHE_FILE, (unsigned long)atlasCount, (unsigned long)segmentCount,
                 (unsigned)CTR_TEXTURE_CACHE_ATLAS_SIZE,
-                (unsigned long)rgba4Count, (unsigned long)la4Count, (unsigned long)a4Count);
+                (unsigned long)rgba4Count, (unsigned long)la4Count, (unsigned long)a4Count,
+                (unsigned long)etc1Count, (unsigned long)etc1a4Count);
     } else {
         if (ok) failReason = "committed atlas.bin failed header validation";
         remove_if_exists(tmpPath);
@@ -1347,8 +1691,9 @@ void CtrTextureCache_prepare(DataWin *dw) {
 #ifndef CTR_TEXTURE_CACHE_HOST
 bool CtrTextureCache_apply(CtrRenderer *ctx, DataWin *dw) {
     if (!ctx || !dw) return false;
+    if (!index_is_valid_for(dw)) return false;
 
-    char path[256];
+    char path[CTR_TEXTURE_CACHE_PATH_MAX];
     CtrTextureCache_indexPath(path, sizeof(path));
     FILE *f = fopen(path, "rb");
     if (!f) return false;
@@ -1388,15 +1733,17 @@ bool CtrTextureCache_apply(CtrRenderer *ctx, DataWin *dw) {
 
                 for (uint32_t i = 0; i < hdr.atlasCount; i++) {
                     CtrSourcePage *page = &ctx->sourcePages[i];
+                    uint32_t atlasW = 0, atlasH = 0;
+                    unpack_atlas_dims(atlasInfos[i].reserved, &atlasW, &atlasH);
                     page->fileOffset = atlasInfos[i].offset;
                     page->dataSize = atlasInfos[i].size;
                     page->format = cache_format_valid(atlasInfos[i].format)
                                        ? atlasInfos[i].format
                                        : CTR_TEXTURE_CACHE_FORMAT_RGBA4;
-                    page->width = (int)hdr.atlasSize;
-                    page->height = (int)hdr.atlasSize;
-                    page->potW = (int)hdr.atlasSize;
-                    page->potH = (int)hdr.atlasSize;
+                    page->width = (int)atlasW;
+                    page->height = (int)atlasH;
+                    page->potW = (int)atlasW;
+                    page->potH = (int)atlasH;
                 }
 
                 for (uint32_t i = 0; i < hdr.tpagCount; i++) {

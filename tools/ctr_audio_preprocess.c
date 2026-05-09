@@ -8,6 +8,7 @@
 #include "stb_vorbis.c"
 
 #include <errno.h>
+#include <dirent.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -246,6 +247,164 @@ static bool file_exists_at(const char *p) {
     return p && stat(p, &st) == 0 && S_ISREG(st.st_mode);
 }
 
+static bool dir_exists_at(const char *p) {
+    struct stat st;
+    return p && stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static void join_path_local(char *out, size_t outSize, const char *a, const char *b) {
+    if (!out || outSize == 0) return;
+    size_t len = a ? strlen(a) : 0;
+    const char *sep = (len > 0 && a[len - 1] != '/' && a[len - 1] != '\\') ? "/" : "";
+    snprintf(out, outSize, "%s%s%s", a ? a : "", sep, b ? b : "");
+}
+
+static const char *base_name_local(const char *path) {
+    if (!path) return "";
+    const char *fwd = strrchr(path, '/');
+    const char *bwd = strrchr(path, '\\');
+    if (!fwd || (bwd && bwd > fwd)) fwd = bwd;
+    return fwd ? fwd + 1 : path;
+}
+
+static int ascii_tolower(int c) {
+    return (c >= 'A' && c <= 'Z') ? (c + ('a' - 'A')) : c;
+}
+
+static bool is_path_sep(int c) {
+    return c == '/' || c == '\\';
+}
+
+static bool ascii_iequals(const char *a, const char *b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        if (ascii_tolower((unsigned char)*a) != ascii_tolower((unsigned char)*b)) return false;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool ascii_path_iequals(const char *a, const char *b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        int ca = (unsigned char)*a;
+        int cb = (unsigned char)*b;
+        if (is_path_sep(ca) && is_path_sep(cb)) {
+            a++;
+            b++;
+            continue;
+        }
+        if (ascii_tolower(ca) != ascii_tolower(cb)) return false;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool ascii_path_iends_with_component(const char *path, const char *suffix) {
+    if (!path || !suffix || !*suffix) return false;
+    size_t pathLen = strlen(path);
+    size_t suffixLen = strlen(suffix);
+    if (suffixLen > pathLen) return false;
+    const char *tail = path + pathLen - suffixLen;
+    if (!ascii_path_iequals(tail, suffix)) return false;
+    return tail == path || is_path_sep((unsigned char)tail[-1]);
+}
+
+static bool audio_path_matches(const char *relPath, const char *fileName, const char *wanted) {
+    if (!fileName || !wanted || !*wanted) return false;
+    if (relPath && ascii_path_iequals(relPath, wanted)) return true;
+    if (relPath && ascii_path_iends_with_component(relPath, wanted)) return true;
+
+    char tmpPath[640];
+    snprintf(tmpPath, sizeof(tmpPath), "%s.ogg", wanted);
+    if (relPath && (ascii_path_iequals(relPath, tmpPath) ||
+                    ascii_path_iends_with_component(relPath, tmpPath))) return true;
+    snprintf(tmpPath, sizeof(tmpPath), "%s.wav", wanted);
+    if (relPath && (ascii_path_iequals(relPath, tmpPath) ||
+                    ascii_path_iends_with_component(relPath, tmpPath))) return true;
+
+    const char *wantedBase = base_name_local(wanted);
+    if (ascii_iequals(fileName, wantedBase)) return true;
+
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "%s.ogg", wantedBase);
+    if (ascii_iequals(fileName, tmp)) return true;
+    snprintf(tmp, sizeof(tmp), "%s.wav", wantedBase);
+    if (ascii_iequals(fileName, tmp)) return true;
+    return false;
+}
+
+static bool find_audio_recursive_inner(const char *root, const char *relRoot,
+                                       const char *wanted, char *out, size_t outSize,
+                                       uint32_t depth) {
+    if (depth > 12) return false;
+    DIR *dir = opendir(root);
+    if (!dir) return false;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        if (strcmp(name, "cache") == 0) continue;
+
+        char child[640];
+        join_path_local(child, sizeof(child), root, name);
+        char relChild[640];
+        if (relRoot && *relRoot) join_path_local(relChild, sizeof(relChild), relRoot, name);
+        else snprintf(relChild, sizeof(relChild), "%s", name);
+        if (file_exists_at(child) && audio_path_matches(relChild, name, wanted)) {
+            snprintf(out, outSize, "%s", child);
+            closedir(dir);
+            return true;
+        }
+    }
+
+    rewinddir(dir);
+    while ((ent = readdir(dir)) != NULL) {
+        const char *name = ent->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        if (strcmp(name, "cache") == 0) continue;
+
+        char child[640];
+        join_path_local(child, sizeof(child), root, name);
+        char relChild[640];
+        if (relRoot && *relRoot) join_path_local(relChild, sizeof(relChild), relRoot, name);
+        else snprintf(relChild, sizeof(relChild), "%s", name);
+        if (dir_exists_at(child) &&
+            find_audio_recursive_inner(child, relChild, wanted, out, outSize, depth + 1)) {
+            closedir(dir);
+            return true;
+        }
+    }
+
+    closedir(dir);
+    return false;
+}
+
+static bool find_audio_recursive(const char *root, const char *wanted, char *out, size_t outSize) {
+    return find_audio_recursive_inner(root, "", wanted, out, outSize, 0);
+}
+
+static bool resolve_external_audio_path(const char *gameDir, const char *file, char *out, size_t outSize) {
+    if (!gameDir || !file || !*file || !out || outSize == 0) return false;
+
+    join_path_local(out, outSize, gameDir, file);
+    if (file_exists_at(out)) return true;
+
+    char candidate[640];
+    snprintf(candidate, sizeof(candidate), "%s.ogg", file);
+    join_path_local(out, outSize, gameDir, candidate);
+    if (file_exists_at(out)) return true;
+
+    snprintf(candidate, sizeof(candidate), "%s.wav", file);
+    join_path_local(out, outSize, gameDir, candidate);
+    if (file_exists_at(out)) return true;
+
+    return find_audio_recursive(gameDir, file, out, outSize);
+}
+
 typedef struct {
     DataWin *dw;
     char    *path;
@@ -449,19 +608,16 @@ int CtrAudioPreprocess_run(const char *dataWinPath, const char *cacheDir, const 
         if (!snd->file || !snd->file[0]) { extSkip++; continue; }
 
         char extPath[640];
-        snprintf(extPath, sizeof(extPath), "%s/%s", gameDir, snd->file);
+        if (!resolve_external_audio_path(gameDir, snd->file, extPath, sizeof(extPath))) {
+            fprintf(stderr, "[%s] audio: external '%s' file '%s' not found under %s\n",
+                    label, snd->name ? snd->name : "?", snd->file, gameDir);
+            extSkip++;
+            continue;
+        }
         FILE *src = fopen(extPath, "rb");
         if (!src) {
-            snprintf(extPath, sizeof(extPath), "%s/%s.ogg", gameDir, snd->file);
-            src = fopen(extPath, "rb");
-        }
-        if (!src) {
-            snprintf(extPath, sizeof(extPath), "%s/%s.wav", gameDir, snd->file);
-            src = fopen(extPath, "rb");
-        }
-        if (!src) {
-            fprintf(stderr, "[%s] audio: external '%s' not found (tried %s/{file,.ogg,.wav})\n",
-                    label, snd->name ? snd->name : "?", snd->file);
+            fprintf(stderr, "[%s] audio: external '%s' found at %s but cannot open (%s)\n",
+                    label, snd->name ? snd->name : "?", extPath, strerror(errno));
             extSkip++;
             continue;
         }

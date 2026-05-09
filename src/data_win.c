@@ -1275,6 +1275,12 @@ static void readRoomGameObjects(BinaryReader* reader, DataWin* dw, Room* room) {
     free(objPtrs);
 }
 
+static float tileAlphaFromColor(uint32_t color) {
+    // Extract alpha from high byte, default to 1.0 if alpha byte is 0
+    uint8_t alphaByte = (uint8_t) ((color >> 24) & 0xFF);
+    return alphaByte == 0 ? 1.0f : (float) alphaByte / 255.0f;
+}
+
 static void readRoomTiles(BinaryReader* reader, DataWin* dw, Room* room) {
     uint32_t tileCount;
     uint32_t* tilePtrs = readPointerTableLimited(reader, &tileCount, 262144, "ROOM legacy tiles");
@@ -1297,6 +1303,7 @@ static void readRoomTiles(BinaryReader* reader, DataWin* dw, Room* room) {
             tile->scaleX = BinaryReader_readFloat32(reader);
             tile->scaleY = BinaryReader_readFloat32(reader);
             tile->color = BinaryReader_readUint32(reader);
+            tile->alpha = tileAlphaFromColor(tile->color);
         }
     } else {
         room->tiles = nullptr;
@@ -1397,6 +1404,7 @@ static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
                         tile->scaleX = BinaryReader_readFloat32(reader);
                         tile->scaleY = BinaryReader_readFloat32(reader);
                         tile->color = BinaryReader_readUint32(reader);
+                        tile->alpha = tileAlphaFromColor(tile->color);
                     }
                 } else {
                     assets->legacyTiles = nullptr;
@@ -2240,10 +2248,12 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
 
     uint32_t outOfChunk = 0;
     uint32_t bigBlobs = 0;
+    uint32_t blockSized = 0;
     uint64_t fsz = (uint64_t)reader->fileSize;
     for (uint32_t s = 0; s < realCount; s++) {
         uint32_t curOff = sorted[s].off;
         bool inChunk   = ((size_t)curOff < chunkEnd);
+        Texture *tex = &t->textures[sorted[s].idx];
 
         // The "boundary" for this blob's region: TXTR end if the blob lives
         // inside the chunk, otherwise fileSize (mod-appended blobs that sit
@@ -2256,13 +2266,25 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
         // include the entire AUDO chunk in the first blob's size — that was
         // the 191 MB clamp warning the user kept hitting, producing garbage
         // PNG decode for the affected page and a black/empty atlas slot.
-        uint64_t boundary = inChunk ? (uint64_t)chunkEnd : fsz;
-        uint64_t nextOff  = (s + 1 < realCount) ? (uint64_t)sorted[s + 1].off : boundary;
-        if (nextOff <= curOff) nextOff = boundary; // duplicate / corrupted entry
-        if (nextOff > boundary) nextOff = boundary; // don't cross region boundary
-        if (nextOff > fsz)      nextOff = fsz;     // and never past EOF
-
-        uint64_t sz = nextOff - curOff;
+        uint64_t nextOff = 0;
+        uint64_t sz = 0;
+        if (tex->textureBlockSize > 0 &&
+            curOff < fsz &&
+            (uint64_t)tex->textureBlockSize <= fsz - (uint64_t)curOff) {
+            // GMS 2022.3+ stores the exact byte size for each TXTR blob.
+            // Prefer it over offset-diff sizing; modern texture-group layouts
+            // can put unrelated chunks or appended blobs between texture data.
+            sz = tex->textureBlockSize;
+            nextOff = (uint64_t)curOff + sz;
+            blockSized++;
+        } else {
+            uint64_t boundary = inChunk ? (uint64_t)chunkEnd : fsz;
+            nextOff = (s + 1 < realCount) ? (uint64_t)sorted[s + 1].off : boundary;
+            if (nextOff <= curOff) nextOff = boundary; // duplicate / corrupted entry
+            if (nextOff > boundary) nextOff = boundary; // don't cross region boundary
+            if (nextOff > fsz)      nextOff = fsz;     // and never past EOF
+            sz = nextOff - curOff;
+        }
         // Hard sanity cap: a single texture page > 64 MB is almost certainly
         // a parser desync (or a broken/truncated mod). Clamp + warn instead
         // of trusting the number into safeMalloc.
@@ -2275,14 +2297,14 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, DataWi
             bigBlobs++;
         }
 
-        t->textures[sorted[s].idx].blobSize = (uint32_t)sz;
+        tex->blobSize = (uint32_t)sz;
         if (!inChunk) outOfChunk++;
     }
 
-    if (outOfChunk > 0 || bigBlobs > 0) {
+    if (outOfChunk > 0 || bigBlobs > 0 || blockSized > 0) {
         fprintf(stderr,
-                "TXTR: %u/%u texture blobs live OUTSIDE the TXTR chunk (mod-style append); %u oversized clamped\n",
-                outOfChunk, count, bigBlobs);
+                "TXTR: %u/%u blobs sized from textureBlockSize; %u outside TXTR; %u oversized clamped\n",
+                blockSized, count, outOfChunk, bigBlobs);
     }
     free(sorted);
 

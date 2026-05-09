@@ -158,6 +158,7 @@ Renderer *CtrRenderer_create(void);
 
 // Custom internal method that modifies renderer internals mapping context gracefully over targets accurately safely evaluating eye!
 void CtrRenderer_beginEye(Renderer *ren, int eye, float slider);
+bool CtrRenderer_hasRightEye(Renderer *ren);
 
 typedef void (*CtrRendererCacheProgressFn)(uint32_t pageIndex, uint32_t pageCount, const char *pagePath, void *user);
 void CtrRenderer_setCacheProgressCallback(CtrRendererCacheProgressFn callback, void *user);

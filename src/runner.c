@@ -294,8 +294,28 @@ const char* Runner_getEventName(int32_t eventType, int32_t eventSubtype) {
     }
 }
 
+// Some events check if there's a pending room and, if there is, the events are NOT dispatched.
+// Persistent instances (or instances in a persistent room) still receive Create / Destroy / Alarm / Other / PreCreate so cleanup hooks still run.
+// This mirrors what the official YoYo runner does.
+static bool isEventBlockedByPendingRoom(Runner* runner, Instance* instance, int32_t eventType) {
+    if (0 > runner->pendingRoom)
+        return false;
+
+    bool persistent = (instance != nullptr && instance->persistent) || (runner->currentRoom != nullptr && runner->currentRoom->persistent);
+    if (!persistent)
+        return true;
+
+    if (eventType == EVENT_CREATE || eventType == EVENT_DESTROY || eventType == EVENT_ALARM || eventType == EVENT_OTHER || eventType == EVENT_PRECREATE)
+        return false;
+
+    return true;
+}
+
 // Executes an already-resolved event handler (see findEventCodeIdAndOwner) and verified codeId >= 0.
 static void Runner_executeResolvedEvent(Runner* runner, Instance* instance, int32_t eventType, int32_t eventSubtype, int32_t codeId, int32_t ownerObjectIndex) {
+    if (isEventBlockedByPendingRoom(runner, instance, eventType))
+        return;
+
     VMContext* vm = runner->vmContext;
     int32_t savedEventType = vm->currentEventType;
     int32_t savedEventSubtype = vm->currentEventSubtype;
@@ -343,9 +363,8 @@ void Runner_executeEvent(Runner* runner, Instance* instance, int32_t eventType, 
     Runner_executeEventFromObject(runner, instance, instance->objectIndex, eventType, eventSubtype);
 }
 
-// Events that GMS 2.3+ routes through the per-object obj_has_event table instead of Perform_Event_All.
-// Anything else (BC16 ALWAYS; BC17 non-perObject) goes through Runner_executeEventForAll
-static bool eventUsesBC17PerObjectDispatch(int32_t eventType) {
+// Events that GameMaker routes through the per-object obj_has_event table instead of Perform_Event_All.
+static bool eventUsesPerObjectDispatch(int32_t eventType) {
     return eventType == EVENT_STEP || eventType == EVENT_ALARM || eventType == EVENT_KEYBOARD || eventType == EVENT_KEYPRESS || eventType == EVENT_KEYRELEASE;
 }
 
@@ -357,8 +376,7 @@ void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventS
     Instance** scratch = runner->eventDispatchInstances;
     arrsetlen(scratch, 0);
 
-    // On GMS 2.x, the native runner dispatches events in the eventUsesPerObjectDispatch set per-object. Route those through executeEventPerObject to match.
-    if (DataWin_isVersionAtLeast(runner->dataWin, 2, 0, 0, 0) && eventUsesBC17PerObjectDispatch(eventType)) {
+    if (eventUsesPerObjectDispatch(eventType)) {
         ResolvedEventTable* table = &runner->eventTable;
         uint32_t entryCount;
         SlotResponderEntry* entries = ResolvedEventTable_slotEntries(table, slot, &entryCount);
@@ -765,9 +783,20 @@ void Runner_draw(Runner* runner) {
             if (parsedLayer == nullptr) continue;
             if (parsedLayer->type == RoomLayerType_Assets) {
                 RoomLayerAssetsData* data = parsedLayer->assetsData;
+                size_t tileElementCount = arrlenu(runtimeLayer->elements);
                 repeat(data->legacyTileCount, j) {
                     if (runner->renderer != nullptr) {
                         RoomTile* tile = &data->legacyTiles[j];
+                        // Find the matching RuntimeLayerElement so we can honor per-element visibility
+                        RuntimeLayerElement* tileEl = nullptr;
+                        repeat(tileElementCount, k) {
+                            RuntimeLayerElement* candidate = &runtimeLayer->elements[k];
+                            if (candidate->type == RuntimeLayerElementType_Tile && candidate->tileElement == tile) {
+                                tileEl = candidate;
+                                break;
+                            }
+                        }
+                        if (tileEl != nullptr && !tileEl->visible) continue;
                         // Check if this tile's layer is hidden via tile_layer_hide()
                         ptrdiff_t layerIdx = hmgeti(runner->tileLayerMap, tile->tileDepth);
                         if (layerIdx >= 0 && !runner->tileLayerMap[layerIdx].value.visible) continue;
@@ -803,7 +832,9 @@ void Runner_draw(Runner* runner) {
                         }
 #endif
 
-                        Renderer_drawTile(runner->renderer, tile, offsetX, offsetY);
+                        RoomTile runtimeTile = *tile;
+                        if (tileEl != nullptr) runtimeTile.alpha = tileEl->alpha;
+                        Renderer_drawTile(runner->renderer, &runtimeTile, offsetX, offsetY);
                     }
                 }
 
@@ -877,7 +908,7 @@ void Runner_drawGUI(Runner* runner) {
 void Runner_computeViewDisplayScale(Runner* runner, int32_t gameW, int32_t gameH, float* outScaleX, float* outScaleY) {
     *outScaleX = 1.0f;
     *outScaleY = 1.0f;
-    
+
     Room* activeRoom = runner->currentRoom;
     bool viewsEnabled = (activeRoom->flags & 1) != 0;
     if (viewsEnabled) {
@@ -1363,8 +1394,25 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
             RuntimeLayerElement el = {
                 .id = Runner_getNextLayerId(runner),
                 .type = RuntimeLayerElementType_Sprite,
+                .visible = true,
+                .alpha = 1.0f,
                 .backgroundElement = nullptr,
                 .spriteElement = spriteElement,
+                .tileElement = nullptr,
+            };
+            arrput(runtimeLayer->elements, el);
+        }
+        // Expose legacy tiles as RuntimeLayerElements so GML scripts can find them via layer_get_all_elements and toggle them via layer_tile_visible
+        repeat(assets->legacyTileCount, j) {
+            RoomTile* tile = &assets->legacyTiles[j];
+            RuntimeLayerElement el = {
+                .id = Runner_getNextLayerId(runner),
+                .type = RuntimeLayerElementType_Tile,
+                .visible = true,
+                .alpha = tile->alpha,
+                .backgroundElement = nullptr,
+                .spriteElement = nullptr,
+                .tileElement = tile,
             };
             arrput(runtimeLayer->elements, el);
         }
@@ -1629,6 +1677,57 @@ void Runner_reset(Runner* runner) {
     runner->drawableListSortDirty = false;
 }
 
+// Flattens collision-event inheritance into one list per object: Child-defined collision events override the parent's events
+//
+// (The YoYo Runner calls it "ExpandCollisionEvents")
+static void flattenCollisionEvents(Runner* runner) {
+    DataWin* dataWin = runner->dataWin;
+    int32_t count = (int32_t) dataWin->objt.count;
+    runner->flattenedCollisionEvents = safeCalloc((size_t) (count > 0 ? count : 1), sizeof(FlattenedCollisionEventList));
+    if (0 >= count) return;
+
+    repeat(count, i) {
+        GameObject* child = &dataWin->objt.objects[i];
+        ObjectEventList* src = &child->eventLists[EVENT_COLLISION];
+        FlattenedCollisionEventList* dst = &runner->flattenedCollisionEvents[i];
+
+        if (src->eventCount > 0) {
+            dst->events = safeMalloc(src->eventCount * sizeof(FlattenedCollisionEvent));
+            repeat(src->eventCount, e) {
+                ObjectEvent* srcEvt = &src->events[e];
+                int32_t srcCodeId = (srcEvt->actionCount > 0) ? srcEvt->actions[0].codeId : -1;
+                dst->events[e] = (FlattenedCollisionEvent) { .targetObjectIndex = srcEvt->eventSubtype, .codeId = srcCodeId, .ownerObjectIndex = i };
+            }
+            dst->eventCount = src->eventCount;
+        }
+
+        int32_t ancestor = child->parentId;
+        int32_t depth = 0;
+        while (ancestor >= 0 && dataWin->objt.count > (uint32_t) ancestor && 32 > depth) {
+            GameObject* anc = &dataWin->objt.objects[ancestor];
+            ObjectEventList* ancList = &anc->eventLists[EVENT_COLLISION];
+            repeat(ancList->eventCount, e) {
+                ObjectEvent* ancEvt = &ancList->events[e];
+                uint32_t target = ancEvt->eventSubtype;
+
+                bool present = false;
+                repeat(dst->eventCount, c) {
+                    if (dst->events[c].targetObjectIndex == target) { present = true; break; }
+                }
+                if (present) continue;
+
+                int32_t ancCodeId = (ancEvt->actionCount > 0) ? ancEvt->actions[0].codeId : -1;
+                uint32_t newCount = dst->eventCount + 1;
+                dst->events = safeRealloc(dst->events, newCount * sizeof(FlattenedCollisionEvent));
+                dst->events[newCount - 1] = (FlattenedCollisionEvent) { .targetObjectIndex = target, .codeId = ancCodeId, .ownerObjectIndex = ancestor };
+                dst->eventCount = newCount;
+            }
+            ancestor = anc->parentId;
+            depth++;
+        }
+    }
+}
+
 // Populates objectsWithAnyEventOfType[eventType] from the resolved event table: for each event type, the deduplicated list of concrete object indices that respond to ANY subtype of that event. Walks the inverted bySlot index per slot and dedups via a scratch byte set.
 // Used by collision dispatch to skip non-collision objects in the outer loop, mirroring how the native obj_has_event table partitions instance iteration by event class.
 static void populateObjectsWithAnyEventOfType(Runner* runner) {
@@ -1687,6 +1786,7 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
     // Build the event dispatch acceleration tables.
     EventSlotMap_build(&runner->eventSlotMap, dataWin);
     ResolvedEventTable_build(&runner->eventTable, dataWin, &runner->eventSlotMap);
+    flattenCollisionEvents(runner);
 
     // Create assets map
     shdefault(runner->assetsByName, -1);
@@ -1917,7 +2017,50 @@ void Runner_initFirstRoom(Runner* runner) {
 
 // ===[ Collision Event Dispatch ]===
 
-static void executeCollisionEvent(Runner* runner, Instance* self, Instance* other, int32_t targetObjectIndex) {
+#ifdef ENABLE_VM_TRACING
+// Returns true if this collision pair should be logged under --trace-collisions. Matches "*" or either side's object name.
+static bool shouldTraceCollisionPair(VMContext* vm, DataWin* dataWin, Instance* a, Instance* b) {
+    if (shlen(vm->collisionsToBeTraced) == -1) return false;
+    if (shgeti(vm->collisionsToBeTraced, "*") != -1) return true;
+    const char* aName = dataWin->objt.objects[a->objectIndex].name;
+    const char* bName = dataWin->objt.objects[b->objectIndex].name;
+    if (aName && shgeti(vm->collisionsToBeTraced, aName) != -1) return true;
+    if (bName && shgeti(vm->collisionsToBeTraced, bName) != -1) return true;
+    return false;
+}
+#endif
+
+// Finds if the "instance" has a collision event handler for "collisionMatch"
+// Returns nullptr if no match (instance has no collision handler that applies to collisionMatch).
+static FlattenedCollisionEvent* findSymmetricCollisionEvent(Runner* runner, Instance* instance, Instance* collisionMatch) {
+    DataWin* dataWin = runner->dataWin;
+    FlattenedCollisionEventList* list = &runner->flattenedCollisionEvents[instance->objectIndex];
+    if (list->eventCount == 0)
+        return nullptr;
+
+    int32_t partnerObj = collisionMatch->objectIndex;
+    int32_t depth = 0;
+    while (partnerObj >= 0 && dataWin->objt.count > (uint32_t) partnerObj && 32 > depth) {
+        repeat(list->eventCount, e) {
+            FlattenedCollisionEvent* evt = &list->events[e];
+            if ((int32_t) evt->targetObjectIndex == partnerObj) {
+                if (0 > evt->codeId)
+                    return nullptr;
+
+                return evt;
+            }
+        }
+        partnerObj = dataWin->objt.objects[partnerObj].parentId;
+        depth++;
+    }
+
+    return nullptr;
+}
+
+static void executeCollisionEvent(Runner* runner, Instance* self, Instance* other, int32_t targetObjectIndex, int32_t codeId, int32_t ownerObjectIndex) {
+    if (isEventBlockedByPendingRoom(runner, self, EVENT_COLLISION))
+        return;
+
     VMContext* vm = runner->vmContext;
 
     // Save event context
@@ -1930,10 +2073,6 @@ static void executeCollisionEvent(Runner* runner, Instance* self, Instance* othe
     vm->currentEventType = EVENT_COLLISION;
     vm->currentEventSubtype = targetObjectIndex;
     vm->otherInstance = other;
-
-    int32_t ownerObjectIndex = -1;
-    int32_t codeId = findEventCodeIdAndOwner(runner, self->objectIndex, EVENT_COLLISION, targetObjectIndex, &ownerObjectIndex);
-
     vm->currentEventObjectIndex = ownerObjectIndex;
 
 #ifdef ENABLE_VM_TRACING
@@ -2095,22 +2234,17 @@ static void dispatchCollisionEvents(Runner* runner) {
             Instance* self = runner->instanceSnapshots[selfSnapBase + si];
             if (!self->active) continue;
 
-        InstanceBBox bboxSelf;
-        Sprite* sprSelf;
-        bool selfDirty = true;
+            InstanceBBox bboxSelf;
+            Sprite* sprSelf;
+            bool selfDirty = true;
 
-        // Walk the parent chain to find all collision event handlers for this object
-        int32_t currentObj = self->objectIndex;
-        int depth = 0;
-        while (currentObj >= 0 && dataWin->objt.count > (uint32_t) currentObj && 32 > depth) {
-            GameObject* obj = &dataWin->objt.objects[currentObj];
-
-            ObjectEventList* eventList = &obj->eventLists[EVENT_COLLISION];
+            FlattenedCollisionEventList* eventList = &runner->flattenedCollisionEvents[self->objectIndex];
             repeat(eventList->eventCount, evtIdx) {
-                ObjectEvent* evt = &eventList->events[evtIdx];
-                int32_t targetObjIndex = (int32_t) evt->eventSubtype;
+                FlattenedCollisionEvent* evt = &eventList->events[evtIdx];
+                int32_t targetObjIndex = (int32_t) evt->targetObjectIndex;
 
-                if (evt->actionCount == 0 || 0 > evt->actions[0].codeId) continue;
+                if (0 > evt->codeId)
+                    continue;
 
                 // Iterate only the descendant-inclusive list for the target object via a snapshot, so nested user code (collision handlers calling instance_exists, with (...), etc.) can push/pop their own snapshots above ours without corrupting this iteration.
                 int32_t snapBase = Runner_pushInstancesOfObject(runner, targetObjIndex);
@@ -2127,23 +2261,50 @@ static void dispatchCollisionEvents(Runner* runner) {
                         selfDirty = false;
                     }
                     InstanceBBox bboxOther = Collision_computeBBox(dataWin, other);
+
+#ifdef ENABLE_VM_TRACING
+                    bool traceThisPair = shouldTraceCollisionPair(runner->vmContext, dataWin, self, other);
+                    if (traceThisPair && (!bboxSelf.valid || !bboxOther.valid)) {
+                        fprintf(stderr, "Collision: [%s id=%d] vs [%s id=%d] bbox-invalid (selfValid=%d otherValid=%d)\n",
+                            dataWin->objt.objects[self->objectIndex].name, self->instanceId,
+                            dataWin->objt.objects[other->objectIndex].name, other->instanceId,
+                            bboxSelf.valid, bboxOther.valid);
+                    }
+#endif
                     if (!bboxSelf.valid || !bboxOther.valid) continue;
 
                     // AABB overlap test
-                    if (bboxSelf.left >= bboxOther.right || bboxOther.left >= bboxSelf.right || bboxSelf.top >= bboxOther.bottom || bboxOther.top >= bboxSelf.bottom)
-                        continue;
+                    bool aabbMiss = bboxSelf.left >= bboxOther.right || bboxOther.left >= bboxSelf.right || bboxSelf.top >= bboxOther.bottom || bboxOther.top >= bboxSelf.bottom;
+#ifdef ENABLE_VM_TRACING
+                    if (traceThisPair) {
+                        fprintf(stderr, "Collision: [%s id=%d pos=(%g,%g)] vs [%s id=%d pos=(%g,%g)] selfBB=(%g,%g,%g,%g) otherBB=(%g,%g,%g,%g) AABB=%s\n",
+                            dataWin->objt.objects[self->objectIndex].name, self->instanceId, self->x, self->y,
+                            dataWin->objt.objects[other->objectIndex].name, other->instanceId, other->x, other->y,
+                            bboxSelf.left, bboxSelf.top, bboxSelf.right, bboxSelf.bottom,
+                            bboxOther.left, bboxOther.top, bboxOther.right, bboxOther.bottom,
+                            aabbMiss ? "miss" : "overlap");
+                    }
+#endif
+                    if (aabbMiss) continue;
 
                     // Precise collision check if either sprite needs it (per-pixel for sepMasks==1, OBB SAT for rotated sepMasks==2).
                     Sprite* sprOther = Collision_getSprite(dataWin, other);
                     bool needsPrecise = (sprSelf != nullptr && sprSelf->sepMasks == 1) || (sprOther != nullptr && sprOther->sepMasks == 1) || Collision_obbNeedsSAT(sprSelf, self) || Collision_obbNeedsSAT(sprOther, other);
 
                     if (needsPrecise) {
-                        if (!Collision_instancesOverlapPrecise(dataWin, runner->collisionCompatibilityMode, self, other, bboxSelf, bboxOther)) continue;
+                        bool preciseHit = Collision_instancesOverlapPrecise(dataWin, runner->collisionCompatibilityMode, self, other, bboxSelf, bboxOther);
+#ifdef ENABLE_VM_TRACING
+                        if (traceThisPair) fprintf(stderr, "  precise=%s (selfSepMasks=%d otherSepMasks=%d)\n", preciseHit ? "hit" : "miss", sprSelf ? sprSelf->sepMasks : -1, sprOther ? sprOther->sepMasks : -1);
+#endif
+                        if (!preciseHit) continue;
                     }
 
                     // Collision detected! If either instance is solid, restore both to xprevious/yprevious.
                     bool hadSolid = self->solid || other->solid;
                     if (hadSolid) {
+#ifdef ENABLE_VM_TRACING
+                        if (traceThisPair) fprintf(stderr, "  solid-restore: self.solid=%d other.solid=%d self=(%g,%g)->(%g,%g) other=(%g,%g)->(%g,%g)\n", self->solid, other->solid, self->x, self->y, self->xprevious, self->yprevious, other->x, other->y, other->xprevious, other->yprevious);
+#endif
                         self->x = self->xprevious;
                         self->y = self->yprevious;
                         if (self->pathIndex >= 0) self->pathPosition = self->pathPositionPrevious;
@@ -2157,7 +2318,26 @@ static void dispatchCollisionEvents(Runner* runner) {
                     // We don't need to call "SpatialGrid_markInstanceAsDirty" here because *technically* just because a collision happened, doesn't mean that the instances have moved
                     // And if it DOES move via GML, the variable write handlers will set it to dirty
 
-                    executeCollisionEvent(runner, self, other, targetObjIndex);
+#ifdef ENABLE_VM_TRACING
+                    if (traceThisPair) fprintf(stderr, "  fire self->other: subtype=%d (%s) owner=%d (%s) codeId=%d\n", targetObjIndex, dataWin->objt.objects[targetObjIndex].name, evt->ownerObjectIndex, dataWin->objt.objects[evt->ownerObjectIndex].name, evt->codeId);
+#endif
+                    executeCollisionEvent(runner, self, other, targetObjIndex, evt->codeId, evt->ownerObjectIndex);
+
+                    // When both objects are colliding, we'll execute the SELF collision (which we already did) and THEN execute the OTHER collision too
+                    // Because if we don't, the OTHER collision may never happen again because
+                    // * GML code may have pushed it away
+                    // * Solid collision resolution may have also pushed it away
+                    if (other->active && self->active) {
+                        FlattenedCollisionEvent* reverseEvt = findSymmetricCollisionEvent(runner, other, self);
+#ifdef ENABLE_VM_TRACING
+                        if (traceThisPair) {
+                            if (reverseEvt != nullptr) fprintf(stderr, "  fire other->self: subtype=%u (%s) owner=%d (%s) codeId=%d  [symmetric]\n", reverseEvt->targetObjectIndex, dataWin->objt.objects[reverseEvt->targetObjectIndex].name, reverseEvt->ownerObjectIndex, dataWin->objt.objects[reverseEvt->ownerObjectIndex].name, reverseEvt->codeId);
+                            else fprintf(stderr, "  fire other->self: none (no matching handler)  [symmetric]\n");
+                        }
+#endif
+                        if (reverseEvt != nullptr)
+                            executeCollisionEvent(runner, other, self, (int32_t) reverseEvt->targetObjectIndex, reverseEvt->codeId, reverseEvt->ownerObjectIndex);
+                    }
 
                     // Native parity for solids: collision event can alter path state, so run one
                     // post-event path adaptation and apply its hspeed/vspeed step.
@@ -2181,10 +2361,6 @@ static void dispatchCollisionEvents(Runner* runner) {
                 }
                 Runner_popInstanceSnapshot(runner, snapBase);
             }
-
-            currentObj = obj->parentId;
-            depth++;
-        }
         }
 
         arrsetlen(runner->instanceSnapshots, selfSnapBase);
@@ -2366,14 +2542,14 @@ void Runner_step(Runner* runner) {
             DsMapEntry* map = nullptr;
             arrput(runner->dsMapPool, map);
             int32_t mapId = arrlen(runner->dsMapPool) - 1;
-            
+
             DsMapEntry** mapPtr = &runner->dsMapPool[mapId];
             shput(*mapPtr, safeStrdup("event_type"), RValue_makeOwnedString(safeStrdup(slot->connected ? "gamepad discovered" : "gamepad lost")));
             shput(*mapPtr, safeStrdup("pad_index"), RValue_makeReal((GMLReal) i));
-            
+
             runner->asyncLoadMapId = mapId;
             Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ASYNC_SYSTEM);
-            
+
             // Clean up ds_map
             mapPtr = &runner->dsMapPool[mapId];
             if (*mapPtr != nullptr) {
@@ -2590,11 +2766,12 @@ void Runner_step(Runner* runner) {
         Room* oldRoom = runner->currentRoom;
         const char* oldRoomName = oldRoom->name;
 
-        // Fire Room End for all instances
-        Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_END);
-
+        // Clear pendingRoom BEFORE firing Room End so the dispatch gate lets the events through.
         int32_t newRoomIndex = runner->pendingRoom;
         runner->pendingRoom = -1;
+
+        // Fire Room End for all instances
+        Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_END);
         require(runner->dataWin->room.count > (uint32_t) newRoomIndex);
         const char* newRoomName = runner->dataWin->room.rooms[newRoomIndex].name;
 
@@ -2978,7 +3155,7 @@ void Runner_free(Runner* runner) {
 
     cleanupState(runner);
 
-    if (runner->instancesByObject != nullptr) {
+    {
         uint32_t objectCount = runner->dataWin->objt.count;
         repeat(objectCount, i) {
             arrfree(runner->instancesByObject[i]);
@@ -2986,7 +3163,8 @@ void Runner_free(Runner* runner) {
         free(runner->instancesByObject);
         runner->instancesByObject = nullptr;
     }
-    if (runner->instancesByExactObject != nullptr) {
+
+    {
         uint32_t objectCount = runner->dataWin->objt.count;
         repeat(objectCount, i) {
             arrfree(runner->instancesByExactObject[i]);
@@ -2994,13 +3172,23 @@ void Runner_free(Runner* runner) {
         free(runner->instancesByExactObject);
         runner->instancesByExactObject = nullptr;
     }
-    if (runner->objectsWithAnyEventOfType != nullptr) {
+
+    {
         repeat(OBJT_EVENT_TYPE_COUNT, t) {
             arrfree(runner->objectsWithAnyEventOfType[t]);
         }
         free(runner->objectsWithAnyEventOfType);
         runner->objectsWithAnyEventOfType = nullptr;
     }
+
+    {
+        repeat(runner->dataWin->objt.count, i) {
+            free(runner->flattenedCollisionEvents[i].events);
+        }
+        free(runner->flattenedCollisionEvents);
+        runner->flattenedCollisionEvents = nullptr;
+    }
+    
     arrfree(runner->cachedDrawables);
     runner->cachedDrawables = nullptr;
     arrfree(runner->instanceSnapshots);

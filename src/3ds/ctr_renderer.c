@@ -1231,7 +1231,6 @@ static void push_quad(CtrRenderer *ctx, C3D_Tex *tex,
         {col[0], col[1], col[2], col[3]},
     };
     CtrVertex *v = vbuf_reserve(ctx, 6, tex);
-    // Added shift safely internally rendering structures precisely mapping bounds accurately generating operations efficiently logically securely.
 #define VV(idx, ix, iy, uu, vv, cc) \
 v[idx] = (CtrVertex){xs[ix] + ctx->currentShiftX, ys[iy], 0.f, uu, vv, cs[cc][0], cs[cc][1], cs[cc][2], cs[cc][3]}
     VV(0, 0, 0, u0, v0, 0);
@@ -1555,16 +1554,18 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
     free_old_source_pages(ctx);
 
     uint32_t tiledSize = page->dataSize;
-    if (tiledSize == 0) {
-        tiledSize = CTR_TEXTURE_CACHE_ATLAS_SIZE * CTR_TEXTURE_CACHE_ATLAS_SIZE * 2u;
-    }
+    uint32_t texW = page->potW > 0 ? (uint32_t)page->potW : CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    uint32_t texH = page->potH > 0 ? (uint32_t)page->potH : CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    if (tiledSize == 0) tiledSize = texW * texH * 2u;
     GPU_TEXCOLOR texFormat = GPU_RGBA4;
     if (page->format == CTR_TEXTURE_CACHE_FORMAT_LA4) texFormat = GPU_LA4;
     else if (page->format == CTR_TEXTURE_CACHE_FORMAT_A4) texFormat = GPU_A4;
+    else if (page->format == CTR_TEXTURE_CACHE_FORMAT_ETC1) texFormat = GPU_ETC1;
+    else if (page->format == CTR_TEXTURE_CACHE_FORMAT_ETC1A4) texFormat = GPU_ETC1A4;
 
     bool texOk = C3D_TexInit(&page->tex,
-                             (u16) CTR_TEXTURE_CACHE_ATLAS_SIZE,
-                             (u16) CTR_TEXTURE_CACHE_ATLAS_SIZE,
+                             (u16) texW,
+                             (u16) texH,
                              texFormat);
 
     if (!texOk) {
@@ -1587,10 +1588,10 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
     C3D_TexSetFilter(&page->tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&page->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
-    page->width = (int) CTR_TEXTURE_CACHE_ATLAS_SIZE;
-    page->height = (int) CTR_TEXTURE_CACHE_ATLAS_SIZE;
-    page->potW = (int) CTR_TEXTURE_CACHE_ATLAS_SIZE;
-    page->potH = (int) CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    page->width = (int) texW;
+    page->height = (int) texH;
+    page->potW = (int) texW;
+    page->potH = (int) texH;
     page->loaded = true;
     page->loadFailed = false;
     page->lastFrame = g_frame;
@@ -1766,6 +1767,17 @@ static void destroy_app_surface(CtrRenderer *ctx) {
     ctx->appReady = false;
 }
 
+static void destroy_right_app_surface(CtrRenderer *ctx) {
+    if (ctx->appTargetRight) {
+        safe_delete_target(ctx, ctx->appTargetRight);
+        ctx->appTargetRight = NULL;
+    }
+    if (ctx->appTexRight.data) {
+        C3D_TexDelete(&ctx->appTexRight);
+        memset(&ctx->appTexRight, 0, sizeof(ctx->appTexRight));
+    }
+}
+
 static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
     if (ctx->appReady && ctx->appLogicW == gw && ctx->appLogicH == gh) return true;
 
@@ -1793,22 +1805,21 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
 
     C3D_RenderTargetClear(ctx->appTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
 
-    // Initializing the corresponding right target cleanly generating buffers reliably correctly!
-    if (!C3D_TexInitVRAM(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
-        if (!C3D_TexInit(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
-            destroy_app_surface(ctx);
-            return false;
+    bool rightEyeReady = false;
+    if (C3D_TexInitVRAM(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8) ||
+        C3D_TexInit(&ctx->appTexRight, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
+        C3D_TexSetFilter(&ctx->appTexRight, GPU_LINEAR, GPU_LINEAR);
+        C3D_TexSetWrap(&ctx->appTexRight, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        ctx->appTargetRight = C3D_RenderTargetCreateFromTex(&ctx->appTexRight, GPU_TEXFACE_2D, 0, -1);
+        if (ctx->appTargetRight) {
+            C3D_RenderTargetClear(ctx->appTargetRight, C3D_CLEAR_ALL, 0x000000FF, 0);
+            rightEyeReady = true;
         }
     }
-    C3D_TexSetFilter(&ctx->appTexRight, GPU_LINEAR, GPU_LINEAR);
-    C3D_TexSetWrap(&ctx->appTexRight, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-    ctx->appTargetRight = C3D_RenderTargetCreateFromTex(&ctx->appTexRight, GPU_TEXFACE_2D, 0, -1);
-    if (!ctx->appTargetRight) {
-        destroy_app_surface(ctx);
-        return false;
+    if (!rightEyeReady) {
+        destroy_right_app_surface(ctx);
+        fprintf(stderr, "CtrRenderer: right-eye app surface unavailable, stereoscopic pass disabled for this size\n");
     }
-    C3D_RenderTargetClear(ctx->appTargetRight, C3D_CLEAR_ALL, 0x000000FF, 0);
-
 
     ctx->appReady = true;
     return true;
@@ -1829,11 +1840,23 @@ static void bind_target(CtrRenderer *ctx, C3D_RenderTarget *tgt) {
 
 static void set_viewport_logical(CtrRenderer *ctx, C3D_RenderTarget *tgt,
                                  int x, int y, int w, int h) {
+    if (!tgt) return;
+    int fbW = tgt->frameBuf.width;
     int fbH = tgt->frameBuf.height;
-    int vpY = fbH - y - h;
-    if (vpY < 0) vpY = 0;
     if (w < 1) w = 1;
     if (h < 1) h = 1;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x >= fbW) x = fbW > 0 ? fbW - 1 : 0;
+    if (y >= fbH) y = fbH > 0 ? fbH - 1 : 0;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (x + w > fbW) w = fbW - x;
+    if (y + h > fbH) h = fbH - y;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    int vpY = fbH - y - h;
+    if (vpY < 0) vpY = 0;
     C3D_SetViewport((u32) x, (u32) vpY, (u32) w, (u32) h);
     C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32) x, (u32) vpY, (u32) (x + w), (u32) (vpY + h));
     ctx->currentViewport[0] = x;
@@ -1996,6 +2019,10 @@ static void ctr_destroy(Renderer *ren) {
         C3D_RenderTargetDelete(ctx->topTarget);
         ctx->topTarget = NULL;
     }
+    if (ctx->topTargetRight) {
+        C3D_RenderTargetDelete(ctx->topTargetRight);
+        ctx->topTargetRight = NULL;
+    }
     if (ctx->bottomTarget) {
         C3D_RenderTargetDelete(ctx->bottomTarget);
         ctx->bottomTarget = NULL;
@@ -2059,7 +2086,6 @@ static void ctr_end_frame(Renderer *ren) {
         int primaryH = 240;
         int secondaryW = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM) ? 400 : 320;
 
-        // Reset Offset so scaling quad centers beautifully over layouts smoothly effectively integrating interfaces functionally automatically naturally intelligently
         ctx->currentShiftX = 0;
         ctx->isGUI = true;
 
@@ -2105,14 +2131,23 @@ static void ctr_end_frame(Renderer *ren) {
 
             draw_letterbox_backdrop(ctx);
 
-            int drawW, drawH;
-            if (g_ctr_backdrop_mode == CTR_BACKDROP_STRETCH) {
-                drawW = ctx->winW; drawH = ctx->winH;
-            } else if ((ctx->gameW * ctx->winH) / ctx->gameH < ctx->winW) {
-                drawW = (ctx->gameW * ctx->winH) / ctx->gameH; drawH = ctx->winH;
-            } else {
-                drawW = ctx->winW; drawH = (ctx->gameH * ctx->winW) / ctx->gameW;
+            int drawW = ctx->winW, drawH = ctx->winH;
+            if (ctx->gameH > 0 && ctx->winH > 0) {
+                float gameAspect = (float)ctx->gameW / (float)ctx->gameH;
+                float screenAspect = (float)ctx->winW / (float)ctx->winH;
+
+                if (g_ctr_backdrop_mode == CTR_BACKDROP_STRETCH || fabsf(gameAspect - screenAspect) < 0.15f) {
+                    drawW = ctx->winW;
+                    drawH = ctx->winH;
+                } else if (gameAspect < screenAspect) {
+                    drawW = (int)((float)ctx->winH * gameAspect);
+                    drawH = ctx->winH;
+                } else {
+                    drawW = ctx->winW;
+                    drawH = (int)((float)ctx->winW / gameAspect);
+                }
             }
+
             int drawX = (ctx->winW - drawW) / 2;
             int drawY = (ctx->winH - drawH) / 2;
 
@@ -2138,11 +2173,10 @@ static void ctr_end_frame(Renderer *ren) {
                 C3D_SetViewport(0, 0, 240, (u32)primaryW);
                 disable_scissor(ctx);
 
-                apply_projection(ctx, &proj); // Ре-аплаим
+                apply_projection(ctx, &proj);
 
-                draw_letterbox_backdrop(ctx); // Заново перерисовываем фон вокруг черными полосами (если нужно)
+                draw_letterbox_backdrop(ctx);
 
-                // РИСУЕМ ПОДГОТОВЛЕННЫЙ ТЕКСТУРИРОВАННЫЙ ВТОРОЙ ПАСС КАДРА ВО ВТОРОЙ ГЛАЗ ОРГАНИЧНО ДОПУСКАЯ ВСТРОЕННЫЙ ГЕОМЕТРИЧЕСКИЙ РЕНДЕРИНГ ТОНКО МЯГКО ОТСАВАТЬСЯ НАТИВНЫМ ФОРМАТОМ КОМПАРАТИВНО БЕЗ ИЗДЕРЖЕК ПЕРЕД АВТОВЕСЕЛОЙ МОДАЛЬНОСТЬЮ АДРЕСОВ АНАЛИЗИРУЯ ОПЕРАЦИИ БЫСТРО!!!
                 push_quad(ctx, &ctx->appTexRight,
                           (float)drawX,           (float)drawY,
                           (float)(drawX + drawW), (float)drawY,
@@ -2173,10 +2207,17 @@ static void ctr_flush(Renderer *ren) { flush_batch((CtrRenderer *) ren); }
 static void ctr_begin_view(Renderer *ren, int32_t vx, int32_t vy, int32_t vw, int32_t vh,
                            int32_t px, int32_t py, int32_t pw, int32_t ph, float angle) {
     CtrRenderer *ctx = (CtrRenderer *)ren;
+    if (!ctx || !ctx->inFrame || !ctx->appReady) return;
     flush_batch(ctx);
-    ctx->isGUI = false; // Always explicitly map views dynamically processing contexts elegantly securely flawlessly automatically effectively utilizing attributes correctly dependably executing routines intelligently cleanly.
+    ctx->isGUI = false;
 
     C3D_RenderTarget* canvas = (ctx->currentEye == 1) ? ctx->appTargetRight : ctx->appTarget;
+    if (!canvas) canvas = ctx->appTarget;
+    if (!canvas) return;
+    if (vw < 1) vw = ctx->gameW > 0 ? ctx->gameW : 1;
+    if (vh < 1) vh = ctx->gameH > 0 ? ctx->gameH : 1;
+    if (pw < 1) pw = vw;
+    if (ph < 1) ph = vh;
     if (ctx->activeTarget != canvas) {
         bind_target(ctx, canvas);
     }
@@ -2198,8 +2239,8 @@ static void ctr_begin_view(Renderer *ren, int32_t vx, int32_t vy, int32_t vw, in
     }
     apply_projection(ctx, &proj);
 
-    // Enable culling against the view rect in room coords. Disabled when the view
-    // is rotated — an axis-aligned cull rect doesn't match a rotated frustum.
+    // Enable culling against the view rect in room coords. Disable it for rotated
+    // views because an axis-aligned cull rect does not match a rotated frustum.
     if (angle == 0.f) {
         ctx->cullEnabled = true;
         ctx->cullL = (float) vx;
@@ -2220,12 +2261,17 @@ static void ctr_end_view(Renderer *ren) {
 
 static void ctr_begin_gui(Renderer *ren, int32_t gw, int32_t gh, int32_t px, int32_t py, int32_t pw, int32_t ph) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
+    if (!ctx || !ctx->inFrame || !ctx->appReady) return;
     flush_batch(ctx);
-    // UI draws currently evaluating context dynamically utilizing logic successfully natively generating operations! Disable offset calculation!
     ctx->isGUI = true;
 
-    // target - это currentEye (0 / 1 -> Left / Right app canvas)
     C3D_RenderTarget *canvas = (ctx->currentEye == 1) ? ctx->appTargetRight : ctx->appTarget;
+    if (!canvas) canvas = ctx->appTarget;
+    if (!canvas) return;
+    if (gw < 1) gw = ctx->gameW > 0 ? ctx->gameW : 1;
+    if (gh < 1) gh = ctx->gameH > 0 ? ctx->gameH : 1;
+    if (pw < 1) pw = gw;
+    if (ph < 1) ph = gh;
     if (ctx->activeTarget != canvas) bind_target(ctx, canvas);
 
     set_viewport_logical(ctx, canvas, px, py, pw, ph);
@@ -3584,15 +3630,18 @@ static void ctr_set_blend(Renderer *ren, int32_t mode) {
 
 void CtrRenderer_beginEye(Renderer *ren, int eye, float slider) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
+    if (!ctx) return;
+    if (eye == 1 && ctx->appTargetRight == NULL) {
+        eye = 0;
+        slider = 0.0f;
+    }
     ctx->currentEye = eye;
     ctx->depthSlider = slider;
     ctx->current3DDepth = 0;
 
-    // Choose active dynamic frame canvas buffer correctly mapping 3DS outputs gracefully cleanly evaluating dependencies safely intuitively:
     C3D_RenderTarget *currentDestTarget = (eye == 1) ? ctx->appTargetRight : ctx->appTarget;
 
     if (currentDestTarget != NULL && ctx->inFrame) {
-        // Swap out buffer states smoothly natively protecting rendering engines executing blocks organically resolving components effortlessly perfectly over scopes correctly
         if (ctx->activeTarget != currentDestTarget) {
             flush_batch(ctx);
             C3D_FrameSplit(0);
@@ -3604,28 +3653,29 @@ void CtrRenderer_beginEye(Renderer *ren, int eye, float slider) {
     }
 }
 
+bool CtrRenderer_hasRightEye(Renderer *ren) {
+    CtrRenderer *ctx = (CtrRenderer *) ren;
+    return ctx != NULL && ctx->appTargetRight != NULL;
+}
+
 static void ctr_set_3d_depth(Renderer *ren, float depth) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
     ctx->current3DDepth = depth;
 
-    // UI drawing bypasses parallax shift dynamically reliably smoothly over instances rendering optimally intelligently safely!
     if (ctx->isGUI || ctx->depthSlider <= 0.01f) {
         ctx->currentShiftX = 0.0f;
         return;
     }
 
-    // Typical mapped generic GameMaker / Undertale relative distances calculation logic to handle objects visually perfectly. Depth logic usually scales around 1500~2000 offset divisors securely flawlessly over routines generating depths nicely evaluating environments:
-    // depth > 0 уходит вдаль; depth < 0 выходит наружу (например объекты или герой). У Undertale очень большие depth поэтому ставим девайдер 3000+.
+    // GameMaker depths are large; scale them down to a comfortable stereo offset.
     float d = ctx->current3DDepth / 3000.0f;
 
-    // Clamp limits tightly maximizing comfort over vision scopes gracefully successfully cleanly cleanly handling properties nicely safely resolving outputs efficiently intelligently perfectly.
     if (d > 4.0f) d = 4.0f;
     if (d < -4.0f) d = -4.0f;
 
     // Mapped horizontal pixel parallax intensity calculation
     float separation = d * 2.0f * ctx->depthSlider;
 
-    // Negative distances = shift left for Left eye, shift right for right eye evaluating values correctly handling logic efficiently mapping context gracefully generating frames intelligently cleanly safely correctly.
     ctx->currentShiftX = (ctx->currentEye == 0) ? -separation : separation;
 }
 
@@ -3648,8 +3698,7 @@ static RendererVtable vtable = {
     .flush = ctr_flush,
     .prefetchSprite = CtrRenderer_prefetchSprite,
     .prefetchSprites = CtrRenderer_prefetchSprites,
-    .createSpriteFromSurface = ctr_create_surf,
-    .createSpriteFromSurfaceEx = ctr_create_surf_ex,
+    .createSpriteFromSurface = ctr_create_surf_ex,
     .deleteSprite = ctr_del_sprite,
     .createSurface = ctr_create_surface, .freeSurface = ctr_free_surface,
     .surfaceExists = ctr_surface_exists, .surfaceGetSize = ctr_surface_get_size,

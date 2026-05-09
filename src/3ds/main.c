@@ -268,7 +268,7 @@ int main(int argc, char **argv) {
             .parseAgrp=1, .parseSprt=1, .parseBgnd=1, .parsePath=1, .parseScpt=1,
             .parseGlob=1, .parseShdr=1, .parseFont=1, .parseTmln=1, .parseObjt=1,
             .parseRoom=1, .parseTpag=1, .parseCode=1, .parseVari=1, .parseFunc=1,
-            .parseStrg=1, .parseTxtr=1, .parseAudo=1,
+            .parseStrg=1, .parseTxtr=!cached, .parseAudo=!cached,
             .skipLoadingPreciseMasksForNonPreciseSprites=1,
             .skipTextureBlobData=cached, .skipAudioBlobData=1,
 
@@ -398,11 +398,11 @@ int main(int argc, char **argv) {
 
             float depthSliderState = osGet3DSliderState();
 
-            int numEyes = (depthSliderState > 0.01f && launcher_get_settings()->game_screen == LAUNCHER_GAME_SCREEN_TOP) ? 2 : 1;
-
             ren->vtable->beginFrame(ren, gw, gh, winW, 240);
+            int numEyes = (depthSliderState > 0.01f &&
+                           launcher_get_settings()->game_screen == LAUNCHER_GAME_SCREEN_TOP &&
+                           CtrRenderer_hasRightEye(ren)) ? 2 : 1;
 
-            // Stereoscopic Dual Rendering Engine Main Cycle Injection!
             for(int eye = 0; eye < numEyes; eye++) {
 
                 CtrRenderer_beginEye(ren, eye, depthSliderState);
