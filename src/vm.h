@@ -9,6 +9,7 @@
 #include "utils.h"
 #include "profiler.h"
 #include "int_int_hashmap.h"
+#include "int_rvalue_hashmap.h"
 #include "string_builder.h"
 
 // ===[ Instance Types (signed 16-bit) ]===
@@ -202,6 +203,9 @@ typedef struct VMContext {
 
     // V17+ extended BREAK opcode state
     bool* staticInitialized; // Per-code-entry flag for isstaticok/setstatic (allocated in VM_create)
+    // V17+ static variable payloads captured while a function's static init block is executing.
+    IntRValueHashMap* staticVars;
+    int32_t currentStaticInitCodeIndex;
     // BC17+: owner token set by BREAK_SETOWNER. Arrays whose .owner mismatches fork on write.
     void* currentArrayOwner;
     // SAVEAREF/RESTOREAREF balance tracker.

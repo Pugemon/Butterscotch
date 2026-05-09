@@ -3,16 +3,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define CTR_AUDIO_CACHE_MAGIC      0x55424143u   // 'CABU' le
+#define CTR_AUDIO_CACHE_MAGIC      0x55424143u   
 #define CTR_AUDIO_CACHE_VERSION    3u
 #define CTR_AUDIO_CACHE_FILE       "audio.bin"
 
 #define CTR_AUDIO_FLAG_LOOP            (1u << 0)
 #define CTR_AUDIO_FLAG_PREFER_STREAM   (1u << 1)
 
-#define CTR_AUDIO_FORMAT_PCM8   0u   // 8-bit signed (mono only). NDSP_FORMAT_*_PCM8.
-#define CTR_AUDIO_FORMAT_PCM16  1u   // 16-bit signed. NDSP_FORMAT_*_PCM16.
-#define CTR_AUDIO_FORMAT_ADPCM  2u   // GC DSP-ADPCM (mono). NDSP_FORMAT_MONO_ADPCM. 4× smaller than PCM16.
+#define CTR_AUDIO_FORMAT_PCM8   0u   
+#define CTR_AUDIO_FORMAT_PCM16  1u   
+#define CTR_AUDIO_FORMAT_ADPCM  2u   
 
 typedef struct {
     uint32_t magic;

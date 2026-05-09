@@ -825,6 +825,26 @@ static inline void writeIntoSlot(RValue* dest, RValue val) {
     *dest = val;
 }
 
+static void captureStaticWrite(VMContext* ctx, Variable* varDef, RValue val) {
+#if IS_BC17_OR_HIGHER_ENABLED
+    if (!IS_BC17_OR_HIGHER(ctx)) return;
+    if (ctx->staticVars == nullptr) return;
+    if (ctx->currentStaticInitCodeIndex != ctx->currentCodeIndex) return;
+    if (ctx->currentCodeIndex < 0 || (uint32_t) ctx->currentCodeIndex >= ctx->dataWin->code.count) return;
+    if (varDef->varID < 0) return;
+
+    IntRValueHashMap* vars = &ctx->staticVars[ctx->currentCodeIndex];
+    RValue* slot = IntRValueHashMap_getOrInsertUndefined(vars, varDef->varID);
+    RValue copy = RValue_makeIndependent(val);
+    RValue_free(slot);
+    *slot = copy;
+#else
+    (void) ctx;
+    (void) varDef;
+    (void) val;
+#endif
+}
+
 // Force out-of-line so the OP_POP fast path in executeLoop doesn't inline this, because we already have an "optimized" version for common writes
 __attribute__((noinline))
 static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t varRef, RValue val) {
@@ -841,6 +861,7 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
                 uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
                 require(ctx->localVarCount > localSlot);
                 writeIntoSlot(&ctx->localVars[localSlot], val);
+                captureStaticWrite(ctx, varDef, val);
 #ifdef ENABLE_VM_TRACING
                 VM_checkIfVariableShouldBeTracedAndLog(ctx, "local", nullptr, varDef->name, ctx->localVars[localSlot], true, -1, -1, "");
 #endif
@@ -849,6 +870,7 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
             case INSTANCE_GLOBAL: {
                 require(ctx->globalVarCount > (uint32_t) varDef->varID);
                 writeIntoSlot(&ctx->globalVars[varDef->varID], val);
+                captureStaticWrite(ctx, varDef, val);
 #ifdef ENABLE_VM_TRACING
                 VM_checkIfVariableShouldBeTracedAndLog(ctx, "global", nullptr, varDef->name, ctx->globalVars[varDef->varID], true, -1, -1, "");
 #endif
@@ -858,6 +880,7 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
                 Instance* inst = (Instance*) ctx->currentInstance;
                 if (inst != nullptr) {
                     Instance_setSelfVar(inst, varDef->varID, val);
+                    captureStaticWrite(ctx, varDef, val);
 #ifdef ENABLE_VM_TRACING
                     {
                         RValue written = Instance_getSelfVar(inst, varDef->varID);
@@ -873,6 +896,7 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
                 Instance* inst = (Instance*) ctx->otherInstance;
                 if (inst != nullptr) {
                     Instance_setSelfVar(inst, varDef->varID, val);
+                    captureStaticWrite(ctx, varDef, val);
 #ifdef ENABLE_VM_TRACING
                     {
                         RValue written = Instance_getSelfVar(inst, varDef->varID);
@@ -1055,12 +1079,14 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
             uint32_t localSlot = resolveLocalSlot(ctx, varDef->varID);
             require(ctx->localVarCount > localSlot);
             writeIntoSlot(&ctx->localVars[localSlot], val);
+            captureStaticWrite(ctx, varDef, val);
             return;
         }
         case INSTANCE_GLOBAL: {
             require(ctx->globalVarCount > (uint32_t) varDef->varID);
             RValue* dest = &ctx->globalVars[varDef->varID];
             writeIntoSlot(dest, val);
+            captureStaticWrite(ctx, varDef, val);
 #ifdef ENABLE_VM_TRACING
             VM_checkIfVariableShouldBeTracedAndLog(ctx, "global", nullptr, varDef->name, *dest, true, -1, -1, "");
 #endif
@@ -1071,6 +1097,7 @@ static void resolveVariableWrite(VMContext* ctx, int32_t instanceType, uint32_t 
             // Self or object/instance reference - use sparse hashmap
             Instance* inst = targetInstance;
             Instance_setSelfVar(inst, varDef->varID, val);
+            captureStaticWrite(ctx, varDef, val);
 #ifdef ENABLE_VM_TRACING
             {
                 RValue written = Instance_getSelfVar(inst, varDef->varID);
@@ -2091,6 +2118,113 @@ static void handleCall(VMContext* ctx, uint32_t instr, const uint8_t* extraData)
 }
 
 #if IS_BC17_OR_HIGHER_ENABLED
+static bool resolveCallableIndex(VMContext* ctx, int32_t rawIndex, int32_t* outCodeIndex, BuiltinFunc* outBuiltin, const char** outUnresolvedName) {
+    if (outCodeIndex != nullptr) *outCodeIndex = -1;
+    if (outBuiltin != nullptr) *outBuiltin = nullptr;
+    if (outUnresolvedName != nullptr) *outUnresolvedName = nullptr;
+
+    // GMS2 stores first-class script/function references as FUNC-table
+    // indices. They often travel through arrays/globals as plain numbers
+    // (for example Haxe-generated button callbacks in Pizza Tower).
+    if (rawIndex >= 0 && ctx->dataWin->func.functionCount > (uint32_t) rawIndex) {
+        FuncCallCache* cache = (ctx->funcCallCache != nullptr && ctx->funcCallCacheCount > (uint32_t) rawIndex)
+            ? &ctx->funcCallCache[rawIndex]
+            : nullptr;
+        if (cache != nullptr) {
+            if (cache->scriptCodeIndex >= 0) {
+                if (outCodeIndex != nullptr) *outCodeIndex = cache->scriptCodeIndex;
+                return true;
+            }
+            if (cache->builtin != nullptr) {
+                if (outBuiltin != nullptr) *outBuiltin = (BuiltinFunc) cache->builtin;
+                return true;
+            }
+        }
+
+        const char* funcName = ctx->dataWin->func.functions[rawIndex].name;
+        if (funcName != nullptr) {
+            ptrdiff_t idx = shgeti(ctx->codeIndexByName, (char*) funcName);
+            if (idx >= 0) {
+                if (outCodeIndex != nullptr) *outCodeIndex = ctx->codeIndexByName[idx].value;
+                return true;
+            }
+            BuiltinFunc builtin = VM_findBuiltin(ctx, funcName);
+            if (builtin != nullptr) {
+                if (outBuiltin != nullptr) *outBuiltin = builtin;
+                return true;
+            }
+            if (outUnresolvedName != nullptr) *outUnresolvedName = funcName;
+            return true;
+        }
+    }
+
+    // Older or odd bytecode can pass code/scpt indices directly.
+    if (rawIndex >= 0 && ctx->dataWin->code.count > (uint32_t) rawIndex) {
+        if (outCodeIndex != nullptr) *outCodeIndex = rawIndex;
+        return true;
+    }
+    if (rawIndex >= 0 && ctx->dataWin->scpt.count > (uint32_t) rawIndex) {
+        int32_t codeIndex = ctx->dataWin->scpt.scripts[rawIndex].codeId;
+        if (codeIndex >= 0 && ctx->dataWin->code.count > (uint32_t) codeIndex) {
+            if (outCodeIndex != nullptr) *outCodeIndex = codeIndex;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void resolveCallableValue(VMContext* ctx, RValue* function, int32_t* outCodeIndex, int32_t* outBoundInstance, BuiltinFunc* outBuiltin, const char** outUnresolvedName) {
+    *outCodeIndex = -1;
+    *outBoundInstance = -1;
+    *outBuiltin = nullptr;
+    *outUnresolvedName = nullptr;
+
+    if (function->type == RVALUE_METHOD && function->method != nullptr) {
+        *outCodeIndex = function->method->codeIndex;
+        *outBoundInstance = function->method->boundInstanceId;
+        *outBuiltin = (BuiltinFunc) function->method->builtin;
+        *outUnresolvedName = function->method->unresolvedName;
+
+        if (*outCodeIndex < 0 && *outBuiltin == nullptr && *outUnresolvedName != nullptr) {
+            ptrdiff_t idx = shgeti(ctx->codeIndexByName, (char*) *outUnresolvedName);
+            if (idx >= 0) {
+                *outCodeIndex = ctx->codeIndexByName[idx].value;
+                function->method->codeIndex = *outCodeIndex;
+                *outUnresolvedName = nullptr;
+                return;
+            }
+            BuiltinFunc builtin = VM_findBuiltin(ctx, *outUnresolvedName);
+            if (builtin != nullptr) {
+                *outBuiltin = builtin;
+                function->method->builtin = builtin;
+                *outUnresolvedName = nullptr;
+            }
+        }
+        return;
+    }
+
+    if (function->type == RVALUE_INT32 || function->type == RVALUE_INT64 ||
+        function->type == RVALUE_REAL) {
+        (void) resolveCallableIndex(ctx, RValue_toInt32(*function), outCodeIndex, outBuiltin, outUnresolvedName);
+        return;
+    }
+
+    if (function->type == RVALUE_STRING && function->string != nullptr) {
+        ptrdiff_t idx = shgeti(ctx->codeIndexByName, (char*) function->string);
+        if (idx >= 0) {
+            *outCodeIndex = ctx->codeIndexByName[idx].value;
+            return;
+        }
+        BuiltinFunc builtin = VM_findBuiltin(ctx, function->string);
+        if (builtin != nullptr) {
+            *outBuiltin = builtin;
+        } else {
+            *outUnresolvedName = function->string;
+        }
+    }
+}
+
 // BC17+ CALLV: dynamic call through a variable (method/script reference).
 // Stack layout (top -> bottom): function, instance, arg[N-1], ..., arg[0]
 // argCount is in the low 16 bits of the instruction.
@@ -2113,12 +2247,7 @@ static void handleCallV(VMContext* ctx, uint32_t instr) {
     int32_t boundInstance = -1;
     BuiltinFunc builtin = nullptr;
     const char* unresolvedName = nullptr;
-    if (function.type == RVALUE_METHOD && function.method != nullptr) {
-        codeIndex = function.method->codeIndex;
-        boundInstance = function.method->boundInstanceId;
-        builtin = (BuiltinFunc) function.method->builtin;
-        unresolvedName = function.method->unresolvedName;
-    }
+    resolveCallableValue(ctx, &function, &codeIndex, &boundInstance, &builtin, &unresolvedName);
 
     // Decide target self: prefer method's bound instance, else the stack-provided instance.
     int32_t targetInstance = (boundInstance > 0) ? boundInstance : RValue_toInt32(instance);
@@ -2640,12 +2769,16 @@ static void handleBreakSetOwner(VMContext* ctx) {
 static void handleBreakIsStaticOk(VMContext* ctx) {
     // Push bool: has this function's static block already run?
     bool initialized = ctx->staticInitialized[ctx->currentCodeIndex];
+    ctx->currentStaticInitCodeIndex = initialized ? -1 : ctx->currentCodeIndex;
     stackPush(ctx, RValue_makeBool(initialized));
 }
 
 static void handleBreakSetStatic(VMContext* ctx) {
     // Mark current function's static as initialized
     ctx->staticInitialized[ctx->currentCodeIndex] = true;
+    if (ctx->currentStaticInitCodeIndex == ctx->currentCodeIndex) {
+        ctx->currentStaticInitCodeIndex = -1;
+    }
 }
 
 static void handleBreakSaveARef(VMContext* ctx) {
@@ -3269,9 +3402,12 @@ VMContext* VM_create(DataWin* dataWin) {
     // 32 KB but the extra heap pressure is silly when we have linear room.
     if (dataWin->gen8.bytecodeVersion >= 17) {
         ctx->staticInitialized = (bool*) VM_BIG_CALLOC(dataWin->code.count, sizeof(bool));
+        ctx->staticVars = (IntRValueHashMap*) VM_BIG_CALLOC(dataWin->code.count, sizeof(IntRValueHashMap));
     } else {
         ctx->staticInitialized = nullptr;
+        ctx->staticVars = nullptr;
     }
+    ctx->currentStaticInitCodeIndex = -1;
     ctx->currentArrayOwner = nullptr;
     ctx->savearefBalance = 0;
 
@@ -3459,6 +3595,17 @@ void VM_reset(VMContext* ctx) {
     }
     hmfree(ctx->globalArrayMap);
     ctx->globalArrayMap = nullptr;
+
+    if (ctx->staticInitialized != nullptr) {
+        memset(ctx->staticInitialized, 0, ctx->dataWin->code.count * sizeof(bool));
+    }
+    if (ctx->staticVars != nullptr) {
+        repeat(ctx->dataWin->code.count, i) {
+            IntRValueHashMap_freeAllValues(&ctx->staticVars[i]);
+        }
+        memset(ctx->staticVars, 0, ctx->dataWin->code.count * sizeof(IntRValueHashMap));
+    }
+    ctx->currentStaticInitCodeIndex = -1;
 
     // Reset stack
     ctx->stack.top = 0;
@@ -4327,6 +4474,13 @@ void VM_free(VMContext* ctx) {
 
     // Free V17+ static tracking (allocated via VM_BIG_ALLOC).
     VM_BIG_FREE(ctx->staticInitialized);
+    if (ctx->staticVars != nullptr) {
+        repeat(ctx->dataWin->code.count, i) {
+            IntRValueHashMap_freeAllValues(&ctx->staticVars[i]);
+        }
+        VM_BIG_FREE(ctx->staticVars);
+        ctx->staticVars = nullptr;
+    }
 
     // Free per-code varID -> slot maps (BC17+ only; nullptr otherwise).
     // The IntIntHashMap_free on each entry releases its internal heap-side

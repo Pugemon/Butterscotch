@@ -17,6 +17,12 @@
 #include "debug_overlay.h"
 #include "stb_ds.h"
 
+#ifdef LOG_ALL
+#define RUNNER_LOG(...) do { fprintf(stderr, "[RUNNER] " __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } while (0)
+#else
+#define RUNNER_LOG(...) ((void)0)
+#endif
+
 // ===[ Runtime Layer Teardown Helpers ]===
 void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer) {
     if (runtimeLayer->dynamicName != nullptr) {
@@ -1260,14 +1266,26 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     require(roomIndex >= 0 && dataWin->room.count > (uint32_t) roomIndex);
 
     Room* room = &dataWin->room.rooms[roomIndex];
+    RUNNER_LOG("initRoom begin: index=%ld name=%s payload=%d objects=%lu layers=%lu tiles=%lu speed=%lu size=%lux%lu",
+               (long)roomIndex, room->name ? room->name : "(null)", room->payloadLoaded ? 1 : 0,
+               (unsigned long)room->gameObjectCount, (unsigned long)room->layerCount,
+               (unsigned long)room->tileCount, (unsigned long)room->speed,
+               (unsigned long)room->width, (unsigned long)room->height);
 
     // Lazy-room load: if the payload wasn't loaded, read it from the data.win file now before anything touches the room's game objects/tiles/layers.
     if (!room->payloadLoaded) {
+        RUNNER_LOG("initRoom load payload: index=%ld", (long)roomIndex);
         DataWin_loadRoomPayload(dataWin, roomIndex);
+        RUNNER_LOG("initRoom payload loaded: index=%ld payload=%d objects=%lu layers=%lu tiles=%lu",
+                   (long)roomIndex, room->payloadLoaded ? 1 : 0,
+                   (unsigned long)room->gameObjectCount, (unsigned long)room->layerCount,
+                   (unsigned long)room->tileCount);
     }
 
     if (runner->renderer != nullptr && runner->renderer->vtable->onRoomChanged != nullptr) {
+        RUNNER_LOG("initRoom renderer onRoomChanged begin: index=%ld", (long)roomIndex);
         runner->renderer->vtable->onRoomChanged(runner->renderer, roomIndex);
+        RUNNER_LOG("initRoom renderer onRoomChanged end: index=%ld", (long)roomIndex);
     }
 
     // Same idea as renderer prefetch: warm any audio that this session has
@@ -1276,7 +1294,9 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     // decode latency stacks into a ~50-200 ms hitch unless we pre-load.
     if (runner->audioSystem != nullptr &&
         runner->audioSystem->vtable->onRoomChanged != nullptr) {
+        RUNNER_LOG("initRoom audio onRoomChanged begin: index=%ld", (long)roomIndex);
         runner->audioSystem->vtable->onRoomChanged(runner->audioSystem, roomIndex);
+        RUNNER_LOG("initRoom audio onRoomChanged end: index=%ld", (long)roomIndex);
     }
 
     SavedRoomState* savedState = &runner->savedRoomStates[roomIndex];
@@ -1352,6 +1372,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     // Dynamic layers created via layer_create are appended to this array later.
     freeRuntimeLayersArray(&runner->runtimeLayers);
     uint32_t maxLayerId = 0;
+    RUNNER_LOG("initRoom runtime layers begin: count=%lu", (unsigned long)room->layerCount);
     repeat(room->layerCount, i) {
         RoomLayer* layerSource = &room->layers[i];
         RuntimeLayer runtimeLayer = {
@@ -1371,6 +1392,8 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     }
     // Watermark: ensure runtime-allocated IDs (layers + elements) stay above parsed IDs.
     if (maxLayerId >= runner->nextLayerId) runner->nextLayerId = maxLayerId + 1;
+    RUNNER_LOG("initRoom runtime layers end: runtimeCount=%lu nextLayerId=%lu",
+               (unsigned long)arrlenu(runner->runtimeLayers), (unsigned long)runner->nextLayerId);
 
     // Populate runtime sprite elements for Assets layers, so they can be queried and destroyed via layer_sprite_get_sprite/layer_sprite_destroy
     repeat(room->layerCount, i) {
@@ -1446,6 +1469,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     // (e.g. obj_mainchara reading obj_markerA.x), the target already exists.
 
     // Pass 1: Create all instances without firing events
+    RUNNER_LOG("initRoom pass1 create instances begin: count=%lu", (unsigned long)room->gameObjectCount);
     repeat(room->gameObjectCount, i) {
         RoomGameObject* roomObj = &room->gameObjects[i];
 
@@ -1454,12 +1478,16 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         if (isObjectDisabled(runner, roomObj->objectDefinition)) continue;
 
         Instance* inst = createAndInitInstance(runner, roomObj->instanceID, roomObj->objectDefinition, (GMLReal) roomObj->x, (GMLReal) roomObj->y);
+        RUNNER_LOG("initRoom pass1 instance: i=%ld instId=%ld obj=%ld pos=(%ld,%ld)",
+                   (long)i, (long)roomObj->instanceID, (long)roomObj->objectDefinition,
+                   (long)roomObj->x, (long)roomObj->y);
         inst->imageXscale = (float) roomObj->scaleX;
         inst->imageYscale = (float) roomObj->scaleY;
         inst->imageAngle = (float) roomObj->rotation;
         inst->imageSpeed = roomObj->imageSpeed;
         inst->imageIndex = (float) roomObj->imageIndex;
     }
+    RUNNER_LOG("initRoom pass1 create instances end: live=%ld", (long)arrlen(runner->instances));
 
     // In GMS2, instances get their depth from their room layer, not the object definition.
     // This must happen before firing Create events so scripts like scr_depth() read the layer depth.
@@ -1483,6 +1511,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     returnPersistentInstances(runner, carriedPersistent);
 
     // Pass 2: Fire events for newly created instances (in room definition order)
+    RUNNER_LOG("initRoom pass2 create events begin: count=%lu", (unsigned long)room->gameObjectCount);
     repeat(room->gameObjectCount, i) {
         RoomGameObject* roomObj = &room->gameObjects[i];
 
@@ -1494,14 +1523,27 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         if (inst->createEventFired) continue;
         inst->createEventFired = true;
 
+        const char* objName = (inst->objectIndex >= 0 && dataWin->objt.count > (uint32_t)inst->objectIndex)
+            ? dataWin->objt.objects[inst->objectIndex].name
+            : "(bad object)";
+        RUNNER_LOG("initRoom pass2 create begin: i=%ld instId=%ld obj=%ld/%s pre=%ld createCode=%ld",
+                   (long)i, (long)roomObj->instanceID, (long)inst->objectIndex,
+                   objName ? objName : "(null)", (long)roomObj->preCreateCode, (long)roomObj->creationCode);
         Runner_executeEvent(runner, inst, EVENT_PRECREATE, 0);
         executeCode(runner, inst, roomObj->preCreateCode);
         Runner_executeEvent(runner, inst, EVENT_CREATE, 0);
         executeCode(runner, inst, roomObj->creationCode);
+        RUNNER_LOG("initRoom pass2 create end: i=%ld instId=%ld obj=%ld/%s",
+                   (long)i, (long)roomObj->instanceID, (long)inst->objectIndex,
+                   objName ? objName : "(null)");
     }
+    RUNNER_LOG("initRoom pass2 create events end");
 
     // Run room creation code
     if (room->creationCodeId >= 0 && dataWin->code.count > (uint32_t) room->creationCodeId) {
+        RUNNER_LOG("initRoom room creation code begin: codeId=%ld name=%s",
+                   (long)room->creationCodeId,
+                   dataWin->code.entries[room->creationCodeId].name ? dataWin->code.entries[room->creationCodeId].name : "(null)");
         // Room creation code runs in global context, the native runner creates a fake/dummy instance for the "self"
         Instance* dummy = Instance_create(0, -1, 0, 0);
         runner->vmContext->currentInstance = dummy;
@@ -1509,6 +1551,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         RValue_free(&result);
         runner->vmContext->currentInstance = nullptr;
         Instance_free(dummy);
+        RUNNER_LOG("initRoom room creation code end: codeId=%ld", (long)room->creationCodeId);
     }
 
     // Mark this room as initialized for persistent room support
@@ -1989,6 +2032,8 @@ void Runner_initFirstRoom(Runner* runner) {
     require(dataWin->gen8.roomOrderCount > 0);
 
     int32_t firstRoomIndex = dataWin->gen8.roomOrder[0];
+    RUNNER_LOG("initFirstRoom begin: firstRoom=%ld globCount=%lu roomCount=%lu",
+               (long)firstRoomIndex, (unsigned long)dataWin->glob.count, (unsigned long)dataWin->room.count);
 
     // Run global init scripts with the global scope instance as "self"
     // In GMS 2.3+ (BC17), GLOB scripts store function declarations on "self" via Pop.v.v
@@ -2002,17 +2047,26 @@ void Runner_initFirstRoom(Runner* runner) {
         }
     }
     runner->vmContext->currentInstance = nullptr;
+    RUNNER_LOG("initFirstRoom global scripts end");
 
     // Initialize the first room
+    RUNNER_LOG("initFirstRoom initRoom begin: room=%ld", (long)firstRoomIndex);
     initRoom(runner, firstRoomIndex);
+    RUNNER_LOG("initFirstRoom initRoom end: room=%ld current=%ld", (long)firstRoomIndex, (long)runner->currentRoomIndex);
 
     // Fire Game Start for all instances
+    RUNNER_LOG("initFirstRoom GameStart begin: instances=%ld", (long)arrlen(runner->instances));
     Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_GAME_START);
     runner->gameStartFired = true;
+    RUNNER_LOG("initFirstRoom GameStart end");
 
     // Fire Room Start for all instances
+    RUNNER_LOG("initFirstRoom RoomStart begin");
     Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_START);
+    RUNNER_LOG("initFirstRoom RoomStart end");
+    RUNNER_LOG("initFirstRoom runtime prefetch begin");
     Runner_prefetchRuntimeSprites(runner);
+    RUNNER_LOG("initFirstRoom end");
 }
 
 // ===[ Collision Event Dispatch ]===

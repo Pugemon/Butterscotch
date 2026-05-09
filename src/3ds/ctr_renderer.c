@@ -23,11 +23,17 @@ extern char g_current_cache_dir[256];
 extern DVLB_s *g_vshaderDvlb;
 extern shaderProgram_s g_shaderProg;
 
+#ifdef LOG_ALL
+#define CTR_RENDER_LOG(...) do { fprintf(stderr, "[CTR_RENDER] " __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } while (0)
+#else
+#define CTR_RENDER_LOG(...) ((void)0)
+#endif
+
 #define BATCH_QUAD_CAP        2048
 #define BATCH_VERT_CAP        (BATCH_QUAD_CAP * 6)
-#define ATLAS_MAGIC           0x534C5441u  // 'ATLS'
-#define ATLAS_TILED_MAGIC     0x544C5441u  // 'ATLT'
-#define REPACK_MAGIC          0x4B415052u  // 'RPAK'
+#define ATLAS_MAGIC           0x534C5441u
+#define ATLAS_TILED_MAGIC     0x544C5441u
+#define REPACK_MAGIC          0x4B415052u
 #define REPACK_VERSION        2u
 #define CACHE_READY_FLAG      "cache_ready_v5.flag"
 #define REPACK_INDEX_FILE     "atlas.bin"
@@ -43,8 +49,6 @@ extern shaderProgram_s g_shaderProg;
 #define MAX_GC_TARGETS 64
 static C3D_RenderTarget *g_gc_targets[MAX_GC_TARGETS];
 static int g_gc_target_count = 0;
-
-// ---- Live theme + screen layout (driven by launcher) -----------------------
 
 static CtrGameScreen g_ctr_game_screen = CTR_GAME_SCREEN_TOP;
 static CtrBackdropMode g_ctr_backdrop_mode = CTR_BACKDROP_GRADIENT;
@@ -133,8 +137,6 @@ static void gc_add_target(C3D_RenderTarget *tgt) {
     }
 }
 
-// Utilities
-
 typedef struct {
     uint32_t magic;
     uint32_t w, h;
@@ -192,10 +194,56 @@ static int next_pow2(int x) {
     return x + 1;
 }
 
+static int clamp_int(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static void fit_aspect(int srcW, int srcH, int dstW, int dstH, int *outW, int *outH) {
+    if (srcW < 1) srcW = 1;
+    if (srcH < 1) srcH = 1;
+    if (dstW < 1) dstW = 1;
+    if (dstH < 1) dstH = 1;
+    float srcAspect = (float) srcW / (float) srcH;
+    float dstAspect = (float) dstW / (float) dstH;
+    int w, h;
+    if (srcAspect > dstAspect) {
+        w = dstW;
+        h = (int) floorf((float) dstW / srcAspect + 0.5f);
+    } else {
+        h = dstH;
+        w = (int) floorf((float) dstH * srcAspect + 0.5f);
+    }
+    *outW = clamp_int(w, 1, dstW);
+    *outH = clamp_int(h, 1, dstH);
+}
+
 static inline uint8_t clamp_u8(float a) {
     if (a <= 0.f) return 0;
     if (a >= 1.f) return 255;
     return (uint8_t) (a * 255.f);
+}
+
+static bool valid_vs_fvec_uniform(int loc, int vecCount) {
+    return loc >= 0 && vecCount > 0 && loc <= (96 - vecCount);
+}
+
+static int lookup_vs_projection_uniform(const char *owner) {
+    static const char *names[] = {"projection", "projection[0]", "uProjection"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        int loc = shaderInstanceGetUniformLocation(g_shaderProg.vertexShader, names[i]);
+        if (valid_vs_fvec_uniform(loc, 4)) {
+            CTR_RENDER_LOG("%s projection uniform '%s' -> c%d", owner, names[i], loc);
+            return loc;
+        }
+    }
+
+    fprintf(stderr,
+            "%s: projection uniform lookup failed; falling back to vertex shader c0\n",
+            owner ? owner : "CtrRenderer");
+    fflush(stderr);
+    return 0;
 }
 
 static void col2fv(uint32_t col, float a, float out[4]) {
@@ -215,8 +263,6 @@ static uint8_t *read_blob(FILE *fp, uint32_t off, uint32_t size) {
     }
     return buf;
 }
-
-// Texture tiling
 
 static inline uint32_t morton_pos(uint32_t x, uint32_t y) {
     uint32_t r = 0;
@@ -250,15 +296,6 @@ static void tile_rgba4(const uint16_t *linear, uint16_t *tiled,
         }
     }
 }
-
-// Texture cache / local repack.
-//
-// data.win is never modified. First launch creates:
-//   atlas.bin           - TPAG remap table (old TPAG index -> new page/x/y)
-//   page_<id>.atlas     - linear RGBA4444 atlas pages, ATLS header + pixels
-//
-// Repacked pages start at dw->txtr.count, so old source page ids remain usable
-// as a fallback for oversized TPAGs that cannot fit into a 512x512 atlas.
 
 static void page_meta_path(char *out, size_t outSize, int pageId) {
     snprintf(out, outSize, "%s/page_%d.atlas", g_current_cache_dir, pageId);
@@ -349,7 +386,6 @@ static bool write_one_page_legacy(int pageId, const uint8_t *pixels, int w, int 
             uint8_t g = src[x * 4 + 1];
             uint8_t b = src[x * 4 + 2];
             uint8_t a = src[x * 4 + 3];
-            //if (a == 0) { r = 0; g = 0; b = 0; }
             row[x] = pack_rgba4444(r, g, b, a);
         }
         if (fwrite(row, sizeof(uint16_t), (size_t) w, outF) != (size_t) w) ok = false;
@@ -762,7 +798,6 @@ static bool blit_repack_image(const RepackImage *img, const uint8_t *srcPixels,
             uint8_t g = src[x * 4 + 1];
             uint8_t b = src[x * 4 + 2];
             uint8_t a = src[x * 4 + 3];
-            //if (a == 0) { r = 0; g = 0; b = 0; }
             row[x] = pack_rgba4444(r, g, b, a);
         }
         long off = (long) sizeof(AtlasHeader) +
@@ -1119,42 +1154,22 @@ static bool apply_repack_index(CtrRenderer *ctx, DataWin *dw) {
     return ok;
 }
 
-// Vertex batching
-
-// Forward decls — these live further down the file.
 static void rebind_state(CtrRenderer *ctx);
 
 static void apply_projection(CtrRenderer *ctx, const C3D_Mtx *m);
 
 static void apply_blend(CtrRenderer *ctx, int mode);
 
-// C3D_FrameSplit invalidates BufInfo / AttrInfo / TexEnv / AlphaBlend / projection
-// uniforms — bind_target already knows this (calls rebind_state+apply_projection
-// after every split). Anywhere else that splits mid-frame must do the same, or
-// the next DrawArrays reads vertices from a stale buffer binding and renders
-// garbage (UNDERTALE undynebridge / DELTARUNE cooking minigame). Use this
-// helper instead of calling C3D_FrameSplit(0) directly.
 static void ctr_safe_frame_split(CtrRenderer *ctx) {
     C3D_FrameSplit(0);
-    // The cmdbuf was just drained — reset the counter so flush_batch's
-    // auto-split heuristic doesn't immediately split again on the very next
-    // draw.
     ctx->drawsSinceSplit = 0;
     if (ctx->inFrame && ctx->activeTarget) {
         rebind_state(ctx);
         apply_projection(ctx, &ctx->currentProjection);
-        // Re-emit C3D_AlphaBlend — citro3d state cache doesn't always restore it
-        // after a split, and stale blend state mangles font edges + UI overlays
-        // for the rest of the frame. Safe to call: batchVerts is 0 at this point
-        // (caller flushed before splitting), so the inner flush_batch is a no-op.
         apply_blend(ctx, ctx->currentBlendMode);
     }
 }
 
-// Auto-split threshold — picked empirically. The DELTARUNE Cyber Field /
-// fountain rooms hit ~1500-2000 draws per frame at peak; without periodic
-// splitting that exhausts the citro3d cmdbuf even with the 4× C3D_Init
-// allocation. 256 draws ≈ ~6 KB of cmdbuf, well under any per-segment limit.
 #define CTR_AUTO_SPLIT_DRAWS 256u
 
 static void flush_batch(CtrRenderer *ctx) {
@@ -1164,7 +1179,8 @@ static void flush_batch(CtrRenderer *ctx) {
         return;
     }
 
-    GSPGPU_FlushDataCache(ctx->vbuf + ctx->batchStart, ctx->batchVerts * sizeof(CtrVertex));
+    GSPGPU_FlushDataCache((uint8_t *) ctx->vbuf + (ctx->batchStart * sizeof(CtrVertex)),
+                          ctx->batchVerts * sizeof(CtrVertex));
 
     C3D_TexBind(0, ctx->batchTex);
     C3D_DrawArrays(GPU_TRIANGLES, ctx->batchStart, ctx->batchVerts);
@@ -1172,10 +1188,6 @@ static void flush_batch(CtrRenderer *ctx) {
     ctx->batchVerts = 0;
     ctx->batchTex = NULL;
     ctx->drawsSinceSplit++;
-
-    // Pre-emptive cmdbuf pressure release. Splits are cheap if we already
-    // flushed a batch (no half-built batch to lose), and they keep the
-    // accumulated GPU command list from blowing past citro3d's per-frame cap.
     if (ctx->drawsSinceSplit >= CTR_AUTO_SPLIT_DRAWS) {
         ctr_safe_frame_split(ctx);
         ctx->drawsSinceSplit = 0;
@@ -1264,8 +1276,8 @@ static void draw_letterbox_backdrop(CtrRenderer *ctx) {
     }
 
     float u0 = 0.f;
-    float u1 = (float) ctx->appLogicW / (float) ctx->appPotW;
-    float v0 = (float) (ctx->appPotH - ctx->appLogicH) / (float) ctx->appPotH;
+    float u1 = (float) ctx->appRenderW / (float) ctx->appPotW;
+    float v0 = (float) (ctx->appPotH - ctx->appRenderH) / (float) ctx->appPotH;
     float v1 = 1.f;
 
     float zoomU = (u1 - u0) * 0.15f;
@@ -1331,8 +1343,6 @@ static void draw_letterbox_backdrop(CtrRenderer *ctx) {
         }
     }
 }
-
-// Atlases
 
 static void free_old_pages(CtrRenderer *ctx) {
     if (linearSpaceFree() >= LINEAR_LOW) return;
@@ -1539,12 +1549,6 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
         page->lastFrame = g_frame;
         return true;
     }
-    // loadFailed used to stick until the next room change, which made one transient
-    // OOM during a peak (mid-frame eviction churn) permanently kill that atlas for
-    // the rest of the room. The Undyne bridge has many big tilesets and thrashes
-    // the eviction policy hardest, so a bridge atlas would lose its load forever
-    // and tiles from it would never render. Retry once per frame instead — if
-    // memory has freed up since (eviction, frame end), the second pass succeeds.
     if (page->loadFailed) {
         if (page->lastFrame == g_frame) return false;
         page->loadFailed = false;
@@ -1554,8 +1558,8 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
     free_old_source_pages(ctx);
 
     uint32_t tiledSize = page->dataSize;
-    uint32_t texW = page->potW > 0 ? (uint32_t)page->potW : CTR_TEXTURE_CACHE_ATLAS_SIZE;
-    uint32_t texH = page->potH > 0 ? (uint32_t)page->potH : CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    uint32_t texW = page->potW > 0 ? (uint32_t) page->potW : CTR_TEXTURE_CACHE_ATLAS_SIZE;
+    uint32_t texH = page->potH > 0 ? (uint32_t) page->potH : CTR_TEXTURE_CACHE_ATLAS_SIZE;
     if (tiledSize == 0) tiledSize = texW * texH * 2u;
     GPU_TEXCOLOR texFormat = GPU_RGBA4;
     if (page->format == CTR_TEXTURE_CACHE_FORMAT_LA4) texFormat = GPU_LA4;
@@ -1571,7 +1575,7 @@ static bool load_source_page_dyn(CtrRenderer *ctx, int pageId) {
     if (!texOk) {
         fprintf(stderr, "CTR: Failed to alloc C3D_Tex for atlas %d\n", pageId);
         page->loadFailed = true;
-        page->lastFrame = g_frame; // stamp so retry waits until next frame
+        page->lastFrame = g_frame;
         return false;
     }
     if (tiledSize > page->tex.size) tiledSize = (uint32_t) page->tex.size;
@@ -1641,13 +1645,11 @@ static void load_page_dyn(CtrRenderer *ctx, DataWin *dw, int32_t idx) {
     fclose(f);
 }
 
-// Citro3D pipeline
-
 static void setup_pipeline(CtrRenderer *ctx) {
     if (ctx->pipelineReady) return;
 
     C3D_BindProgram(&g_shaderProg);
-    ctx->uLoc_projection = shaderInstanceGetUniformLocation(g_shaderProg.vertexShader, "projection");
+    ctx->uLoc_projection = lookup_vs_projection_uniform("CtrRenderer");
 
     AttrInfo_Init(&ctx->attrInfo);
     AttrInfo_AddLoader(&ctx->attrInfo, 0, GPU_FLOAT, 3);
@@ -1689,6 +1691,13 @@ static void rebind_state(CtrRenderer *ctx) {
 
 static void apply_projection(CtrRenderer *ctx, const C3D_Mtx *m) {
     ctx->currentProjection = *m;
+    if (!valid_vs_fvec_uniform(ctx->uLoc_projection, 4)) {
+        fprintf(stderr,
+                "CtrRenderer: refusing projection upload to invalid vertex uniform c%d\n",
+                ctx->uLoc_projection);
+        fflush(stderr);
+        return;
+    }
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, ctx->uLoc_projection, m);
 }
 
@@ -1701,8 +1710,6 @@ static void make_ortho_top(C3D_Mtx *out, float w, float h) {
     Mtx_Identity(out);
     Mtx_OrthoTilt(out, 0.f, w, h, 0.f, -1.f, 1.f, true);
 }
-
-// Surfaces
 
 static CtrSurface *get_surface(CtrRenderer *ctx, int32_t surfaceId) {
     if (surfaceId < 0 || (uint32_t) surfaceId >= ctx->surfaceCount) return NULL;
@@ -1718,10 +1725,6 @@ static bool surface_alloc_storage(CtrSurface *surf, int width, int height) {
     if (!C3D_TexInitVRAM(&surf->tex, (u16) surf->potW, (u16) surf->potH, GPU_RGBA8)) {
         return false;
     }
-    // Default to NEAREST so pixel-art HUDs / mini-maps / damage popups drawn
-    // through surface_create stay crisp. GMS games that genuinely want a
-    // smooth surface (rare — usually post-processing in 2024+ projects) can
-    // toggle filter via gpu_set_texfilter, which our renderer honours.
     C3D_TexSetFilter(&surf->tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&surf->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
@@ -1745,8 +1748,6 @@ static void surface_release_storage(CtrRenderer *ctx, CtrSurface *surf) {
     }
 }
 
-// Application surface
-
 static void destroy_app_surface(CtrRenderer *ctx) {
     if (ctx->appTarget) {
         safe_delete_target(ctx, ctx->appTarget);
@@ -1765,6 +1766,10 @@ static void destroy_app_surface(CtrRenderer *ctx) {
         memset(&ctx->appTexRight, 0, sizeof(ctx->appTexRight));
     }
     ctx->appReady = false;
+    ctx->appScreenW = 0;
+    ctx->appScreenH = 0;
+    ctx->appRenderW = 0;
+    ctx->appRenderH = 0;
 }
 
 static void destroy_right_app_surface(CtrRenderer *ctx) {
@@ -1778,30 +1783,65 @@ static void destroy_right_app_surface(CtrRenderer *ctx) {
     }
 }
 
-static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
-    if (ctx->appReady && ctx->appLogicW == gw && ctx->appLogicH == gh) return true;
+static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh, int targetW, int targetH) {
+    int renderW = 1;
+    int renderH = 1;
+    fit_aspect(gw, gh, targetW, targetH, &renderW, &renderH);
+    if (ctx->appReady &&
+        ctx->appLogicW == gw && ctx->appLogicH == gh &&
+        ctx->appScreenW == targetW && ctx->appScreenH == targetH) {
+        return true;
+    }
 
     destroy_app_surface(ctx);
 
     ctx->appLogicW = gw;
     ctx->appLogicH = gh;
-    ctx->appPotW = next_pow2(gw);
-    ctx->appPotH = next_pow2(gh);
+    ctx->appScreenW = targetW;
+    ctx->appScreenH = targetH;
+    ctx->appRenderW = renderW;
+    ctx->appRenderH = renderH;
 
-    if (!C3D_TexInitVRAM(&ctx->appTex, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
-        if (!C3D_TexInit(&ctx->appTex, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
-            return false;
+    bool appTargetReady = false;
+    for (int divisor = 1; divisor <= 4 && !appTargetReady; divisor <<= 1) {
+        if (divisor > 1) {
+            ctx->appRenderW = clamp_int(renderW / divisor, 1, targetW);
+            ctx->appRenderH = clamp_int(renderH / divisor, 1, targetH);
         }
-    }
-    C3D_TexSetFilter(&ctx->appTex, GPU_LINEAR, GPU_LINEAR);
-    C3D_TexSetWrap(&ctx->appTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        ctx->appPotW = next_pow2(ctx->appRenderW);
+        ctx->appPotH = next_pow2(ctx->appRenderH);
+        CTR_RENDER_LOG("ensure app surface: logical=%dx%d screen=%dx%d render=%dx%d pot=%dx%d linearFree=%.2f MB",
+                       gw, gh, targetW, targetH, ctx->appRenderW, ctx->appRenderH, ctx->appPotW, ctx->appPotH,
+                       (double)linearSpaceFree() / (1024.0 * 1024.0));
 
-    ctx->appTarget = C3D_RenderTargetCreateFromTex(&ctx->appTex, GPU_TEXFACE_2D, 0, -1);
-    if (!ctx->appTarget) {
+        bool inVram = C3D_TexInitVRAM(&ctx->appTex, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8);
+        if (!inVram && !C3D_TexInit(&ctx->appTex, (u16) ctx->appPotW, (u16) ctx->appPotH, GPU_RGBA8)) {
+            fprintf(stderr,
+                    "CtrRenderer: failed to allocate app surface texture %dx%d; linear free %.2f MB\n",
+                    ctx->appPotW, ctx->appPotH,
+                    (double) linearSpaceFree() / (1024.0 * 1024.0));
+            continue;
+        }
+        CTR_RENDER_LOG("app surface allocated in %s", inVram ? "VRAM" : "linear heap");
+
+        C3D_TexSetFilter(&ctx->appTex, GPU_LINEAR, GPU_LINEAR);
+        C3D_TexSetWrap(&ctx->appTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+
+        ctx->appTarget = C3D_RenderTargetCreateFromTex(&ctx->appTex, GPU_TEXFACE_2D, 0, -1);
+        if (ctx->appTarget) {
+            appTargetReady = true;
+            break;
+        }
+
+        fprintf(stderr,
+                "CtrRenderer: failed to create app render target for %dx%d texture; retrying smaller\n",
+                ctx->appPotW, ctx->appPotH);
         C3D_TexDelete(&ctx->appTex);
         memset(&ctx->appTex, 0, sizeof(ctx->appTex));
-        return false;
+        ctx->appRenderW = 0;
+        ctx->appRenderH = 0;
     }
+    if (!appTargetReady) return false;
 
     C3D_RenderTargetClear(ctx->appTarget, C3D_CLEAR_ALL, 0x000000FF, 0);
 
@@ -1814,6 +1854,7 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
         if (ctx->appTargetRight) {
             C3D_RenderTargetClear(ctx->appTargetRight, C3D_CLEAR_ALL, 0x000000FF, 0);
             rightEyeReady = true;
+            CTR_RENDER_LOG("right-eye app surface ready");
         }
     }
     if (!rightEyeReady) {
@@ -1822,10 +1863,9 @@ static bool ensure_app_surface(CtrRenderer *ctx, int gw, int gh) {
     }
 
     ctx->appReady = true;
+    CTR_RENDER_LOG("app surface ready");
     return true;
 }
-
-// Target and viewport
 
 static void bind_target(CtrRenderer *ctx, C3D_RenderTarget *tgt) {
     if (!ctx->inFrame) return;
@@ -1838,15 +1878,43 @@ static void bind_target(CtrRenderer *ctx, C3D_RenderTarget *tgt) {
     apply_projection(ctx, &ctx->currentProjection);
 }
 
+static bool is_app_render_target(const CtrRenderer *ctx, const C3D_RenderTarget *tgt) {
+    return tgt && (tgt == ctx->appTarget || tgt == ctx->appTargetRight);
+}
+
 static void set_viewport_logical(CtrRenderer *ctx, C3D_RenderTarget *tgt,
                                  int x, int y, int w, int h) {
     if (!tgt) return;
+    int logicalX = x;
+    int logicalY = y;
+    int logicalW = w;
+    int logicalH = h;
+    if (is_app_render_target(ctx, tgt) &&
+        ctx->appLogicW > 0 && ctx->appLogicH > 0 &&
+        ctx->appRenderW > 0 && ctx->appRenderH > 0) {
+        float sx = (float) ctx->appRenderW / (float) ctx->appLogicW;
+        float sy = (float) ctx->appRenderH / (float) ctx->appLogicH;
+        int x0 = (int) floorf((float) x * sx);
+        int y0 = (int) floorf((float) y * sy);
+        int x1 = (int) ceilf((float) (x + w) * sx);
+        int y1 = (int) ceilf((float) (y + h) * sy);
+        x = x0;
+        y = y0;
+        w = x1 - x0;
+        h = y1 - y0;
+    }
     int fbW = tgt->frameBuf.width;
     int fbH = tgt->frameBuf.height;
     if (w < 1) w = 1;
     if (h < 1) h = 1;
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
     if (x >= fbW) x = fbW > 0 ? fbW - 1 : 0;
     if (y >= fbH) y = fbH > 0 ? fbH - 1 : 0;
     if (w < 1) w = 1;
@@ -1859,18 +1927,16 @@ static void set_viewport_logical(CtrRenderer *ctx, C3D_RenderTarget *tgt,
     if (vpY < 0) vpY = 0;
     C3D_SetViewport((u32) x, (u32) vpY, (u32) w, (u32) h);
     C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32) x, (u32) vpY, (u32) (x + w), (u32) (vpY + h));
-    ctx->currentViewport[0] = x;
-    ctx->currentViewport[1] = y;
-    ctx->currentViewport[2] = w;
-    ctx->currentViewport[3] = h;
+    ctx->currentViewport[0] = logicalX;
+    ctx->currentViewport[1] = logicalY;
+    ctx->currentViewport[2] = logicalW;
+    ctx->currentViewport[3] = logicalH;
 }
 
 static void disable_scissor(CtrRenderer *ctx) {
     (void) ctx;
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 }
-
-// Blend state
 
 static void apply_blend(CtrRenderer *ctx, int mode) {
     flush_batch(ctx);
@@ -1894,38 +1960,56 @@ static void apply_blend(CtrRenderer *ctx, int mode) {
     }
 }
 
-// Frame lifecycle
-
 static void ctr_init(Renderer *ren, DataWin *dw) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
     ren->dataWin = dw;
 
     setup_pipeline(ctx);
+    CTR_RENDER_LOG("init begin: dw=%p tpag=%lu txtr=%lu linearFree=%.2f MB",
+                   (void*)dw,
+                   (unsigned long)dw->tpag.count,
+                   (unsigned long)dw->txtr.count,
+                   (double)linearSpaceFree() / (1024.0 * 1024.0));
 
     if (!ctx->topTarget) {
         ctx->topTarget = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH16);
         if (ctx->topTarget) {
             C3D_RenderTargetSetOutput(ctx->topTarget, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+        } else {
+            fprintf(stderr, "CtrRenderer: failed to create top render target\n");
         }
     }
     if (!ctx->topTargetRight) {
         ctx->topTargetRight = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH16);
         if (ctx->topTargetRight) {
             C3D_RenderTargetSetOutput(ctx->topTargetRight, GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
+        } else {
+            CTR_RENDER_LOG("right render target unavailable");
         }
     }
     if (!ctx->bottomTarget) {
         ctx->bottomTarget = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH16);
         if (ctx->bottomTarget) {
             C3D_RenderTargetSetOutput(ctx->bottomTarget, GFX_BOTTOM, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+        } else {
+            fprintf(stderr, "CtrRenderer: failed to create bottom render target\n");
         }
     }
+    CTR_RENDER_LOG("targets: top=%p right=%p bottom=%p",
+                   (void*)ctx->topTarget, (void*)ctx->topTargetRight, (void*)ctx->bottomTarget);
 
     ctx->originalTpagCount = dw->tpag.count;
     ctx->originalSpriteCount = dw->sprt.count;
 
     CtrTextureCache_prepare(dw);
-    CtrTextureCache_apply(ctx, dw);
+    bool cacheApplied = CtrTextureCache_apply(ctx, dw);
+    fprintf(stderr,
+            "CTR cache: apply %s (%lu TPAGs, %lu atlases, %lu segments; TXTR parsed=%lu)\n",
+            cacheApplied ? "ok" : "failed",
+            (unsigned long) ctx->cacheItemCount,
+            (unsigned long) ctx->sourcePageCount,
+            (unsigned long) ctx->cacheSegmentCount,
+            (unsigned long) dw->txtr.count);
 
     char path[256];
     CtrTextureCache_indexPath(path, sizeof(path));
@@ -1938,9 +2022,6 @@ static void ctr_init(Renderer *ren, DataWin *dw) {
     ctx->pages = calloc(ctx->pageCount, sizeof(CtrPage));
 
     if (!ctx->vbuf) {
-        // 4x batch capacity. With small vbuf, many tile-heavy rooms (bridge corridor
-        // before/with Undyne) trigger constant FrameSplits which both eat cmdbuf
-        // and stall the GPU. Larger vbuf = fewer splits per frame.
         ctx->vbufCap = BATCH_VERT_CAP * 4;
         ctx->vbuf = linearAlloc(ctx->vbufCap * sizeof(CtrVertex));
         ctx->vbufHead = 0;
@@ -2043,10 +2124,16 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
     ctx->gameW = gw;
     ctx->gameH = gh;
 
-    if (!ensure_app_surface(ctx, gw, gh)) return;
+    if (!ensure_app_surface(ctx, gw, gh, ww, wh)) {
+        fprintf(stderr, "CtrRenderer: beginFrame aborted because app surface is not ready\n");
+        return;
+    }
 
     if (!ctx->inFrame) {
-        if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) return;
+        if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) {
+            fprintf(stderr, "CtrRenderer: C3D_FrameBegin failed\n");
+            return;
+        }
         ctx->inFrame = true;
         ctx->vbufHead = 0;
         ctx->batchStart = 0;
@@ -2072,16 +2159,18 @@ static void ctr_begin_frame(Renderer *ren, int32_t gw, int32_t gh, int32_t ww, i
 }
 
 static void ctr_end_frame(Renderer *ren) {
-    CtrRenderer *ctx = (CtrRenderer *)ren;
+    CtrRenderer *ctx = (CtrRenderer *) ren;
     flush_batch(ctx);
 
     if (!ctx->inFrame) return;
 
     if (ctx->appReady) {
         C3D_RenderTarget *primary = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM)
-                                        ? ctx->bottomTarget : ctx->topTarget;
+                                        ? ctx->bottomTarget
+                                        : ctx->topTarget;
         C3D_RenderTarget *secondary = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM)
-                                          ? ctx->topTarget : ctx->bottomTarget;
+                                          ? ctx->topTarget
+                                          : ctx->bottomTarget;
         int primaryW = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM) ? 320 : 400;
         int primaryH = 240;
         int secondaryW = (g_ctr_game_screen == CTR_GAME_SCREEN_BOTTOM) ? 400 : 320;
@@ -2095,11 +2184,11 @@ static void ctr_end_frame(Renderer *ren) {
             rebind_state(ctx);
 
             C3D_RenderTargetClear(secondary, C3D_CLEAR_ALL, 0x050711FF, 0);
-            C3D_SetViewport(0, 0, 240, (u32)secondaryW);
+            C3D_SetViewport(0, 0, 240, (u32) secondaryW);
             disable_scissor(ctx);
 
             C3D_Mtx projS;
-            make_ortho_top(&projS, (float)secondaryW, (float)primaryH);
+            make_ortho_top(&projS, (float) secondaryW, (float) primaryH);
             apply_projection(ctx, &projS);
 
             int savedWinW = ctx->winW;
@@ -2117,7 +2206,7 @@ static void ctr_end_frame(Renderer *ren) {
             ctx->activeTarget = primary;
             rebind_state(ctx);
             C3D_RenderTargetClear(primary, C3D_CLEAR_ALL, 0x050711FF, 0);
-            C3D_SetViewport(0, 0, 240, (u32)primaryW);
+            C3D_SetViewport(0, 0, 240, (u32) primaryW);
             disable_scissor(ctx);
 
             int savedWinW = ctx->winW;
@@ -2126,51 +2215,50 @@ static void ctr_end_frame(Renderer *ren) {
             ctx->winH = primaryH;
 
             C3D_Mtx proj;
-            make_ortho_top(&proj, (float)ctx->winW, (float)ctx->winH);
+            make_ortho_top(&proj, (float) ctx->winW, (float) ctx->winH);
             apply_projection(ctx, &proj);
 
             draw_letterbox_backdrop(ctx);
 
             int drawW = ctx->winW, drawH = ctx->winH;
             if (ctx->gameH > 0 && ctx->winH > 0) {
-                float gameAspect = (float)ctx->gameW / (float)ctx->gameH;
-                float screenAspect = (float)ctx->winW / (float)ctx->winH;
+                float gameAspect = (float) ctx->gameW / (float) ctx->gameH;
+                float screenAspect = (float) ctx->winW / (float) ctx->winH;
 
-                if (g_ctr_backdrop_mode == CTR_BACKDROP_STRETCH || fabsf(gameAspect - screenAspect) < 0.15f) {
+                if (g_ctr_backdrop_mode == CTR_BACKDROP_STRETCH) {
                     drawW = ctx->winW;
                     drawH = ctx->winH;
                 } else if (gameAspect < screenAspect) {
-                    drawW = (int)((float)ctx->winH * gameAspect);
+                    drawW = (int) ((float) ctx->winH * gameAspect);
                     drawH = ctx->winH;
                 } else {
                     drawW = ctx->winW;
-                    drawH = (int)((float)ctx->winW / gameAspect);
+                    drawH = (int) ((float) ctx->winW / gameAspect);
                 }
             }
 
             int drawX = (ctx->winW - drawW) / 2;
             int drawY = (ctx->winH - drawH) / 2;
 
-            float u1 = (float)ctx->appLogicW / (float)ctx->appPotW;
-            float v0 = (float)(ctx->appPotH - ctx->appLogicH) / (float)ctx->appPotH;
+            float u1 = (float) ctx->appRenderW / (float) ctx->appPotW;
+            float v0 = (float) (ctx->appPotH - ctx->appRenderH) / (float) ctx->appPotH;
             float v1 = 1.f;
             float white[4] = {1.f, 1.f, 1.f, 1.f};
 
             push_quad(ctx, &ctx->appTex,
-                      (float)drawX,           (float)drawY,
-                      (float)(drawX + drawW), (float)drawY,
-                      (float)(drawX + drawW), (float)(drawY + drawH),
-                      (float)drawX,           (float)(drawY + drawH),
+                      (float) drawX, (float) drawY,
+                      (float) (drawX + drawW), (float) drawY,
+                      (float) (drawX + drawW), (float) (drawY + drawH),
+                      (float) drawX, (float) (drawY + drawH),
                       0.f, v1, u1, v0, white);
             flush_batch(ctx);
 
             if (ctx->depthSlider > 0.01f && primary == ctx->topTarget && ctx->topTargetRight != NULL) {
-
                 C3D_FrameDrawOn(ctx->topTargetRight);
                 ctx->activeTarget = ctx->topTargetRight;
                 rebind_state(ctx);
                 C3D_RenderTargetClear(ctx->topTargetRight, C3D_CLEAR_ALL, 0x050711FF, 0);
-                C3D_SetViewport(0, 0, 240, (u32)primaryW);
+                C3D_SetViewport(0, 0, 240, (u32) primaryW);
                 disable_scissor(ctx);
 
                 apply_projection(ctx, &proj);
@@ -2178,10 +2266,10 @@ static void ctr_end_frame(Renderer *ren) {
                 draw_letterbox_backdrop(ctx);
 
                 push_quad(ctx, &ctx->appTexRight,
-                          (float)drawX,           (float)drawY,
-                          (float)(drawX + drawW), (float)drawY,
-                          (float)(drawX + drawW), (float)(drawY + drawH),
-                          (float)drawX,           (float)(drawY + drawH),
+                          (float) drawX, (float) drawY,
+                          (float) (drawX + drawW), (float) drawY,
+                          (float) (drawX + drawW), (float) (drawY + drawH),
+                          (float) drawX, (float) (drawY + drawH),
                           0.f, v1, u1, v0, white);
                 flush_batch(ctx);
             }
@@ -2202,16 +2290,14 @@ static void ctr_end_frame(Renderer *ren) {
 
 static void ctr_flush(Renderer *ren) { flush_batch((CtrRenderer *) ren); }
 
-// Views and GUI
-
 static void ctr_begin_view(Renderer *ren, int32_t vx, int32_t vy, int32_t vw, int32_t vh,
                            int32_t px, int32_t py, int32_t pw, int32_t ph, float angle) {
-    CtrRenderer *ctx = (CtrRenderer *)ren;
+    CtrRenderer *ctx = (CtrRenderer *) ren;
     if (!ctx || !ctx->inFrame || !ctx->appReady) return;
     flush_batch(ctx);
     ctx->isGUI = false;
 
-    C3D_RenderTarget* canvas = (ctx->currentEye == 1) ? ctx->appTargetRight : ctx->appTarget;
+    C3D_RenderTarget *canvas = (ctx->currentEye == 1) ? ctx->appTargetRight : ctx->appTarget;
     if (!canvas) canvas = ctx->appTarget;
     if (!canvas) return;
     if (vw < 1) vw = ctx->gameW > 0 ? ctx->gameW : 1;
@@ -2238,9 +2324,6 @@ static void ctr_begin_view(Renderer *ren, int32_t vx, int32_t vy, int32_t vw, in
         proj = res;
     }
     apply_projection(ctx, &proj);
-
-    // Enable culling against the view rect in room coords. Disable it for rotated
-    // views because an axis-aligned cull rect does not match a rotated frustum.
     if (angle == 0.f) {
         ctx->cullEnabled = true;
         ctx->cullL = (float) vx;
@@ -2295,10 +2378,6 @@ static void ctr_end_gui(Renderer *ren) {
     ctx->cullEnabled = false;
 }
 
-// View-bounds culling. Returns true if the quad's bbox is fully outside the
-// active cull rect (= safe to skip the draw entirely). Cheap: 4 fminf/fmaxf +
-// 4 compares. Bridge corridor + Hotland have rooms ~5000+ tiles; the renderer
-// previously emitted them all every frame, even though only ~400 fit on screen.
 static inline bool quad_culled(const CtrRenderer *ctx,
                                float x0, float y0, float x1, float y1,
                                float x2, float y2, float x3, float y3) {
@@ -2313,8 +2392,6 @@ static inline bool quad_culled(const CtrRenderer *ctx,
     if (maxY <= ctx->cullT) return true;
     return false;
 }
-
-// Region drawing
 
 static bool cache_item_available(CtrRenderer *ctx, uint32_t id) {
     return ctx->cacheItems &&
@@ -2388,10 +2465,6 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
                         float x2, float y2, float x3, float y3,
                         const float col[4]) {
     if (id >= ctx->pageCount) return;
-    // View-bounds culling. Single choke point: every sprite, tile, glyph, and
-    // tilemap cell goes through here. If the destination quad is entirely
-    // outside the active view/GUI rect, skip the source-page load + chunk
-    // intersection + push_quad entirely.
     if (quad_culled(ctx, x0, y0, x1, y1, x2, y2, x3, y3)) return;
     if (id < ctx->originalTpagCount) {
         draw_cached_region(ctx, id, sx, sy, sw, sh,
@@ -2485,8 +2558,6 @@ static void draw_region(CtrRenderer *ctx, uint32_t id,
     }
 }
 
-// Sprites
-
 static void ctr_draw_sprite(Renderer *ren, int32_t id, float x, float y,
                             float ox, float oy, float sx, float sy, float ang,
                             uint32_t color, float a) {
@@ -2563,14 +2634,8 @@ static void ctr_draw_sprite_pos(Renderer *ren, int32_t id,
                 x1, y1, x2, y2, x3, y3, x4, y4, c);
 }
 
-// Tiles
-
 static void ctr_draw_tile(Renderer *ren, RoomTile *tile, float ox, float oy) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
-
-    // Early cull: skip the TPAG resolve, clipping math, and the draw_region call
-    // chain entirely if the tile is off-camera. Big rooms (Undyne bridge, hotland)
-    // emit thousands of tiles per frame and only a few hundred fit on screen.
     {
         float dxA = (float) tile->x + ox;
         float dyA = (float) tile->y + oy;
@@ -2630,10 +2695,6 @@ static void ctr_draw_tiled(Renderer *ren, int32_t id, float ox, float oy,
 
     float eX = tx ? rw : sX + tw;
     float eY = ty ? rh : sY + th;
-
-    // Clamp the iteration window to the active cull rect so tiled-room-sized
-    // backgrounds (Hotland mountain BGs etc.) don't iterate the entire room.
-    // Per-quad cull in draw_region still catches partial-overlap edge cases.
     if (ctx->cullEnabled) {
         float minX = ctx->cullL - tw;
         if (sX < minX) {
@@ -2657,8 +2718,6 @@ static void ctr_draw_tiled(Renderer *ren, int32_t id, float ox, float oy,
         }
     }
 }
-
-// Shapes
 
 static void ctr_draw_rect_c(Renderer *ren, float x1, float y1, float x2, float y2,
                             uint32_t c1, uint32_t c2, uint32_t c3, uint32_t c4,
@@ -2860,8 +2919,6 @@ static void ctr_draw_rr(Renderer *ren, float x1, float y1, float x2, float y2,
     }
 }
 
-// Text
-
 static void ctr_draw_text(Renderer *ren, const char *txt, float x, float y,
                           float sx, float sy, float ang) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
@@ -2958,8 +3015,6 @@ static void ctr_draw_text_c(Renderer *ren, const char *t, float x, float y,
     ctr_draw_text(ren, t, x, y, xs, ys, ang);
     ren->drawAlpha = old;
 }
-
-// Room cache
 
 static void mark_res(CtrRenderer *ctx, int id) {
     if (id < 0 || (uint32_t) id >= ctx->pageCount) return;
@@ -3162,8 +3217,6 @@ static void ctr_on_room(Renderer *ren, int32_t rm) {
     load_marked_room_pages(ctx, dw);
 }
 
-// Surface API
-
 static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) {
     CtrRenderer *ctx = (CtrRenderer *) ren;
     if (width <= 0 || height <= 0) return -1;
@@ -3193,8 +3246,6 @@ static int32_t ctr_create_surface(Renderer *ren, int32_t width, int32_t height) 
         C3D_RenderTargetClear(surf->target, C3D_CLEAR_ALL, 0x00000000, 0);
         if (oldTgt) {
             C3D_FrameDrawOn(oldTgt);
-            // Re-bind shader/buffer state for the restored target so subsequent
-            // draws don't use stale BufInfo/AttrInfo from before the split.
             rebind_state(ctx);
             apply_projection(ctx, &ctx->currentProjection);
             apply_blend(ctx, ctx->currentBlendMode);
@@ -3307,13 +3358,15 @@ static void ctr_draw_surface(Renderer *ren, int32_t surfaceId,
     if (c[3] <= 0.f) return;
 
     C3D_Tex *tex;
-    int drawW, drawH, potW, potH;
+    int drawW, drawH, sampleW, sampleH, potW, potH;
     C3D_RenderTarget *sourceTarget = NULL;
     if (surfaceId == -1) {
         if (!ctx->appReady) return;
         tex = &ctx->appTex;
         drawW = ctx->appLogicW;
         drawH = ctx->appLogicH;
+        sampleW = ctx->appRenderW;
+        sampleH = ctx->appRenderH;
         potW = ctx->appPotW;
         potH = ctx->appPotH;
         sourceTarget = ctx->appTarget;
@@ -3323,6 +3376,8 @@ static void ctr_draw_surface(Renderer *ren, int32_t surfaceId,
         tex = &surf->tex;
         drawW = surf->width;
         drawH = surf->height;
+        sampleW = surf->width;
+        sampleH = surf->height;
         potW = surf->potW;
         potH = surf->potH;
         sourceTarget = surf->target;
@@ -3330,8 +3385,8 @@ static void ctr_draw_surface(Renderer *ren, int32_t surfaceId,
     if (sourceTarget && sourceTarget == ctx->activeTarget) return;
 
     float w = drawW * xscale, h = drawH * yscale;
-    float u1 = (float) drawW / (float) potW;
-    float v0 = (float) (potH - drawH) / (float) potH;
+    float u1 = (float) sampleW / (float) potW;
+    float v0 = (float) (potH - sampleH) / (float) potH;
     float v1 = 1.f;
 
     float x0 = 0, y0 = 0;
@@ -3363,10 +3418,6 @@ static void ctr_draw_surface(Renderer *ren, int32_t surfaceId,
         return;
 
     flush_batch(ctx);
-    // Surface texture must be fully resolved before sampling; FrameSplit forces a
-    // GPU sync point. Use the safe variant — without rebind, the queued push_quad
-    // is later drawn with stale BufInfo/AttrInfo, which manifests as missing
-    // tiles in tile-heavy rooms (e.g. the Undyne bridge).
     ctr_safe_frame_split(ctx);
     push_quad(ctx, tex,
               x + x0, y + y0, x + x1, y + y1,
@@ -3381,13 +3432,9 @@ static void ctr_clear_target(Renderer *ren, uint32_t color, float alpha) {
 
     uint8_t r = BGR_R(color), g = BGR_G(color), b = BGR_B(color), aa = clamp_u8(alpha);
     uint32_t rgba = ((uint32_t) r << 24) | ((uint32_t) g << 16) | ((uint32_t) b << 8) | aa;
-    // Use the safe variant: a bare C3D_FrameSplit leaves BufInfo/AttrInfo stale,
-    // and the next batched draw on this target then reads garbage vertices.
     ctr_safe_frame_split(ctx);
     C3D_RenderTargetClear(ctx->activeTarget, C3D_CLEAR_ALL, rgba, 0);
 }
-
-// Sprite capture
 
 static uint32_t findOrAllocTpagSlot(CtrRenderer *ctx) {
     DataWin *dw = ctx->base.dataWin;
@@ -3397,9 +3444,6 @@ static uint32_t findOrAllocTpagSlot(CtrRenderer *ctx) {
     uint32_t newIndex = dw->tpag.count;
     uint32_t oldCount = dw->tpag.count;
     dw->tpag.count++;
-    // tpag.items is bigMalloc'd in parseTPAG (linear arena on 3DS) — must
-    // grow with bigRealloc, not safeRealloc, or we'd be feeding a linear
-    // pointer into the heap allocator and crashing in malloc internals.
     dw->tpag.items = bigRealloc(dw->tpag.items,
                                 (size_t)oldCount * sizeof(TexturePageItem),
                                 (size_t)dw->tpag.count * sizeof(TexturePageItem));
@@ -3426,12 +3470,18 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId,
 
     C3D_Tex *srcTex;
     int sourcePotW, sourcePotH;
+    float sourceScaleX = 1.f;
+    float sourceScaleY = 1.f;
 
     if (surfaceId == -1) {
         if (!ctx->appReady) return -1;
         srcTex = &ctx->appTex;
         sourcePotW = ctx->appPotW;
         sourcePotH = ctx->appPotH;
+        if (ctx->appLogicW > 0 && ctx->appLogicH > 0) {
+            sourceScaleX = (float) ctx->appRenderW / (float) ctx->appLogicW;
+            sourceScaleY = (float) ctx->appRenderH / (float) ctx->appLogicH;
+        }
     } else {
         CtrSurface *surf = get_surface(ctx, surfaceId);
         if (!surf) return -1;
@@ -3469,10 +3519,16 @@ static int32_t ctr_create_surf_ex(Renderer *ren, int32_t surfaceId,
         Mtx_Ortho(&proj, 0.f, (float) w, (float) h, 0.f, -1.f, 1.f, true);
         apply_projection(ctx, &proj);
 
-        float u0 = (float) x / (float) sourcePotW;
-        float u1 = (float) (x + w) / (float) sourcePotW;
-        float vTop = (float) (sourcePotH - y) / (float) sourcePotH;
-        float vBot = (float) (sourcePotH - (y + h)) / (float) sourcePotH;
+        float srcX0 = (float) x * sourceScaleX;
+        float srcY0 = (float) y * sourceScaleY;
+        float srcX1 = (float) (x + w) * sourceScaleX;
+        float srcY1 = (float) (y + h) * sourceScaleY;
+        float u0 = srcX0 / (float) sourcePotW;
+        float u1 = srcX1 / (float) sourcePotW;
+        float vTop = (float) sourcePotH - srcY0;
+        float vBot = (float) sourcePotH - srcY1;
+        vTop /= (float) sourcePotH;
+        vBot /= (float) sourcePotH;
 
         float white[4] = {1.f, 1.f, 1.f, 1.f};
 
@@ -3584,8 +3640,6 @@ static void ctr_del_sprite(Renderer *ren, int32_t spriteIndex) {
     sprite->name = keep;
 }
 
-// Misc
-
 static void ctr_gpu_blend_mode(Renderer *ren, int32_t mode) {
     apply_blend((CtrRenderer *) ren, mode);
 }
@@ -3666,21 +3720,14 @@ static void ctr_set_3d_depth(Renderer *ren, float depth) {
         ctx->currentShiftX = 0.0f;
         return;
     }
-
-    // GameMaker depths are large; scale them down to a comfortable stereo offset.
     float d = ctx->current3DDepth / 3000.0f;
 
     if (d > 4.0f) d = 4.0f;
     if (d < -4.0f) d = -4.0f;
-
-    // Mapped horizontal pixel parallax intensity calculation
     float separation = d * 2.0f * ctx->depthSlider;
 
     ctx->currentShiftX = (ctx->currentEye == 0) ? -separation : separation;
 }
-
-
-// Renderer vtable
 
 static RendererVtable vtable = {
     .init = ctr_init, .destroy = ctr_destroy,

@@ -71,12 +71,24 @@ static void cache_progress(uint32_t pageIndex, uint32_t pageCount, const char *p
     (void)user;
     if (pageCount == 0) return;
     uint32_t pct = (pageIndex * 100u) / pageCount;
+    static const char *lastLabel = NULL;
+    static uint32_t lastPct = 101u;
+    static uint32_t lastPage = 0;
+    bool done = pageIndex >= pageCount;
+    if (g_currentLabel != lastLabel) {
+        lastLabel = g_currentLabel;
+        lastPct = 101u;
+        lastPage = 0;
+    }
+    if (!done && pct == lastPct && pageIndex < lastPage + 32u) return;
+    lastPct = pct;
+    lastPage = pageIndex;
     fprintf(stderr, "\r[%s] cache: %3u%% (%lu/%lu)",
             g_currentLabel,
             pct,
             (unsigned long)pageIndex,
             (unsigned long)pageCount);
-    if (pageIndex >= pageCount) fputc('\n', stderr);
+    if (done) fputc('\n', stderr);
     fflush(stderr);
 }
 

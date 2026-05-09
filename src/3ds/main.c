@@ -19,20 +19,26 @@
 #include "ctr_audio_system.h"
 #include "render2d_shader_shbin.h"
 #include "launcher.h"
+#include "stb_ds.h"
 
 //u32 __ctru_heap_size        = 35 * 1024 * 1024;
 u32 __ctru_linear_heap_size = 48 * 1024 * 1024;
-u32 __stacksize__           = 64 * 1024;
+u32 __stacksize__ = 64 * 1024;
 
 #define BASE_DIR  "sdmc:/3ds/butterscotch"
 char g_current_data_path[256];
 char g_current_cache_dir[256];
+#ifdef LOG_ALL
+#define CTR_MAIN_LOG(...) do { fprintf(stderr, "[CTR_MAIN] " __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } while (0)
+#else
+#define CTR_MAIN_LOG(...) ((void)0)
+#endif
 
-DVLB_s          *g_vshaderDvlb = NULL;
-shaderProgram_s  g_shaderProg;
+DVLB_s *g_vshaderDvlb = NULL;
+shaderProgram_s g_shaderProg;
 
-char  g_next_game_path[256] = "";
-bool  g_game_change_requested = false;
+char g_next_game_path[256] = "";
+bool g_game_change_requested = false;
 
 static void setup_logging(void) {
     freopen("sdmc:/3ds/butter_out.txt", "w", stdout);
@@ -44,8 +50,8 @@ static void setup_logging(void) {
 static void printMemoryStats(void) {
     struct mallinfo mi = mallinfo();
     u32 linearFree = linearSpaceFree();
-    float heapUsedMB   = (float)mi.uordblks / 1024.0f / 1024.0f;
-    float linearFreeMB = (float)linearFree  / 1024.0f / 1024.0f;
+    float heapUsedMB = (float) mi.uordblks / 1024.0f / 1024.0f;
+    float linearFreeMB = (float) linearFree / 1024.0f / 1024.0f;
     printf("[MEMORY] Heap Used: %.2f MB | LINEAR RAM FREE: %.2f MB\n", heapUsedMB, linearFreeMB);
 }
 
@@ -57,13 +63,13 @@ static void logPerfSample(int *frames, u64 *windowStart) {
     u64 now = osGetTime();
     u64 elapsed = now - *windowStart;
     if (elapsed >= 1000) {
-        float fps = (float)(*frames) * 1000.0f / (float)elapsed;
+        float fps = (float) (*frames) * 1000.0f / (float) elapsed;
         struct mallinfo mi = mallinfo();
         u32 linearFree = linearSpaceFree();
         printf("[PERF] FPS=%.1f  Heap=%.2fMB  LinearFree=%.2fMB\n",
                fps,
-               (float)mi.uordblks / 1024.0f / 1024.0f,
-               (float)linearFree / 1024.0f / 1024.0f);
+               (float) mi.uordblks / 1024.0f / 1024.0f,
+               (float) linearFree / 1024.0f / 1024.0f);
         *frames = 0;
         *windowStart = now;
     }
@@ -71,30 +77,30 @@ static void logPerfSample(int *frames, u64 *windowStart) {
 
 typedef struct {
     LauncherGfx *gfx;
-    const char  *gameName;
-    float        basePercent;
-    float        spanPercent;
+    const char *gameName;
+    float basePercent;
+    float spanPercent;
 } LoadingScreenState;
 
 static void cache_progress_cb(uint32_t pageIndex, uint32_t pageCount, const char *pagePath, void *user) {
-    (void)pagePath;
-    LoadingScreenState *state = (LoadingScreenState *)user;
+    (void) pagePath;
+    LoadingScreenState *state = (LoadingScreenState *) user;
     if (!state || !state->gfx) return;
-    float cachePct = pageCount ? ((float)pageIndex / (float)pageCount) * 100.f : 100.f;
-    float overall  = state->basePercent + (cachePct / 100.f) * state->spanPercent;
-    int page = pageCount ? (int)pageIndex + 1 : 0;
-    if (page > (int)pageCount) page = (int)pageCount;
+    float cachePct = pageCount ? ((float) pageIndex / (float) pageCount) * 100.f : 100.f;
+    float overall = state->basePercent + (cachePct / 100.f) * state->spanPercent;
+    int page = pageCount ? (int) pageIndex + 1 : 0;
+    if (page > (int) pageCount) page = (int) pageCount;
     launcher_render_loading(state->gfx, state->gameName, "BUILDING TEXTURE CACHE",
-                            page, (int)pageCount, overall);
+                            page, (int) pageCount, overall);
 }
 
 static void datawin_progress_cb(const char *chunkName, int chunkIndex, int totalChunks,
                                 DataWin *dw, void *user) {
-    (void)dw;
-    LoadingScreenState *state = (LoadingScreenState *)user;
+    (void) dw;
+    LoadingScreenState *state = (LoadingScreenState *) user;
     if (!state || !state->gfx) return;
-    float parsePct = (totalChunks > 0) ? ((float)chunkIndex / (float)totalChunks) * 100.f : 100.f;
-    float overall  = state->basePercent + (parsePct / 100.f) * state->spanPercent;
+    float parsePct = (totalChunks > 0) ? ((float) chunkIndex / (float) totalChunks) * 100.f : 100.f;
+    float overall = state->basePercent + (parsePct / 100.f) * state->spanPercent;
     char stage[40];
     snprintf(stage, sizeof(stage), "PARSING %.4s", chunkName ? chunkName : "DATA");
     launcher_render_loading(state->gfx, state->gameName, stage,
@@ -106,7 +112,8 @@ static bool atlas_index_is_current(const char *path) {
 }
 
 int main(int argc, char **argv) {
-    (void)argc; (void)argv;
+    (void) argc;
+    (void) argv;
 
     setup_logging();
     printf("\n\n========================================\n");
@@ -134,7 +141,7 @@ int main(int argc, char **argv) {
     printMemoryStats();
 
     printf("[BOOT] Parsing DVLB shader...\n");
-    g_vshaderDvlb = DVLB_ParseFile((u32 *)render2d_shader_shbin, render2d_shader_shbin_size);
+    g_vshaderDvlb = DVLB_ParseFile((u32 *) render2d_shader_shbin, render2d_shader_shbin_size);
     if (!g_vshaderDvlb) {
         printf("[FATAL] g_vshaderDvlb is NULL! malloc failed?\n");
     }
@@ -185,7 +192,7 @@ int main(int argc, char **argv) {
         u64 perfWindowStart = osGetTime();
         char base_game_dir[256];
         char *slash = strrchr(g_current_data_path, '/');
-        size_t baselen = slash ? (size_t)(slash - g_current_data_path) : 0;
+        size_t baselen = slash ? (size_t) (slash - g_current_data_path) : 0;
         if (baselen >= sizeof(base_game_dir)) baselen = sizeof(base_game_dir) - 1;
         memcpy(base_game_dir, g_current_data_path, baselen);
         base_game_dir[baselen] = '\0';
@@ -225,10 +232,10 @@ int main(int argc, char **argv) {
                 .spanPercent = 4.f
             };
             DataWinParserOptions opt = {
-                .parseGen8=1, .parseSprt=1, .parseBgnd=1, .parseFont=1,
-                .parseTpag=1, .parseTxtr=1, .parseStrg=1,
-                .skipLoadingPreciseMasksForNonPreciseSprites=1,
-                .skipTextureBlobData=1,
+                .parseGen8 = 1, .parseSprt = 1, .parseBgnd = 1, .parseFont = 1,
+                .parseTpag = 1, .parseTxtr = 1, .parseStrg = 1,
+                .skipLoadingPreciseMasksForNonPreciseSprites = 1,
+                .skipTextureBlobData = 1,
                 .progressCallback = gfx_ready ? datawin_progress_cb : NULL,
                 .progressCallbackUserData = &prePassState
             };
@@ -264,16 +271,16 @@ int main(int argc, char **argv) {
             .spanPercent = 99.f - fullBase
         };
         DataWinParserOptions full_opt = {
-            .parseGen8=1, .parseOptn=1, .parseLang=1, .parseExtn=0, .parseSond=1,
-            .parseAgrp=1, .parseSprt=1, .parseBgnd=1, .parsePath=1, .parseScpt=1,
-            .parseGlob=1, .parseShdr=1, .parseFont=1, .parseTmln=1, .parseObjt=1,
-            .parseRoom=1, .parseTpag=1, .parseCode=1, .parseVari=1, .parseFunc=1,
-            .parseStrg=1, .parseTxtr=!cached, .parseAudo=!cached,
-            .skipLoadingPreciseMasksForNonPreciseSprites=1,
-            .skipTextureBlobData=cached, .skipAudioBlobData=1,
+            .parseGen8 = 1, .parseOptn = 1, .parseLang = 1, .parseExtn = 0, .parseSond = 1,
+            .parseAgrp = 1, .parseSprt = 1, .parseBgnd = 1, .parsePath = 1, .parseScpt = 1,
+            .parseGlob = 1, .parseShdr = 1, .parseFont = 1, .parseTmln = 1, .parseObjt = 1,
+            .parseRoom = 1, .parseTpag = 1, .parseCode = 1, .parseVari = 1, .parseFunc = 1,
+            .parseStrg = 1, .parseTxtr = !cached, .parseAudo = !cached,
+            .skipLoadingPreciseMasksForNonPreciseSprites = 1,
+            .skipTextureBlobData = cached, .skipAudioBlobData = 1,
 
-            .lazyLoadRooms=1,
-            .codeCachePath=code_cache_path,
+            .lazyLoadRooms = 1,
+            .codeCachePath = code_cache_path,
             .progressCallback = gfx_ready ? datawin_progress_cb : NULL,
             .progressCallbackUserData = &fullParseState
         };
@@ -299,25 +306,49 @@ int main(int argc, char **argv) {
             launcher_render_loading(&gfx, display_name, "LAUNCHING GAME!", 0, 0, 100.f);
         }
 
-        if (gfx_ready) { launcher_gfx_destroy(&gfx); gfx_ready = false; }
+        if (gfx_ready) {
+            launcher_gfx_destroy(&gfx);
+            gfx_ready = false;
+        }
 
-        VMContext      *vm  = VM_create(dw);
-        N3dsFileSystem *fs  = N3dsFileSystem_create(g_current_data_path);
-        Renderer       *ren = CtrRenderer_create();
-        AudioSystem    *snd =(AudioSystem*)CtrAudioSystem_create();
+        CTR_MAIN_LOG("create VM begin");
+        VMContext *vm = VM_create(dw);
+        CTR_MAIN_LOG("create VM end: %p", (void*)vm);
+        CTR_MAIN_LOG("create FS begin");
+        N3dsFileSystem *fs = N3dsFileSystem_create(g_current_data_path);
+        CTR_MAIN_LOG("create FS end: %p", (void*)fs);
+        CTR_MAIN_LOG("create renderer begin");
+        Renderer *ren = CtrRenderer_create();
+        CTR_MAIN_LOG("create renderer end: %p", (void*)ren);
+        CTR_MAIN_LOG("create audio begin");
+        AudioSystem *snd = (AudioSystem *) CtrAudioSystem_create();
+        CTR_MAIN_LOG("create audio end: %p", (void*)snd);
         if (snd) snd->dataWin = dw;
 
-        Runner *run = Runner_create(dw, vm, ren, (FileSystem *)fs, snd);
-        run->osType = (YoYoOperatingSystem)launcher_get_settings()->os_type;
+        CTR_MAIN_LOG("Runner_create begin");
+        Runner *run = Runner_create(dw, vm, ren, (FileSystem *) fs, snd);
+        CTR_MAIN_LOG("Runner_create end: %p", (void*)run);
+        run->osType = (YoYoOperatingSystem) launcher_get_settings()->os_type;
 
+        CTR_MAIN_LOG("Runner_initFirstRoom begin");
         Runner_initFirstRoom(run);
+        CTR_MAIN_LOG("Runner_initFirstRoom end: room=%ld frame=%ld instances=%ld",
+                     (long)run->currentRoomIndex, (long)run->frameCount, (long)arrlen(run->instances));
 
+        CTR_MAIN_LOG("launcher_apply_settings begin");
         launcher_apply_settings(launcher_get_settings());
+        CTR_MAIN_LOG("launcher_apply_settings end");
 
         bool quit_to_launcher = false;
 
         while (aptMainLoop() && !run->shouldExit) {
             u64 t_start = osGetTime();
+            bool logFrame = frameCounter < 10 || (frameCounter % 60) == 0;
+            if (logFrame) {
+                CTR_MAIN_LOG("frame %d begin: room=%ld pending=%ld shouldExit=%d",
+                             frameCounter, (long)run->currentRoomIndex, (long)run->pendingRoom,
+                             run->shouldExit ? 1 : 0);
+            }
             hidScanInput();
             u32 d = hidKeysDown(), u = hidKeysUp(), h = hidKeysHeld();
 
@@ -325,7 +356,7 @@ int main(int argc, char **argv) {
                 LauncherGfx pauseGfx;
                 bool pauseReady = launcher_gfx_init_borrowed(
                     &pauseGfx,
-                    CtrRenderer_getTopTarget(ren),    LAUNCHER_TOP_W, LAUNCHER_TOP_H,
+                    CtrRenderer_getTopTarget(ren), LAUNCHER_TOP_W, LAUNCHER_TOP_H,
                     CtrRenderer_getBottomTarget(ren), LAUNCHER_BOT_W, LAUNCHER_BOT_H);
 
                 LauncherPauseAction action = LAUNCHER_PAUSE_RESUME;
@@ -334,7 +365,7 @@ int main(int argc, char **argv) {
                     launcher_gfx_destroy(&pauseGfx);
                 }
                 launcher_apply_settings(launcher_get_settings());
-                run->osType = (YoYoOperatingSystem)launcher_get_settings()->os_type;
+                run->osType = (YoYoOperatingSystem) launcher_get_settings()->os_type;
 
                 if (action == LAUNCHER_PAUSE_QUIT_TO_LAUNCHER) {
                     quit_to_launcher = true;
@@ -352,14 +383,17 @@ int main(int argc, char **argv) {
             LauncherInputMode mode = launcher_get_settings()->input_mode;
             switch (mode) {
                 case LAUNCHER_INPUT_GAMEPAD: {
-                    circlePosition cp; hidCircleRead(&cp);
-                    circlePosition cs; hidCstickRead(&cs);
+                    circlePosition cp;
+                    hidCircleRead(&cp);
+                    circlePosition cs;
+                    hidCstickRead(&cs);
                     launcher_apply_3ds_gamepad(run->gamepads, d, u, h,
                                                cp.dx, cp.dy, cs.dx, cs.dy);
                     break;
                 }
                 case LAUNCHER_INPUT_TOUCH: {
-                    touchPosition tp; hidTouchRead(&tp);
+                    touchPosition tp;
+                    hidTouchRead(&tp);
                     bool touched = (h & KEY_TOUCH) != 0;
                     launcher_apply_3ds_touch(run->mouse, touched, tp.px, tp.py,
                                              dw->gen8.defaultWindowWidth,
@@ -373,7 +407,13 @@ int main(int argc, char **argv) {
             }
             RunnerMouse_endFrame(run->mouse);
 
+            if (logFrame)
+                CTR_MAIN_LOG("frame %d step begin", frameCounter);
             Runner_step(run);
+            if (logFrame) {
+                CTR_MAIN_LOG("frame %d step end: runnerFrame=%ld pending=%ld shouldExit=%d",
+                             frameCounter, (long)run->frameCount, (long)run->pendingRoom, run->shouldExit ? 1 : 0);
+            }
             if (run->audioSystem)
                 run->audioSystem->vtable->update(run->audioSystem, 1.f / 30.f);
 
@@ -391,20 +431,27 @@ int main(int argc, char **argv) {
                     if (r > maxR) maxR = r;
                     if (b > maxB) maxB = b;
                 }
-                if (maxR > 0 && maxB > 0) { gw = maxR; gh = maxB; }
+                if (maxR > 0 && maxB > 0) {
+                    gw = maxR;
+                    gh = maxB;
+                }
             }
 
             int winW = (launcher_get_settings()->game_screen == LAUNCHER_GAME_SCREEN_BOTTOM) ? 320 : 400;
 
             float depthSliderState = osGet3DSliderState();
 
+            if (logFrame)
+                CTR_MAIN_LOG("frame %d draw begin: gw=%d gh=%d winW=%d views=%d", frameCounter, gw, gh, winW,
+                         views_en ? 1 : 0);
             ren->vtable->beginFrame(ren, gw, gh, winW, 240);
             int numEyes = (depthSliderState > 0.01f &&
                            launcher_get_settings()->game_screen == LAUNCHER_GAME_SCREEN_TOP &&
-                           CtrRenderer_hasRightEye(ren)) ? 2 : 1;
+                           CtrRenderer_hasRightEye(ren))
+                              ? 2
+                              : 1;
 
-            for(int eye = 0; eye < numEyes; eye++) {
-
+            for (int eye = 0; eye < numEyes; eye++) {
                 CtrRenderer_beginEye(ren, eye, depthSliderState);
 
                 if (run->drawBackgroundColor) {
@@ -419,14 +466,14 @@ int main(int argc, char **argv) {
                         run->viewCurrent = i;
 
                         ren->vtable->beginView(ren, v->viewX, v->viewY, v->viewWidth, v->viewHeight,
-                                            v->portX, v->portY, v->portWidth, v->portHeight, v->viewAngle);
+                                               v->portX, v->portY, v->portWidth, v->portHeight, v->viewAngle);
                         Runner_draw(run);
                         ren->vtable->endView(ren);
 
                         ren->vtable->beginGUI(ren,
-                                            run->guiWidth  > 0 ? run->guiWidth  : v->portWidth,
-                                            run->guiHeight > 0 ? run->guiHeight : v->portHeight,
-                                            v->portX, v->portY, v->portWidth, v->portHeight);
+                                              run->guiWidth > 0 ? run->guiWidth : v->portWidth,
+                                              run->guiHeight > 0 ? run->guiHeight : v->portHeight,
+                                              v->portX, v->portY, v->portWidth, v->portHeight);
                         Runner_drawGUI(run);
                         ren->vtable->endGUI(ren);
                         ren->vtable->flush(ren);
@@ -441,9 +488,9 @@ int main(int argc, char **argv) {
                     ren->vtable->endView(ren);
 
                     ren->vtable->beginGUI(ren,
-                                        run->guiWidth  > 0 ? run->guiWidth  : gw,
-                                        run->guiHeight > 0 ? run->guiHeight : gh,
-                                        0, 0, gw, gh);
+                                          run->guiWidth > 0 ? run->guiWidth : gw,
+                                          run->guiHeight > 0 ? run->guiHeight : gh,
+                                          0, 0, gw, gh);
                     Runner_drawGUI(run);
                     ren->vtable->endGUI(ren);
                     ren->vtable->flush(ren);
@@ -452,11 +499,14 @@ int main(int argc, char **argv) {
 
             run->viewCurrent = 0;
             ren->vtable->endFrame(ren);
+            if (logFrame)
+                CTR_MAIN_LOG("frame %d draw end", frameCounter);
             if (frameCounter % 600 == 0) printMemoryStats();
             frameCounter++;
             logPerfSample(&perfFrameCount, &perfWindowStart);
 
-            while (osGetTime() - t_start < 33) gspWaitForVBlank();
+            while (osGetTime() - t_start < 33)
+                gspWaitForVBlank();
         }
 
         run->audioSystem->vtable->destroy(run->audioSystem);

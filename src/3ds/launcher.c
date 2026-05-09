@@ -1,6 +1,4 @@
-//
 // Created by Notebook on 03.05.2026.
-//
 
 #include "launcher.h"
 
@@ -23,14 +21,8 @@
 
 #define BASE_DIR  "sdmc:/3ds/butterscotch"
 #define SETTINGS_PATH BASE_DIR "/launcher_settings.bin"
-#define LAUNCHER_SETTINGS_MAGIC 0x4253544Cu // 'LTSB'
+#define LAUNCHER_SETTINGS_MAGIC 0x4253544Cu
 #define GAME_CONTROL_MAP_NAME "controls.bin"
-
-// Each glyph in the bitmap font expands to ~17 6-vertex rects, so a single full footer
-// line can burn ~4k verts. Three footer lines + gradient + particles + chrome easily blew
-// past the old 24k cap mid-frame, which forced an in-frame buffer wraparound that we
-// could not safely combine with citro3d's draw-on switching. 96k gives a comfortable
-// margin (~6 MiB linear) for both screens worth of UI in one batch.
 #define LAUNCHER_VBUF_CAP (96 * 1024)
 #define LAUNCHER_DISPLAY_TRANSFER_FLAGS \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) | \
@@ -41,9 +33,37 @@ extern shaderProgram_s g_shaderProg;
 
 extern char g_current_data_path[256];
 
-// ---------------------------------------------------------------------------
-// Theme catalogue
-// ---------------------------------------------------------------------------
+static bool launcher_valid_vs_fvec_uniform(int loc, int vecCount) {
+    return loc >= 0 && vecCount > 0 && loc <= (96 - vecCount);
+}
+
+static int launcher_lookup_projection_uniform(void) {
+    static const char *names[] = {"projection", "projection[0]", "uProjection"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        int loc = shaderInstanceGetUniformLocation(g_shaderProg.vertexShader, names[i]);
+        if (launcher_valid_vs_fvec_uniform(loc, 4)) {
+            fprintf(stderr, "[LAUNCHER] projection uniform '%s' -> c%d\n", names[i], loc);
+            fflush(stderr);
+            return loc;
+        }
+    }
+
+    fprintf(stderr, "[LAUNCHER] projection uniform lookup failed; falling back to vertex shader c0\n");
+    fflush(stderr);
+    return 0;
+}
+
+static void launcher_apply_projection(LauncherGfx *gfx, const C3D_Mtx *m) {
+    if (!gfx || !m) return;
+    if (!launcher_valid_vs_fvec_uniform(gfx->uLoc_projection, 4)) {
+        fprintf(stderr,
+                "[LAUNCHER] refusing projection upload to invalid vertex uniform c%d\n",
+                gfx->uLoc_projection);
+        fflush(stderr);
+        return;
+    }
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, gfx->uLoc_projection, m);
+}
 
 static const LauncherTheme g_themes[] = {
     {
@@ -51,14 +71,14 @@ static const LauncherTheme g_themes[] = {
         .bg_top = {0.180f, 0.095f, 0.260f},
         .bg_mid = {0.105f, 0.075f, 0.205f},
         .bg_bot = {0.020f, 0.030f, 0.075f},
-        .accent     = {1.00f, 0.74f, 0.24f},
+        .accent = {1.00f, 0.74f, 0.24f},
         .accent_dim = {0.55f, 0.30f, 0.10f},
         .particle_a = {0.97f, 0.72f, 0.24f},
         .particle_b = {0.38f, 0.84f, 1.00f},
         .particle_c = {0.94f, 0.46f, 0.90f},
-        .text_main  = {1.00f, 0.90f, 0.56f},
+        .text_main = {1.00f, 0.90f, 0.56f},
         .text_title = {1.00f, 0.78f, 0.28f},
-        .text_subtle= {0.70f, 0.86f, 1.00f},
+        .text_subtle = {0.70f, 0.86f, 1.00f},
         .side_blur_alpha = 0.35f,
         .side_particle_alpha = 1.00f,
     },
@@ -67,14 +87,14 @@ static const LauncherTheme g_themes[] = {
         .bg_top = {0.060f, 0.085f, 0.180f},
         .bg_mid = {0.030f, 0.050f, 0.130f},
         .bg_bot = {0.010f, 0.020f, 0.060f},
-        .accent     = {0.42f, 0.66f, 1.00f},
+        .accent = {0.42f, 0.66f, 1.00f},
         .accent_dim = {0.18f, 0.30f, 0.55f},
         .particle_a = {0.42f, 0.66f, 1.00f},
         .particle_b = {0.78f, 0.84f, 1.00f},
         .particle_c = {0.36f, 0.96f, 0.90f},
-        .text_main  = {0.86f, 0.92f, 1.00f},
+        .text_main = {0.86f, 0.92f, 1.00f},
         .text_title = {0.62f, 0.84f, 1.00f},
-        .text_subtle= {0.62f, 0.74f, 0.96f},
+        .text_subtle = {0.62f, 0.74f, 0.96f},
         .side_blur_alpha = 0.40f,
         .side_particle_alpha = 0.90f,
     },
@@ -83,14 +103,14 @@ static const LauncherTheme g_themes[] = {
         .bg_top = {0.060f, 0.155f, 0.085f},
         .bg_mid = {0.035f, 0.090f, 0.060f},
         .bg_bot = {0.010f, 0.030f, 0.020f},
-        .accent     = {0.62f, 0.96f, 0.38f},
+        .accent = {0.62f, 0.96f, 0.38f},
         .accent_dim = {0.20f, 0.45f, 0.18f},
         .particle_a = {0.62f, 0.96f, 0.38f},
         .particle_b = {1.00f, 0.92f, 0.40f},
         .particle_c = {0.36f, 0.90f, 0.86f},
-        .text_main  = {0.92f, 1.00f, 0.86f},
+        .text_main = {0.92f, 1.00f, 0.86f},
         .text_title = {0.74f, 1.00f, 0.46f},
-        .text_subtle= {0.66f, 0.92f, 0.66f},
+        .text_subtle = {0.66f, 0.92f, 0.66f},
         .side_blur_alpha = 0.34f,
         .side_particle_alpha = 0.85f,
     },
@@ -99,14 +119,14 @@ static const LauncherTheme g_themes[] = {
         .bg_top = {0.220f, 0.080f, 0.180f},
         .bg_mid = {0.135f, 0.045f, 0.115f},
         .bg_bot = {0.040f, 0.015f, 0.050f},
-        .accent     = {1.00f, 0.46f, 0.78f},
+        .accent = {1.00f, 0.46f, 0.78f},
         .accent_dim = {0.55f, 0.18f, 0.34f},
         .particle_a = {1.00f, 0.46f, 0.78f},
         .particle_b = {0.96f, 0.78f, 0.46f},
         .particle_c = {0.62f, 0.48f, 1.00f},
-        .text_main  = {1.00f, 0.86f, 0.94f},
+        .text_main = {1.00f, 0.86f, 0.94f},
         .text_title = {1.00f, 0.66f, 0.88f},
-        .text_subtle= {0.96f, 0.74f, 0.86f},
+        .text_subtle = {0.96f, 0.74f, 0.86f},
         .side_blur_alpha = 0.36f,
         .side_particle_alpha = 0.95f,
     },
@@ -115,14 +135,14 @@ static const LauncherTheme g_themes[] = {
         .bg_top = {0.110f, 0.110f, 0.115f},
         .bg_mid = {0.060f, 0.060f, 0.065f},
         .bg_bot = {0.015f, 0.015f, 0.020f},
-        .accent     = {0.92f, 0.92f, 0.96f},
+        .accent = {0.92f, 0.92f, 0.96f},
         .accent_dim = {0.40f, 0.40f, 0.45f},
         .particle_a = {0.92f, 0.92f, 0.96f},
         .particle_b = {0.62f, 0.62f, 0.66f},
         .particle_c = {0.78f, 0.78f, 0.82f},
-        .text_main  = {0.94f, 0.94f, 0.96f},
+        .text_main = {0.94f, 0.94f, 0.96f},
         .text_title = {1.00f, 1.00f, 1.00f},
-        .text_subtle= {0.74f, 0.74f, 0.78f},
+        .text_subtle = {0.74f, 0.74f, 0.78f},
         .side_blur_alpha = 0.30f,
         .side_particle_alpha = 0.70f,
     },
@@ -141,27 +161,26 @@ static LauncherSettings g_settings = {
     .input_mode = LAUNCHER_INPUT_KEYBOARD,
 };
 
-// Subset of YoYoOperatingSystem the user can pick from in settings. Order
-// roughly matches what real GameMaker games branch on.
 static const struct {
-    int          value;
-    const char  *label;
+    int value;
+    const char *label;
 } g_os_options[] = {
-    { OS_WINDOWS,  "WINDOWS"  },
-    { OS_LINUX,    "LINUX"    },
-    { OS_MACOSX,   "MACOSX"   },
-    { OS_ANDROID,  "ANDROID"  },
-    { OS_IOS,      "IOS"      },
-    { OS_3DS,      "3DS"      },
-    { OS_SWITCH,   "SWITCH"   },
-    { OS_PSVITA,   "PSVITA"   },
-    { OS_PS4,      "PS4"      },
-    { OS_PS3,      "PS3"      },
-    { OS_XBOXONE,  "XBOXONE"  },
-    { OS_XBOX360,  "XBOX360"  },
-    { OS_UWP,      "UWP"      },
-    { OS_WIIU,     "WIIU"     },
+    {OS_WINDOWS, "WINDOWS"},
+    {OS_LINUX, "LINUX"},
+    {OS_MACOSX, "MACOSX"},
+    {OS_ANDROID, "ANDROID"},
+    {OS_IOS, "IOS"},
+    {OS_3DS, "3DS"},
+    {OS_SWITCH, "SWITCH"},
+    {OS_PSVITA, "PSVITA"},
+    {OS_PS4, "PS4"},
+    {OS_PS3, "PS3"},
+    {OS_XBOXONE, "XBOXONE"},
+    {OS_XBOX360, "XBOX360"},
+    {OS_UWP, "UWP"},
+    {OS_WIIU, "WIIU"},
 };
+
 #define OS_OPTION_COUNT ((int)(sizeof(g_os_options) / sizeof(g_os_options[0])))
 
 const char *launcher_os_type_label(int osType) {
@@ -189,45 +208,45 @@ int launcher_os_type_index_of(int osType) {
 const char *launcher_input_mode_label(LauncherInputMode mode) {
     switch (mode) {
         case LAUNCHER_INPUT_KEYBOARD: return "KEYBOARD";
-        case LAUNCHER_INPUT_GAMEPAD:  return "GAMEPAD";
-        case LAUNCHER_INPUT_TOUCH:    return "TOUCH";
-        default:                      return "KEYBOARD";
+        case LAUNCHER_INPUT_GAMEPAD: return "GAMEPAD";
+        case LAUNCHER_INPUT_TOUCH: return "TOUCH";
+        default: return "KEYBOARD";
     }
 }
 
 typedef struct {
     const char *label;
-    u32         mask;
-    uint8_t     default_vk;
+    u32 mask;
+    uint8_t default_vk;
 } LauncherControlDef;
 
 static const LauncherControlDef g_control_defs[LAUNCHER_CONTROL_COUNT] = {
-    [LAUNCHER_CONTROL_CPAD_UP]      = {"CPAD UP",      KEY_CPAD_UP,      VK_UP},
-    [LAUNCHER_CONTROL_CPAD_DOWN]    = {"CPAD DOWN",    KEY_CPAD_DOWN,    VK_DOWN},
-    [LAUNCHER_CONTROL_CPAD_LEFT]    = {"CPAD LEFT",    KEY_CPAD_LEFT,    VK_LEFT},
-    [LAUNCHER_CONTROL_CPAD_RIGHT]   = {"CPAD RIGHT",   KEY_CPAD_RIGHT,   VK_RIGHT},
-    [LAUNCHER_CONTROL_DPAD_UP]      = {"DPAD UP",      KEY_DUP,          VK_UP},
-    [LAUNCHER_CONTROL_DPAD_DOWN]    = {"DPAD DOWN",    KEY_DDOWN,        VK_DOWN},
-    [LAUNCHER_CONTROL_DPAD_LEFT]    = {"DPAD LEFT",    KEY_DLEFT,        VK_LEFT},
-    [LAUNCHER_CONTROL_DPAD_RIGHT]   = {"DPAD RIGHT",   KEY_DRIGHT,       VK_RIGHT},
-    [LAUNCHER_CONTROL_A]            = {"A",            KEY_A,            'Z'},
-    [LAUNCHER_CONTROL_B]            = {"B",            KEY_B,            'X'},
-    [LAUNCHER_CONTROL_X]            = {"X",            KEY_X,            'C'},
-    [LAUNCHER_CONTROL_Y]            = {"Y",            KEY_Y,            VK_SHIFT},
-    [LAUNCHER_CONTROL_L]            = {"L",            KEY_L,            VK_ENTER},
-    [LAUNCHER_CONTROL_R]            = {"R",            KEY_R,            VK_SPACE},
-    [LAUNCHER_CONTROL_ZL]           = {"ZL",           KEY_ZL,           VK_NOKEY},
-    [LAUNCHER_CONTROL_ZR]           = {"ZR",           KEY_ZR,           VK_NOKEY},
-    [LAUNCHER_CONTROL_START]        = {"START",        KEY_START,        VK_NOKEY},
-    [LAUNCHER_CONTROL_SELECT]       = {"SELECT",       KEY_SELECT,       VK_NOKEY},
-    [LAUNCHER_CONTROL_CSTICK_UP]    = {"CSTICK UP",    KEY_CSTICK_UP,    VK_NOKEY},
-    [LAUNCHER_CONTROL_CSTICK_DOWN]  = {"CSTICK DOWN",  KEY_CSTICK_DOWN,  VK_NOKEY},
-    [LAUNCHER_CONTROL_CSTICK_LEFT]  = {"CSTICK LEFT",  KEY_CSTICK_LEFT,  VK_NOKEY},
+    [LAUNCHER_CONTROL_CPAD_UP] = {"CPAD UP", KEY_CPAD_UP, VK_UP},
+    [LAUNCHER_CONTROL_CPAD_DOWN] = {"CPAD DOWN", KEY_CPAD_DOWN, VK_DOWN},
+    [LAUNCHER_CONTROL_CPAD_LEFT] = {"CPAD LEFT", KEY_CPAD_LEFT, VK_LEFT},
+    [LAUNCHER_CONTROL_CPAD_RIGHT] = {"CPAD RIGHT", KEY_CPAD_RIGHT, VK_RIGHT},
+    [LAUNCHER_CONTROL_DPAD_UP] = {"DPAD UP", KEY_DUP, VK_UP},
+    [LAUNCHER_CONTROL_DPAD_DOWN] = {"DPAD DOWN", KEY_DDOWN, VK_DOWN},
+    [LAUNCHER_CONTROL_DPAD_LEFT] = {"DPAD LEFT", KEY_DLEFT, VK_LEFT},
+    [LAUNCHER_CONTROL_DPAD_RIGHT] = {"DPAD RIGHT", KEY_DRIGHT, VK_RIGHT},
+    [LAUNCHER_CONTROL_A] = {"A", KEY_A, 'Z'},
+    [LAUNCHER_CONTROL_B] = {"B", KEY_B, 'X'},
+    [LAUNCHER_CONTROL_X] = {"X", KEY_X, 'C'},
+    [LAUNCHER_CONTROL_Y] = {"Y", KEY_Y, VK_SHIFT},
+    [LAUNCHER_CONTROL_L] = {"L", KEY_L, VK_ENTER},
+    [LAUNCHER_CONTROL_R] = {"R", KEY_R, VK_SPACE},
+    [LAUNCHER_CONTROL_ZL] = {"ZL", KEY_ZL, VK_NOKEY},
+    [LAUNCHER_CONTROL_ZR] = {"ZR", KEY_ZR, VK_NOKEY},
+    [LAUNCHER_CONTROL_START] = {"START", KEY_START, VK_NOKEY},
+    [LAUNCHER_CONTROL_SELECT] = {"SELECT", KEY_SELECT, VK_NOKEY},
+    [LAUNCHER_CONTROL_CSTICK_UP] = {"CSTICK UP", KEY_CSTICK_UP, VK_NOKEY},
+    [LAUNCHER_CONTROL_CSTICK_DOWN] = {"CSTICK DOWN", KEY_CSTICK_DOWN, VK_NOKEY},
+    [LAUNCHER_CONTROL_CSTICK_LEFT] = {"CSTICK LEFT", KEY_CSTICK_LEFT, VK_NOKEY},
     [LAUNCHER_CONTROL_CSTICK_RIGHT] = {"CSTICK RIGHT", KEY_CSTICK_RIGHT, VK_NOKEY},
 };
 
 static LauncherControlMap g_active_controls;
-static char               g_active_controls_path[256];
+static char g_active_controls_path[256];
 
 const LauncherTheme *launcher_theme_at(int index) {
     if (index < 0) index = 0;
@@ -269,7 +288,7 @@ static bool launcher_game_dir_from_data_path(const char *data_win_path, char *ou
     if (!data_win_path || !out || out_size == 0) return false;
     const char *slash = strrchr(data_win_path, '/');
     if (!slash) return false;
-    size_t len = (size_t)(slash - data_win_path);
+    size_t len = (size_t) (slash - data_win_path);
     if (len >= out_size) len = out_size - 1;
     memcpy(out, data_win_path, len);
     out[len] = '\0';
@@ -346,34 +365,32 @@ void launcher_apply_3ds_input(RunnerKeyboardState *kb, u32 down, u32 up, u32 hel
     }
 }
 
-// Indices in GamepadSlot.buttonDown[] (see runner_gamepad.c gmlButtonToIndex).
 enum {
-    GP_IDX_FACE1     = 0,
-    GP_IDX_FACE2     = 1,
-    GP_IDX_FACE3     = 2,
-    GP_IDX_FACE4     = 3,
+    GP_IDX_FACE1 = 0,
+    GP_IDX_FACE2 = 1,
+    GP_IDX_FACE3 = 2,
+    GP_IDX_FACE4 = 3,
     GP_IDX_SHOULDERL = 4,
     GP_IDX_SHOULDERR = 5,
-    GP_IDX_TRIGGERL  = 6,
-    GP_IDX_TRIGGERR  = 7,
-    GP_IDX_SELECT    = 8,
-    GP_IDX_START     = 9,
-    GP_IDX_PADU      = 12,
-    GP_IDX_PADD      = 13,
-    GP_IDX_PADL      = 14,
-    GP_IDX_PADR      = 15,
+    GP_IDX_TRIGGERL = 6,
+    GP_IDX_TRIGGERR = 7,
+    GP_IDX_SELECT = 8,
+    GP_IDX_START = 9,
+    GP_IDX_PADU = 12,
+    GP_IDX_PADD = 13,
+    GP_IDX_PADL = 14,
+    GP_IDX_PADR = 15,
 };
 
 static float circle_axis_normalize(int v) {
-    // 3DS circle pad raw range is roughly -156..+156. Clamp & normalize.
-    if (v >  156) v =  156;
+    if (v > 156) v = 156;
     if (v < -156) v = -156;
-    return (float)v / 156.0f;
+    return (float) v / 156.0f;
 }
 
 static float deadzone(float v, float dz) {
-    if (v >  0.0f) return (v <  dz) ? 0.0f : (v - dz) / (1.0f - dz);
-    if (v <  0.0f) return (v > -dz) ? 0.0f : (v + dz) / (1.0f - dz);
+    if (v > 0.0f) return (v < dz) ? 0.0f : (v - dz) / (1.0f - dz);
+    if (v < 0.0f) return (v > -dz) ? 0.0f : (v + dz) / (1.0f - dz);
     return 0.0f;
 }
 
@@ -381,49 +398,39 @@ void launcher_apply_3ds_gamepad(RunnerGamepadState *gp,
                                 u32 down, u32 up, u32 held,
                                 int circleX, int circleY,
                                 int cstickX, int cstickY) {
-    (void)down; (void)up;
+    (void) down;
+    (void) up;
     if (!gp) return;
     GamepadSlot *slot = &gp->slots[0];
 
     memcpy(slot->buttonDownPrev, slot->buttonDown, sizeof(slot->buttonDown));
-    memset(slot->buttonDown,     0, sizeof(slot->buttonDown));
-    memset(slot->buttonPressed,  0, sizeof(slot->buttonPressed));
+    memset(slot->buttonDown, 0, sizeof(slot->buttonDown));
+    memset(slot->buttonPressed, 0, sizeof(slot->buttonPressed));
     memset(slot->buttonReleased, 0, sizeof(slot->buttonReleased));
-    memset(slot->buttonValue,    0, sizeof(slot->buttonValue));
-    memset(slot->axisValue,      0, sizeof(slot->axisValue));
-
-    // Map 3DS face buttons to GameMaker's xinput-style face indices:
-    //   GP_FACE1 = bottom = A on 3DS  (matches "A" on Xbox = bottom)
-    //   GP_FACE2 = right  = B on 3DS
-    //   GP_FACE3 = left   = Y on 3DS
-    //   GP_FACE4 = top    = X on 3DS
+    memset(slot->buttonValue, 0, sizeof(slot->buttonValue));
+    memset(slot->axisValue, 0, sizeof(slot->axisValue));
     if (held & KEY_A) slot->buttonDown[GP_IDX_FACE1] = true;
     if (held & KEY_B) slot->buttonDown[GP_IDX_FACE2] = true;
     if (held & KEY_Y) slot->buttonDown[GP_IDX_FACE3] = true;
     if (held & KEY_X) slot->buttonDown[GP_IDX_FACE4] = true;
 
-    if (held & KEY_L)  slot->buttonDown[GP_IDX_SHOULDERL] = true;
-    if (held & KEY_R)  slot->buttonDown[GP_IDX_SHOULDERR] = true;
-    if (held & KEY_ZL) slot->buttonDown[GP_IDX_TRIGGERL]  = true;
-    if (held & KEY_ZR) slot->buttonDown[GP_IDX_TRIGGERR]  = true;
+    if (held & KEY_L) slot->buttonDown[GP_IDX_SHOULDERL] = true;
+    if (held & KEY_R) slot->buttonDown[GP_IDX_SHOULDERR] = true;
+    if (held & KEY_ZL) slot->buttonDown[GP_IDX_TRIGGERL] = true;
+    if (held & KEY_ZR) slot->buttonDown[GP_IDX_TRIGGERR] = true;
 
     if (held & KEY_SELECT) slot->buttonDown[GP_IDX_SELECT] = true;
-    if (held & KEY_START)  slot->buttonDown[GP_IDX_START]  = true;
+    if (held & KEY_START) slot->buttonDown[GP_IDX_START] = true;
 
-    if (held & KEY_DUP)    slot->buttonDown[GP_IDX_PADU] = true;
-    if (held & KEY_DDOWN)  slot->buttonDown[GP_IDX_PADD] = true;
-    if (held & KEY_DLEFT)  slot->buttonDown[GP_IDX_PADL] = true;
+    if (held & KEY_DUP) slot->buttonDown[GP_IDX_PADU] = true;
+    if (held & KEY_DDOWN) slot->buttonDown[GP_IDX_PADD] = true;
+    if (held & KEY_DLEFT) slot->buttonDown[GP_IDX_PADL] = true;
     if (held & KEY_DRIGHT) slot->buttonDown[GP_IDX_PADR] = true;
-
-    // 3DS doesn't have analog triggers, so trigger buttons only carry 0/1.
     for (int i = 0; i < GP_BUTTON_COUNT; i++) {
         slot->buttonValue[i] = slot->buttonDown[i] ? 1.0f : 0.0f;
     }
-
-    // Circle pad → left stick. Y is inverted to match XInput/GameMaker.
     float lh = circle_axis_normalize(circleX);
     float lv = -circle_axis_normalize(circleY);
-    // C-stick (New 3DS) → right stick.
     float rh = circle_axis_normalize(cstickX);
     float rv = -circle_axis_normalize(cstickY);
     slot->axisValue[0] = deadzone(lh, slot->deadzone);
@@ -434,12 +441,12 @@ void launcher_apply_3ds_gamepad(RunnerGamepadState *gp,
     for (int i = 0; i < GP_BUTTON_COUNT; i++) {
         bool now = slot->buttonDown[i];
         bool was = slot->buttonDownPrev[i];
-        if (now && !was) slot->buttonPressed[i]  = true;
+        if (now && !was) slot->buttonPressed[i] = true;
         if (!now && was) slot->buttonReleased[i] = true;
     }
 
     snprintf(slot->description, sizeof(slot->description), "Nintendo 3DS");
-    snprintf(slot->guid,        sizeof(slot->guid),        "n3ds-builtin");
+    snprintf(slot->guid, sizeof(slot->guid), "n3ds-builtin");
     slot->connectedPrev = slot->connected;
     slot->connected = true;
     slot->jid = 0;
@@ -451,9 +458,6 @@ void launcher_apply_3ds_touch(RunnerMouseState *mouse,
                               int gameW, int gameH) {
     if (!mouse) return;
     if (touched) {
-        // 3DS bottom screen is 320x240. Scale to game logical size so that
-        // mouse_x/mouse_y match what the game expects in room space. If gameW/H
-        // are zero (no room loaded yet), fall back to raw touch coords.
         if (gameW <= 0) gameW = 320;
         if (gameH <= 0) gameH = 240;
         int x = (touchX * gameW) / 320;
@@ -461,8 +465,7 @@ void launcher_apply_3ds_touch(RunnerMouseState *mouse,
         RunnerMouse_setPosition(mouse, x, y);
     }
     RunnerMouse_setButton(mouse, MB_LEFT, touched);
-    // 3DS has no separate right/middle buttons; leave them clear.
-    RunnerMouse_setButton(mouse, MB_RIGHT,  false);
+    RunnerMouse_setButton(mouse, MB_RIGHT, false);
     RunnerMouse_setButton(mouse, MB_MIDDLE, false);
 }
 
@@ -473,26 +476,26 @@ static void launcher_push_theme_to_renderer(void) {
                                   t->accent[0], t->accent[1], t->accent[2],
                                   g_settings.show_side_blur ? t->side_blur_alpha : 0.f,
                                   g_settings.show_side_particles ? t->side_particle_alpha : 0.f);
-    CtrRenderer_setGameScreen((CtrGameScreen)g_settings.game_screen);
-    CtrRenderer_setBackdropMode((CtrBackdropMode)g_settings.backdrop_mode);
+    CtrRenderer_setGameScreen((CtrGameScreen) g_settings.game_screen);
+    CtrRenderer_setBackdropMode((CtrBackdropMode) g_settings.backdrop_mode);
 }
 
 static const char *launcher_backdrop_label(LauncherBackdropMode mode) {
     switch (mode) {
         case LAUNCHER_BACKDROP_GRADIENT: return "GRADIENT";
-        case LAUNCHER_BACKDROP_BLUR:     return "BLUR";
-        case LAUNCHER_BACKDROP_BLACK:    return "BLACK";
-        case LAUNCHER_BACKDROP_STRETCH:  return "STRETCH";
-        default:                         return "GRADIENT";
+        case LAUNCHER_BACKDROP_BLUR: return "BLUR";
+        case LAUNCHER_BACKDROP_BLACK: return "BLACK";
+        case LAUNCHER_BACKDROP_STRETCH: return "STRETCH";
+        default: return "GRADIENT";
     }
 }
 
 static LauncherBackdropMode launcher_next_backdrop(LauncherBackdropMode mode, int dir) {
-    int next = (int)mode + (dir >= 0 ? 1 : -1);
+    int next = (int) mode + (dir >= 0 ? 1 : -1);
     int count = 4;
     if (next < 0) next = count - 1;
     if (next >= count) next = 0;
-    return (LauncherBackdropMode)next;
+    return (LauncherBackdropMode) next;
 }
 
 void launcher_apply_theme_index(int index) {
@@ -513,9 +516,9 @@ void launcher_apply_settings(const LauncherSettings *s) {
     g_settings.input_mode = s->input_mode;
     g_settings.global_controls = s->global_controls;
     launcher_normalize_control_map(&g_settings.global_controls);
-    int backdropValue = (int)g_settings.backdrop_mode;
-    if (backdropValue < (int)LAUNCHER_BACKDROP_GRADIENT ||
-        backdropValue > (int)LAUNCHER_BACKDROP_STRETCH) {
+    int backdropValue = (int) g_settings.backdrop_mode;
+    if (backdropValue < (int) LAUNCHER_BACKDROP_GRADIENT ||
+        backdropValue > (int) LAUNCHER_BACKDROP_STRETCH) {
         g_settings.backdrop_mode = LAUNCHER_BACKDROP_GRADIENT;
     }
     if (g_settings.input_mode < 0 || g_settings.input_mode >= LAUNCHER_INPUT_MODE_COUNT) {
@@ -541,7 +544,10 @@ void launcher_save_settings(void) {
 void launcher_load_settings(void) {
     launcher_normalize_control_map(&g_settings.global_controls);
     FILE *f = fopen(SETTINGS_PATH, "rb");
-    if (!f) { launcher_push_theme_to_renderer(); return; }
+    if (!f) {
+        launcher_push_theme_to_renderer();
+        return;
+    }
     LauncherSettings tmp = g_settings;
     size_t r = fread(&tmp, 1, sizeof(tmp), f);
     fclose(f);
@@ -552,14 +558,11 @@ void launcher_load_settings(void) {
             tmp.game_screen != LAUNCHER_GAME_SCREEN_BOTTOM) {
             tmp.game_screen = LAUNCHER_GAME_SCREEN_TOP;
         }
-        int backdropValue = (int)tmp.backdrop_mode;
-        if (backdropValue < (int)LAUNCHER_BACKDROP_GRADIENT ||
-            backdropValue > (int)LAUNCHER_BACKDROP_STRETCH) {
+        int backdropValue = (int) tmp.backdrop_mode;
+        if (backdropValue < (int) LAUNCHER_BACKDROP_GRADIENT ||
+            backdropValue > (int) LAUNCHER_BACKDROP_STRETCH) {
             tmp.backdrop_mode = LAUNCHER_BACKDROP_GRADIENT;
         }
-        // Older settings files (version 3) don't have os_type / input_mode —
-        // their bytes will be whatever happened to live in the previous
-        // _reserved[] padding. Fall back to defaults if they're out of range.
         if (tmp.version < 4u || launcher_os_type_index_of(tmp.os_type) < 0) {
             tmp.os_type = OS_WINDOWS;
         }
@@ -574,43 +577,40 @@ void launcher_load_settings(void) {
     launcher_push_theme_to_renderer();
 }
 
-// ---------------------------------------------------------------------------
-// Game list
-// ---------------------------------------------------------------------------
-
 static LauncherGameEntry g_games[LAUNCHER_MAX_GAMES];
-static int               g_game_count = 0;
+static int g_game_count = 0;
 
 int launcher_game_count(void) { return g_game_count; }
+
 const LauncherGameEntry *launcher_game(int index) {
     if (index < 0 || index >= g_game_count) return NULL;
     return &g_games[index];
 }
 
-// ---------------------------------------------------------------------------
-// Texture helpers
-// ---------------------------------------------------------------------------
-
-#define LAUNCHER_ICON_CACHE_MAGIC   0x49435442u // 'BTCI'
+#define LAUNCHER_ICON_CACHE_MAGIC   0x49435442u
 #define LAUNCHER_ICON_CACHE_VERSION 1u
 
 typedef struct {
     uint32_t magic;
     uint32_t version;
-    int32_t  width;
-    int32_t  height;
-    int32_t  pot_w;
-    int32_t  pot_h;
+    int32_t width;
+    int32_t height;
+    int32_t pot_w;
+    int32_t pot_h;
     uint64_t source_size;
-    int64_t  source_mtime;
+    int64_t source_mtime;
     uint32_t data_bytes;
-    char     source_name[96];
+    char source_name[96];
 } LauncherIconCacheHeader;
 
 static int launcher_next_pow2(int x) {
     if (x < 8) return 8;
     x--;
-    x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16;
+    x |= x >> 1;
+    x |= x >> 2;
+    x |= x >> 4;
+    x |= x >> 8;
+    x |= x >> 16;
     return x + 1;
 }
 
@@ -644,7 +644,7 @@ static void launcher_tile_rgba4(const uint16_t *linear, uint16_t *tiled,
                     if (sx < linW && sy >= 0 && sy < linH) {
                         px = linear[sy * linW + sx];
                     }
-                    block[launcher_morton_pos((uint32_t)x, (uint32_t)y)] = px;
+                    block[launcher_morton_pos((uint32_t) x, (uint32_t) y)] = px;
                 }
             }
         }
@@ -686,9 +686,9 @@ static bool launcher_write_icon_cache(const char *cache_path, const char *source
     hdr.height = game->icon_h;
     hdr.pot_w = game->icon_pot_w;
     hdr.pot_h = game->icon_pot_h;
-    hdr.source_size = (uint64_t)source_st->st_size;
-    hdr.source_mtime = (int64_t)source_st->st_mtime;
-    hdr.data_bytes = (uint32_t)((size_t)hdr.pot_w * (size_t)hdr.pot_h * sizeof(uint16_t));
+    hdr.source_size = (uint64_t) source_st->st_size;
+    hdr.source_mtime = (int64_t) source_st->st_mtime;
+    hdr.data_bytes = (uint32_t) ((size_t) hdr.pot_w * (size_t) hdr.pot_h * sizeof(uint16_t));
     snprintf(hdr.source_name, sizeof(hdr.source_name), "%s", launcher_basename(source_path));
 
     bool ok = fwrite(&hdr, sizeof(hdr), 1, f) == 1 &&
@@ -710,14 +710,14 @@ static bool launcher_load_icon_cache(LauncherGameEntry *game, const char *cache_
     memset(source_name, 0, sizeof(source_name));
     snprintf(source_name, sizeof(source_name), "%s", launcher_basename(source_path));
     if (ok) {
-        size_t expected = (size_t)hdr.pot_w * (size_t)hdr.pot_h * sizeof(uint16_t);
+        size_t expected = (size_t) hdr.pot_w * (size_t) hdr.pot_h * sizeof(uint16_t);
         ok = hdr.magic == LAUNCHER_ICON_CACHE_MAGIC &&
              hdr.version == LAUNCHER_ICON_CACHE_VERSION &&
              hdr.width > 0 && hdr.height > 0 &&
              hdr.pot_w >= hdr.width && hdr.pot_h >= hdr.height &&
              hdr.pot_w <= 512 && hdr.pot_h <= 512 &&
-             hdr.source_size == (uint64_t)source_st->st_size &&
-             hdr.source_mtime == (int64_t)source_st->st_mtime &&
+             hdr.source_size == (uint64_t) source_st->st_size &&
+             hdr.source_mtime == (int64_t) source_st->st_mtime &&
              hdr.data_bytes == expected &&
              memcmp(hdr.source_name, source_name, sizeof(hdr.source_name)) == 0;
     }
@@ -739,14 +739,13 @@ static bool launcher_load_icon_cache(LauncherGameEntry *game, const char *cache_
         game->icon_ready = false;
     }
 
-    if (!C3D_TexInit(&game->icon_tex, (u16)hdr.pot_w, (u16)hdr.pot_h, GPU_RGBA4)) {
+    if (!C3D_TexInit(&game->icon_tex, (u16) hdr.pot_w, (u16) hdr.pot_h, GPU_RGBA4)) {
         linearFree(tiled);
         return false;
     }
 
     C3D_TexLoadImage(&game->icon_tex, tiled, GPU_TEXFACE_2D, 0);
     C3D_TexFlush(&game->icon_tex);
-    // GPU_NEAREST so pixel-art game icons stay crisp at the launcher's upscale factor.
     C3D_TexSetFilter(&game->icon_tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&game->icon_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     linearFree(tiled);
@@ -782,22 +781,22 @@ static bool launcher_upload_icon(LauncherGameEntry *game, const IconImage *img,
 
     int potW = launcher_next_pow2(img->width);
     int potH = launcher_next_pow2(img->height);
-    uint16_t *linear = calloc((size_t)potW * (size_t)potH, sizeof(uint16_t));
+    uint16_t *linear = calloc((size_t) potW * (size_t) potH, sizeof(uint16_t));
     if (!linear) return false;
 
     for (int y = 0; y < img->height; y++) {
         for (int x = 0; x < img->width; x++) {
-            const uint8_t *p = &img->pixels[((size_t)y * (size_t)img->width + (size_t)x) * 4u];
+            const uint8_t *p = &img->pixels[((size_t) y * (size_t) img->width + (size_t) x) * 4u];
             linear[y * potW + x] = launcher_pack_rgba4444(p[0], p[1], p[2], p[3]);
         }
     }
 
-    if (!C3D_TexInit(&game->icon_tex, (u16)potW, (u16)potH, GPU_RGBA4)) {
+    if (!C3D_TexInit(&game->icon_tex, (u16) potW, (u16) potH, GPU_RGBA4)) {
         free(linear);
         return false;
     }
 
-    uint16_t *tiled = linearAlloc((size_t)potW * (size_t)potH * sizeof(uint16_t));
+    uint16_t *tiled = linearAlloc((size_t) potW * (size_t) potH * sizeof(uint16_t));
     if (!tiled) {
         C3D_TexDelete(&game->icon_tex);
         memset(&game->icon_tex, 0, sizeof(game->icon_tex));
@@ -808,7 +807,6 @@ static bool launcher_upload_icon(LauncherGameEntry *game, const IconImage *img,
     launcher_tile_rgba4(linear, tiled, potW, potH, potW, potH);
     C3D_TexLoadImage(&game->icon_tex, tiled, GPU_TEXFACE_2D, 0);
     C3D_TexFlush(&game->icon_tex);
-    // GPU_NEAREST so pixel-art game icons stay crisp at the launcher's upscale factor.
     C3D_TexSetFilter(&game->icon_tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&game->icon_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
@@ -897,7 +895,10 @@ void launcher_scan_games(void) {
     memset(g_games, 0, sizeof(g_games));
     g_game_count = 0;
     DIR *dir = opendir(BASE_DIR);
-    if (!dir) { mkdir(BASE_DIR, 0777); return; }
+    if (!dir) {
+        mkdir(BASE_DIR, 0777);
+        return;
+    }
 
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL && g_game_count < LAUNCHER_MAX_GAMES) {
@@ -924,8 +925,6 @@ void launcher_scan_games(void) {
     closedir(dir);
 }
 
-// Case-insensitive substring search. We avoid strcasestr (GNU extension; newlib
-// doesn't expose it on devkitARM by default) and roll a tiny one inline.
 static const char *ci_strstr(const char *hay, const char *needle) {
     if (!hay || !needle) return NULL;
     if (!*needle) return hay;
@@ -933,8 +932,8 @@ static const char *ci_strstr(const char *hay, const char *needle) {
     for (; *hay; hay++) {
         size_t i = 0;
         while (i < nlen) {
-            unsigned char a = (unsigned char)hay[i];
-            unsigned char b = (unsigned char)needle[i];
+            unsigned char a = (unsigned char) hay[i];
+            unsigned char b = (unsigned char) needle[i];
             if (!a) return NULL;
             if (tolower(a) != tolower(b)) break;
             i++;
@@ -944,8 +943,6 @@ static const char *ci_strstr(const char *hay, const char *needle) {
     return NULL;
 }
 
-// Try `path`; if it points at a directory, append "/data.win". Returns true if
-// the resulting file exists and is openable.
 static bool try_resolve_candidate(const char *path, char *out_path, size_t out_size) {
     if (!path || !*path) return false;
 
@@ -972,47 +969,32 @@ void launcher_resolve_new_game_path(const char *request, char *out_path, size_t 
         if (out_path && out_size) out_path[0] = '\0';
         return;
     }
-
-    // Drop a leading slash — Deltarune & co. pass paths like "/chapter3_windows"
-    // expecting them to be sibling-directory names. If we leave the slash in,
-    // path joins produce "BASE_DIR//chapter3_windows" which several SDMC
-    // implementations treat as invalid.
     const char *clean = request;
     while (*clean == '/' || *clean == '\\') clean++;
-
-    // Absolute sdmc:/ path — accept verbatim (well, after directory probe).
     if (strncmp(clean, "sdmc:/", 6) == 0) {
         char buf[256];
         snprintf(buf, sizeof(buf), "%s", clean);
         if (try_resolve_candidate(buf, out_path, out_size)) return;
-        // Fall through and let caller report failure.
         strncpy(out_path, buf, out_size - 1);
         out_path[out_size - 1] = '\0';
         return;
     }
-
-    // Compute the directory the current game lives in (parent of data.win).
     char cur_dir[256];
     {
         const char *slash = strrchr(g_current_data_path, '/');
-        size_t baselen = slash ? (size_t)(slash - g_current_data_path) : 0;
+        size_t baselen = slash ? (size_t) (slash - g_current_data_path) : 0;
         if (baselen >= sizeof(cur_dir)) baselen = sizeof(cur_dir) - 1;
         memcpy(cur_dir, g_current_data_path, baselen);
         cur_dir[baselen] = '\0';
     }
-
-    // Compute the directory ABOVE the current game (where sibling chapters live).
     char parent_dir[256];
     {
         const char *slash = strrchr(cur_dir, '/');
-        size_t baselen = slash ? (size_t)(slash - cur_dir) : 0;
+        size_t baselen = slash ? (size_t) (slash - cur_dir) : 0;
         if (baselen >= sizeof(parent_dir)) baselen = sizeof(parent_dir) - 1;
         memcpy(parent_dir, cur_dir, baselen);
         parent_dir[baselen] = '\0';
     }
-
-    // Strip any trailing data.win the request might already carry, so we can
-    // probe both as a directory and as an explicit data.win path.
     char clean_req[256];
     snprintf(clean_req, sizeof(clean_req), "%s", clean);
     {
@@ -1025,28 +1007,16 @@ void launcher_resolve_new_game_path(const char *request, char *out_path, size_t 
     }
 
     char buf[512];
-
-    // 1) Sibling of the current game: <parent>/chapter3_windows[/data.win]
     if (parent_dir[0]) {
         snprintf(buf, sizeof(buf), "%s/%s", parent_dir, clean_req);
         if (try_resolve_candidate(buf, out_path, out_size)) return;
     }
-
-    // 2) Subdir of the current game: <current>/chapter3_windows[/data.win]
     if (cur_dir[0]) {
         snprintf(buf, sizeof(buf), "%s/%s", cur_dir, clean_req);
         if (try_resolve_candidate(buf, out_path, out_size)) return;
     }
-
-    // 3) Top-level games root: <BASE_DIR>/chapter3_windows[/data.win]
     snprintf(buf, sizeof(buf), "%s/%s", BASE_DIR, clean_req);
     if (try_resolve_candidate(buf, out_path, out_size)) return;
-
-    // 4) Last resort: scan the registered launcher games for a name match
-    //    (case-insensitive substring). Lets the user keep their own folder
-    //    naming (e.g. "deltarune_ch3") even if the script asks for
-    //    "chapter3_windows" — as long as one substring matches the other we
-    //    accept it.
     for (int i = 0; i < g_game_count; i++) {
         const char *gname = g_games[i].name;
         if (!gname || !*gname) continue;
@@ -1056,22 +1026,15 @@ void launcher_resolve_new_game_path(const char *request, char *out_path, size_t 
             return;
         }
     }
-
-    // Nothing matched. Return a "best guess" path with /data.win appended so
-    // the caller's open probe + error message at least show a meaningful path.
     snprintf(buf, sizeof(buf), "%s/%s/data.win", BASE_DIR, clean_req);
     strncpy(out_path, buf, out_size - 1);
     out_path[out_size - 1] = '\0';
 }
 
-// ---------------------------------------------------------------------------
-// Vertex batch primitives
-// ---------------------------------------------------------------------------
-
 static void launcher_gfx_flush(LauncherGfx *gfx) {
     if (!gfx->batchVerts || !gfx->batchTex || !gfx->inFrame) {
         gfx->batchVerts = 0;
-        gfx->batchTex   = NULL;
+        gfx->batchTex = NULL;
         return;
     }
     GSPGPU_FlushDataCache(gfx->vbuf + gfx->batchStart,
@@ -1080,7 +1043,7 @@ static void launcher_gfx_flush(LauncherGfx *gfx) {
     C3D_DrawArrays(GPU_TRIANGLES, gfx->batchStart, gfx->batchVerts);
     gfx->batchStart += gfx->batchVerts;
     gfx->batchVerts = 0;
-    gfx->batchTex   = NULL;
+    gfx->batchTex = NULL;
 }
 
 static LauncherVertex *launcher_gfx_reserve(LauncherGfx *gfx, uint32_t count, C3D_Tex *tex) {
@@ -1088,13 +1051,8 @@ static LauncherVertex *launcher_gfx_reserve(LauncherGfx *gfx, uint32_t count, C3
     if (gfx->vbufHead + count > gfx->vbufCap) {
         launcher_gfx_flush(gfx);
         C3D_FrameSplit(0);
-        gfx->vbufHead   = 0;
+        gfx->vbufHead = 0;
         gfx->batchStart = 0;
-
-        // citro3d does NOT preserve render target / pipeline state across FrameSplit.
-        // Re-attach the current target and re-bind program/attrInfo/bufInfo/texenv/proj
-        // so the next draw call lands on the right screen instead of bleeding into
-        // whichever target citro3d last had bound.
         if (gfx->currentScreen && gfx->currentScreen->target) {
             C3D_FrameDrawOn(gfx->currentScreen->target);
 
@@ -1124,12 +1082,12 @@ static LauncherVertex *launcher_gfx_reserve(LauncherGfx *gfx, uint32_t count, C3
             Mtx_Identity(&proj);
             Mtx_OrthoTilt(&proj, 0.f, (float) gfx->currentScreen->logicalW,
                           (float) gfx->currentScreen->logicalH, 0.f, -1.f, 1.f, true);
-            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, gfx->uLoc_projection, &proj);
+            launcher_apply_projection(gfx, &proj);
         }
     }
     gfx->batchTex = tex;
     LauncherVertex *v = gfx->vbuf + gfx->vbufHead;
-    gfx->vbufHead   += count;
+    gfx->vbufHead += count;
     gfx->batchVerts += count;
     return v;
 }
@@ -1164,84 +1122,118 @@ static void launcher_rect(LauncherGfx *gfx, float x, float y, float w, float h,
     launcher_push_quad(gfx, &gfx->whiteTex, x, y, w, h, .5f, .5f, .5f, .5f, c);
 }
 
-// ---------------------------------------------------------------------------
-// Pixel font
-// ---------------------------------------------------------------------------
-
 static const uint8_t *launcher_glyph(char ch) {
-    static const uint8_t sp[7] = {0,0,0,0,0,0,0};
-    static const uint8_t q[7]  = {0x0E,0x11,0x01,0x02,0x04,0x00,0x04};
-    static const uint8_t A[7]  = {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11};
-    static const uint8_t B[7]  = {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E};
-    static const uint8_t C[7]  = {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E};
-    static const uint8_t D[7]  = {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E};
-    static const uint8_t E[7]  = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F};
-    static const uint8_t F[7]  = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10};
-    static const uint8_t G[7]  = {0x0E,0x11,0x10,0x17,0x11,0x11,0x0E};
-    static const uint8_t H[7]  = {0x11,0x11,0x11,0x1F,0x11,0x11,0x11};
-    static const uint8_t I[7]  = {0x1F,0x04,0x04,0x04,0x04,0x04,0x1F};
-    static const uint8_t J[7]  = {0x07,0x02,0x02,0x02,0x12,0x12,0x0C};
-    static const uint8_t K[7]  = {0x11,0x12,0x14,0x18,0x14,0x12,0x11};
-    static const uint8_t L[7]  = {0x10,0x10,0x10,0x10,0x10,0x10,0x1F};
-    static const uint8_t M[7]  = {0x11,0x1B,0x15,0x15,0x11,0x11,0x11};
-    static const uint8_t N[7]  = {0x11,0x19,0x15,0x13,0x11,0x11,0x11};
-    static const uint8_t O[7]  = {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E};
-    static const uint8_t P[7]  = {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10};
-    static const uint8_t Q[7]  = {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D};
-    static const uint8_t R[7]  = {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11};
-    static const uint8_t S[7]  = {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E};
-    static const uint8_t T[7]  = {0x1F,0x04,0x04,0x04,0x04,0x04,0x04};
-    static const uint8_t U[7]  = {0x11,0x11,0x11,0x11,0x11,0x11,0x0E};
-    static const uint8_t V[7]  = {0x11,0x11,0x11,0x11,0x0A,0x0A,0x04};
-    static const uint8_t W[7]  = {0x11,0x11,0x11,0x15,0x15,0x1B,0x11};
-    static const uint8_t X[7]  = {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11};
-    static const uint8_t Y[7]  = {0x11,0x11,0x0A,0x04,0x04,0x04,0x04};
-    static const uint8_t Z[7]  = {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F};
-    static const uint8_t n0[7] = {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E};
-    static const uint8_t n1[7] = {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E};
-    static const uint8_t n2[7] = {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F};
-    static const uint8_t n3[7] = {0x1E,0x01,0x01,0x0E,0x01,0x01,0x1E};
-    static const uint8_t n4[7] = {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02};
-    static const uint8_t n5[7] = {0x1F,0x10,0x10,0x1E,0x01,0x01,0x1E};
-    static const uint8_t n6[7] = {0x0E,0x10,0x10,0x1E,0x11,0x11,0x0E};
-    static const uint8_t n7[7] = {0x1F,0x01,0x02,0x04,0x08,0x08,0x08};
-    static const uint8_t n8[7] = {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E};
-    static const uint8_t n9[7] = {0x0E,0x11,0x11,0x0F,0x01,0x01,0x0E};
-    static const uint8_t dash[7] = {0,0,0,0x1F,0,0,0};
-    static const uint8_t dot[7]  = {0,0,0,0,0,0x0C,0x0C};
-    static const uint8_t slash[7]= {0x01,0x01,0x02,0x04,0x08,0x10,0x10};
-    static const uint8_t colon[7]= {0,0x0C,0x0C,0,0x0C,0x0C,0};
-    static const uint8_t under[7]= {0,0,0,0,0,0,0x1F};
-    static const uint8_t bang[7] = {0x04,0x04,0x04,0x04,0x04,0,0x04};
-    static const uint8_t pct[7]  = {0x19,0x19,0x02,0x04,0x08,0x13,0x13};
-    static const uint8_t lt[7]   = {0x02,0x04,0x08,0x10,0x08,0x04,0x02};
-    static const uint8_t gt[7]   = {0x08,0x04,0x02,0x01,0x02,0x04,0x08};
-    static const uint8_t plus[7] = {0,0x04,0x04,0x1F,0x04,0x04,0};
-    static const uint8_t lpar[7] = {0x02,0x04,0x08,0x08,0x08,0x04,0x02};
-    static const uint8_t rpar[7] = {0x08,0x04,0x02,0x02,0x02,0x04,0x08};
-    static const uint8_t lbr[7]  = {0x0E,0x08,0x08,0x08,0x08,0x08,0x0E};
-    static const uint8_t rbr[7]  = {0x0E,0x02,0x02,0x02,0x02,0x02,0x0E};
-    static const uint8_t eq[7]   = {0,0,0x1F,0,0x1F,0,0};
-    static const uint8_t hash[7] = {0x0A,0x0A,0x1F,0x0A,0x1F,0x0A,0x0A};
+    static const uint8_t sp[7] = {0, 0, 0, 0, 0, 0, 0};
+    static const uint8_t q[7] = {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04};
+    static const uint8_t A[7] = {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+    static const uint8_t B[7] = {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E};
+    static const uint8_t C[7] = {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E};
+    static const uint8_t D[7] = {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E};
+    static const uint8_t E[7] = {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F};
+    static const uint8_t F[7] = {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10};
+    static const uint8_t G[7] = {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0E};
+    static const uint8_t H[7] = {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+    static const uint8_t I[7] = {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F};
+    static const uint8_t J[7] = {0x07, 0x02, 0x02, 0x02, 0x12, 0x12, 0x0C};
+    static const uint8_t K[7] = {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11};
+    static const uint8_t L[7] = {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F};
+    static const uint8_t M[7] = {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11};
+    static const uint8_t N[7] = {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
+    static const uint8_t O[7] = {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+    static const uint8_t P[7] = {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10};
+    static const uint8_t Q[7] = {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D};
+    static const uint8_t R[7] = {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11};
+    static const uint8_t S[7] = {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E};
+    static const uint8_t T[7] = {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
+    static const uint8_t U[7] = {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+    static const uint8_t V[7] = {0x11, 0x11, 0x11, 0x11, 0x0A, 0x0A, 0x04};
+    static const uint8_t W[7] = {0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11};
+    static const uint8_t X[7] = {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11};
+    static const uint8_t Y[7] = {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04};
+    static const uint8_t Z[7] = {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F};
+    static const uint8_t n0[7] = {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E};
+    static const uint8_t n1[7] = {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E};
+    static const uint8_t n2[7] = {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F};
+    static const uint8_t n3[7] = {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E};
+    static const uint8_t n4[7] = {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02};
+    static const uint8_t n5[7] = {0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E};
+    static const uint8_t n6[7] = {0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E};
+    static const uint8_t n7[7] = {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08};
+    static const uint8_t n8[7] = {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E};
+    static const uint8_t n9[7] = {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E};
+    static const uint8_t dash[7] = {0, 0, 0, 0x1F, 0, 0, 0};
+    static const uint8_t dot[7] = {0, 0, 0, 0, 0, 0x0C, 0x0C};
+    static const uint8_t slash[7] = {0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10};
+    static const uint8_t colon[7] = {0, 0x0C, 0x0C, 0, 0x0C, 0x0C, 0};
+    static const uint8_t under[7] = {0, 0, 0, 0, 0, 0, 0x1F};
+    static const uint8_t bang[7] = {0x04, 0x04, 0x04, 0x04, 0x04, 0, 0x04};
+    static const uint8_t pct[7] = {0x19, 0x19, 0x02, 0x04, 0x08, 0x13, 0x13};
+    static const uint8_t lt[7] = {0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02};
+    static const uint8_t gt[7] = {0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08};
+    static const uint8_t plus[7] = {0, 0x04, 0x04, 0x1F, 0x04, 0x04, 0};
+    static const uint8_t lpar[7] = {0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02};
+    static const uint8_t rpar[7] = {0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08};
+    static const uint8_t lbr[7] = {0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E};
+    static const uint8_t rbr[7] = {0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E};
+    static const uint8_t eq[7] = {0, 0, 0x1F, 0, 0x1F, 0, 0};
+    static const uint8_t hash[7] = {0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A};
 
-    ch = (char)toupper((unsigned char)ch);
+    ch = (char) toupper((unsigned char)ch);
     switch (ch) {
-        case ' ': return sp; case '?': return q;
-        case 'A': return A; case 'B': return B; case 'C': return C; case 'D': return D;
-        case 'E': return E; case 'F': return F; case 'G': return G; case 'H': return H;
-        case 'I': return I; case 'J': return J; case 'K': return K; case 'L': return L;
-        case 'M': return M; case 'N': return N; case 'O': return O; case 'P': return P;
-        case 'Q': return Q; case 'R': return R; case 'S': return S; case 'T': return T;
-        case 'U': return U; case 'V': return V; case 'W': return W; case 'X': return X;
-        case 'Y': return Y; case 'Z': return Z;
-        case '0': return n0; case '1': return n1; case '2': return n2; case '3': return n3;
-        case '4': return n4; case '5': return n5; case '6': return n6; case '7': return n7;
-        case '8': return n8; case '9': return n9;
-        case '-': return dash; case '.': return dot; case '/': return slash; case ':': return colon;
-        case '_': return under; case '!': return bang; case '%': return pct;
-        case '<': return lt;   case '>': return gt;   case '+': return plus;
-        case '(': return lpar; case ')': return rpar; case '[': return lbr; case ']': return rbr;
-        case '=': return eq;   case '#': return hash;
+        case ' ': return sp;
+        case '?': return q;
+        case 'A': return A;
+        case 'B': return B;
+        case 'C': return C;
+        case 'D': return D;
+        case 'E': return E;
+        case 'F': return F;
+        case 'G': return G;
+        case 'H': return H;
+        case 'I': return I;
+        case 'J': return J;
+        case 'K': return K;
+        case 'L': return L;
+        case 'M': return M;
+        case 'N': return N;
+        case 'O': return O;
+        case 'P': return P;
+        case 'Q': return Q;
+        case 'R': return R;
+        case 'S': return S;
+        case 'T': return T;
+        case 'U': return U;
+        case 'V': return V;
+        case 'W': return W;
+        case 'X': return X;
+        case 'Y': return Y;
+        case 'Z': return Z;
+        case '0': return n0;
+        case '1': return n1;
+        case '2': return n2;
+        case '3': return n3;
+        case '4': return n4;
+        case '5': return n5;
+        case '6': return n6;
+        case '7': return n7;
+        case '8': return n8;
+        case '9': return n9;
+        case '-': return dash;
+        case '.': return dot;
+        case '/': return slash;
+        case ':': return colon;
+        case '_': return under;
+        case '!': return bang;
+        case '%': return pct;
+        case '<': return lt;
+        case '>': return gt;
+        case '+': return plus;
+        case '(': return lpar;
+        case ')': return rpar;
+        case '[': return lbr;
+        case ']': return rbr;
+        case '=': return eq;
+        case '#': return hash;
         default: return q;
     }
 }
@@ -1285,12 +1277,11 @@ static void launcher_draw_centered_text_rgb(LauncherGfx *gfx, const char *text, 
     launcher_draw_centered_text(gfx, text, centerX, y, scale, c[0], c[1], c[2], a);
 }
 
-// ---------------------------------------------------------------------------
-// Frame lifecycle
-// ---------------------------------------------------------------------------
-
 void launcher_gfx_destroy(LauncherGfx *gfx) {
     if (!gfx) return;
+    if (gfx->ready && !gfx->inFrame) {
+        C3D_FrameSync();
+    }
     if (gfx->whiteTex.data) C3D_TexDelete(&gfx->whiteTex);
     if (gfx->vbuf) linearFree(gfx->vbuf);
     if (gfx->topScreen.owns && gfx->topScreen.target) C3D_RenderTargetDelete(gfx->topScreen.target);
@@ -1299,7 +1290,7 @@ void launcher_gfx_destroy(LauncherGfx *gfx) {
 }
 
 static bool launcher_gfx_init_common(LauncherGfx *gfx) {
-    gfx->uLoc_projection = shaderInstanceGetUniformLocation(g_shaderProg.vertexShader, "projection");
+    gfx->uLoc_projection = launcher_lookup_projection_uniform();
 
     AttrInfo_Init(&gfx->attrInfo);
     AttrInfo_AddLoader(&gfx->attrInfo, 0, GPU_FLOAT, 3);
@@ -1307,7 +1298,7 @@ static bool launcher_gfx_init_common(LauncherGfx *gfx) {
     AttrInfo_AddLoader(&gfx->attrInfo, 2, GPU_FLOAT, 4);
 
     gfx->vbufCap = LAUNCHER_VBUF_CAP;
-    gfx->vbuf    = linearAlloc(gfx->vbufCap * sizeof(LauncherVertex));
+    gfx->vbuf = linearAlloc(gfx->vbufCap * sizeof(LauncherVertex));
     if (!gfx->vbuf) return false;
 
     if (!C3D_TexInit(&gfx->whiteTex, 8, 8, GPU_RGBA4)) return false;
@@ -1331,8 +1322,8 @@ bool launcher_gfx_init(LauncherGfx *gfx) {
                                                    GPU_RB_RGBA8, GPU_RB_DEPTH16);
     if (!gfx->topScreen.target) goto fail;
     C3D_RenderTargetSetOutput(gfx->topScreen.target, GFX_TOP, GFX_LEFT, LAUNCHER_DISPLAY_TRANSFER_FLAGS);
-    gfx->topScreen.owns     = true;
-    gfx->topScreen.ready    = true;
+    gfx->topScreen.owns = true;
+    gfx->topScreen.ready = true;
     gfx->topScreen.logicalW = LAUNCHER_TOP_W;
     gfx->topScreen.logicalH = LAUNCHER_TOP_H;
 
@@ -1340,8 +1331,8 @@ bool launcher_gfx_init(LauncherGfx *gfx) {
                                                       GPU_RB_RGBA8, GPU_RB_DEPTH16);
     if (!gfx->bottomScreen.target) goto fail;
     C3D_RenderTargetSetOutput(gfx->bottomScreen.target, GFX_BOTTOM, GFX_LEFT, LAUNCHER_DISPLAY_TRANSFER_FLAGS);
-    gfx->bottomScreen.owns     = true;
-    gfx->bottomScreen.ready    = true;
+    gfx->bottomScreen.owns = true;
+    gfx->bottomScreen.ready = true;
     gfx->bottomScreen.logicalW = LAUNCHER_BOT_W;
     gfx->bottomScreen.logicalH = LAUNCHER_BOT_H;
 
@@ -1359,16 +1350,16 @@ bool launcher_gfx_init_borrowed(LauncherGfx *gfx,
     memset(gfx, 0, sizeof(*gfx));
 
     if (topTarget) {
-        gfx->topScreen.target   = topTarget;
-        gfx->topScreen.owns     = false;
-        gfx->topScreen.ready    = true;
+        gfx->topScreen.target = topTarget;
+        gfx->topScreen.owns = false;
+        gfx->topScreen.ready = true;
         gfx->topScreen.logicalW = topW;
         gfx->topScreen.logicalH = topH;
     }
     if (bottomTarget) {
-        gfx->bottomScreen.target   = bottomTarget;
-        gfx->bottomScreen.owns     = false;
-        gfx->bottomScreen.ready    = true;
+        gfx->bottomScreen.target = bottomTarget;
+        gfx->bottomScreen.owns = false;
+        gfx->bottomScreen.ready = true;
         gfx->bottomScreen.logicalW = bottomW;
         gfx->bottomScreen.logicalH = bottomH;
     }
@@ -1383,11 +1374,11 @@ bool launcher_gfx_init_borrowed(LauncherGfx *gfx,
 static bool launcher_begin_frame(LauncherGfx *gfx) {
     if (!gfx->ready) return false;
     if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) return false;
-    gfx->inFrame    = true;
-    gfx->vbufHead   = 0;
+    gfx->inFrame = true;
+    gfx->vbufHead = 0;
     gfx->batchStart = 0;
     gfx->batchVerts = 0;
-    gfx->batchTex   = NULL;
+    gfx->batchTex = NULL;
     gfx->currentScreen = NULL;
 
     C3D_BindProgram(&g_shaderProg);
@@ -1417,16 +1408,12 @@ static void launcher_bind_screen(LauncherGfx *gfx, LauncherScreen *scr,
     if (switchingTarget) C3D_FrameSplit(0);
 
     gfx->currentScreen = scr;
-    gfx->batchStart   = gfx->vbufHead;
+    gfx->batchStart = gfx->vbufHead;
 
     if (clear) {
         C3D_RenderTargetClear(scr->target, C3D_CLEAR_ALL, clearColor, 0);
     }
     C3D_FrameDrawOn(scr->target);
-
-    // Re-bind the full pipeline state — citro3d does NOT preserve all of this
-    // across C3D_FrameDrawOn switches, so without this the second screen renders
-    // through a half-configured pipeline (corrupt colours, wrong UVs).
     C3D_BindProgram(&g_shaderProg);
     C3D_SetAttrInfo(&gfx->attrInfo);
 
@@ -1444,13 +1431,13 @@ static void launcher_bind_screen(LauncherGfx *gfx, LauncherScreen *scr,
                    GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
                    GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
 
-    C3D_SetViewport(0, 0, (u32)scr->logicalH, (u32)scr->logicalW);
+    C3D_SetViewport(0, 0, (u32) scr->logicalH, (u32) scr->logicalW);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 
     C3D_Mtx proj;
     Mtx_Identity(&proj);
-    Mtx_OrthoTilt(&proj, 0.f, (float)scr->logicalW, (float)scr->logicalH, 0.f, -1.f, 1.f, true);
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, gfx->uLoc_projection, &proj);
+    Mtx_OrthoTilt(&proj, 0.f, (float) scr->logicalW, (float) scr->logicalH, 0.f, -1.f, 1.f, true);
+    launcher_apply_projection(gfx, &proj);
 }
 
 static void launcher_end_frame(LauncherGfx *gfx) {
@@ -1460,19 +1447,12 @@ static void launcher_end_frame(LauncherGfx *gfx) {
     gfx->currentScreen = NULL;
 }
 
-// ---------------------------------------------------------------------------
-// Animation timer
-// ---------------------------------------------------------------------------
-
 static u64 g_launcher_t0_ms = 0;
+
 float launcher_anim_seconds(void) {
     if (g_launcher_t0_ms == 0) g_launcher_t0_ms = osGetTime();
-    return (float)(osGetTime() - g_launcher_t0_ms) * 0.001f;
+    return (float) (osGetTime() - g_launcher_t0_ms) * 0.001f;
 }
-
-// ---------------------------------------------------------------------------
-// Themed background (works on any screen size)
-// ---------------------------------------------------------------------------
 
 static void launcher_draw_themed_background(LauncherGfx *gfx, float t,
                                             float w, float h,
@@ -1480,15 +1460,21 @@ static void launcher_draw_themed_background(LauncherGfx *gfx, float t,
     float warm = 0.5f + 0.5f * sinf(t * 0.35f);
     float deep = 0.5f + 0.5f * sinf(t * 0.27f + 1.1f);
 
-    float top[4] = { th->bg_top[0] + 0.06f * warm,
-                     th->bg_top[1] + 0.04f * deep,
-                     th->bg_top[2] + 0.06f * warm, 1.f };
-    float mid[4] = { th->bg_mid[0] + 0.04f * deep,
-                     th->bg_mid[1] + 0.03f * warm,
-                     th->bg_mid[2] + 0.04f * deep, 1.f };
-    float bot[4] = { th->bg_bot[0],
-                     th->bg_bot[1] + 0.01f * warm,
-                     th->bg_bot[2] + 0.03f * deep, 1.f };
+    float top[4] = {
+        th->bg_top[0] + 0.06f * warm,
+        th->bg_top[1] + 0.04f * deep,
+        th->bg_top[2] + 0.06f * warm, 1.f
+    };
+    float mid[4] = {
+        th->bg_mid[0] + 0.04f * deep,
+        th->bg_mid[1] + 0.03f * warm,
+        th->bg_mid[2] + 0.04f * deep, 1.f
+    };
+    float bot[4] = {
+        th->bg_bot[0],
+        th->bg_bot[1] + 0.01f * warm,
+        th->bg_bot[2] + 0.03f * deep, 1.f
+    };
 
     launcher_push_quad_grad(gfx, &gfx->whiteTex,
                             0, 0, w, 0, w, h * 0.55f, 0, h * 0.55f,
@@ -1500,8 +1486,8 @@ static void launcher_draw_themed_background(LauncherGfx *gfx, float t,
 
     if (g_settings.show_side_blur) {
         for (int i = 0; i < 6; i++) {
-            float band_y = fmodf(t * 8.f + (float)i * 67.f, h + 80.f) - 40.f;
-            float a = 0.030f + 0.020f * sinf(t * 0.6f + (float)i);
+            float band_y = fmodf(t * 8.f + (float) i * 67.f, h + 80.f) - 40.f;
+            float a = 0.030f + 0.020f * sinf(t * 0.6f + (float) i);
             launcher_push_quad(gfx, &gfx->whiteTex,
                                -20.f, band_y, w + 40.f, 18.f,
                                .5f, .5f, .5f, .5f,
@@ -1510,16 +1496,16 @@ static void launcher_draw_themed_background(LauncherGfx *gfx, float t,
     }
 
     if (g_settings.show_side_particles) {
-        const float *hues[3] = { th->particle_a, th->particle_b, th->particle_c };
+        const float *hues[3] = {th->particle_a, th->particle_b, th->particle_c};
         for (int i = 0; i < 64; i++) {
-            float seed  = (float)i * 12.91f;
-            float orbit = 18.f + (float)(i % 5) * 9.f;
-            float ang   = t * (0.18f + (float)(i & 3) * 0.07f) + seed;
+            float seed = (float) i * 12.91f;
+            float orbit = 18.f + (float) (i % 5) * 9.f;
+            float ang = t * (0.18f + (float) (i & 3) * 0.07f) + seed;
             float baseX = fmodf(seed * 17.3f, w);
-            float baseY = fmodf(seed * 11.7f + t * (3.f + (float)(i % 4) * 1.2f), h + 40.f) - 20.f;
+            float baseY = fmodf(seed * 11.7f + t * (3.f + (float) (i % 4) * 1.2f), h + 40.f) - 20.f;
             float x = baseX + cosf(ang) * orbit;
             float y = baseY + sinf(ang * 1.3f) * orbit * 0.45f;
-            float s = 1.4f + (float)(i % 6) * 0.55f;
+            float s = 1.4f + (float) (i % 6) * 0.55f;
             float a = 0.16f + (sinf(t * 1.4f + seed) + 1.f) * 0.10f;
             const float *c = hues[i % 3];
             launcher_rect(gfx, x, y, s, s, c[0], c[1], c[2], a);
@@ -1529,10 +1515,10 @@ static void launcher_draw_themed_background(LauncherGfx *gfx, float t,
 
 static void launcher_draw_top_chrome(LauncherGfx *gfx, float w, const LauncherTheme *th, float t,
                                      const char *title) {
-    launcher_rect(gfx, 0, 0,   w, 26, 0.04f, 0.035f, 0.085f, 0.92f);
-    launcher_rect(gfx, 0, 26,  w, 1,
+    launcher_rect(gfx, 0, 0, w, 26, 0.04f, 0.035f, 0.085f, 0.92f);
+    launcher_rect(gfx, 0, 26, w, 1,
                   th->accent[0], th->accent[1], th->accent[2], 0.95f);
-    launcher_rect(gfx, 0, 27,  w, 1,
+    launcher_rect(gfx, 0, 27, w, 1,
                   th->accent_dim[0], th->accent_dim[1], th->accent_dim[2], 0.55f);
 
     launcher_rect(gfx, 0, 215, w, 25, 0.030f, 0.028f, 0.065f, 0.93f);
@@ -1549,10 +1535,6 @@ static void launcher_draw_top_chrome(LauncherGfx *gfx, float w, const LauncherTh
                        1.f);
 }
 
-// ---------------------------------------------------------------------------
-// Top-screen menu
-// ---------------------------------------------------------------------------
-
 static void launcher_draw_scrollbar(LauncherGfx *gfx, float cam_y, float max_y, const LauncherTheme *th) {
     if (max_y <= 0.f) return;
     float trackX = 392.f, trackY = 34.f, trackW = 4.f, trackH = 174.f;
@@ -1567,9 +1549,9 @@ static void launcher_draw_scrollbar(LauncherGfx *gfx, float cam_y, float max_y, 
 static void launcher_draw_icon_or_placeholder(LauncherGfx *gfx, const LauncherGameEntry *game,
                                               float x, float y, float size, int index) {
     if (game->icon_ready) {
-        float u1 = (float)game->icon_w / (float)game->icon_pot_w;
-        float v1 = (float)game->icon_h / (float)game->icon_pot_h;
-        launcher_push_quad(gfx, (C3D_Tex *)&game->icon_tex, x, y, size, size, 0.f, 0.f, u1, v1,
+        float u1 = (float) game->icon_w / (float) game->icon_pot_w;
+        float v1 = (float) game->icon_h / (float) game->icon_pot_h;
+        launcher_push_quad(gfx, (C3D_Tex *) &game->icon_tex, x, y, size, size, 0.f, 0.f, u1, v1,
                            (float[4]){1.f, 1.f, 1.f, 1.f});
         return;
     }
@@ -1595,8 +1577,8 @@ static void launcher_draw_icon_or_placeholder(LauncherGfx *gfx, const LauncherGa
 
 static void launcher_render_grid(LauncherGfx *gfx, int selected, float t, float cam_y, float select_anim) {
     const LauncherTheme *th = launcher_current_theme();
-    const float W = (float)LAUNCHER_TOP_W;
-    const float H = (float)LAUNCHER_TOP_H;
+    const float W = (float) LAUNCHER_TOP_W;
+    const float H = (float) LAUNCHER_TOP_H;
 
     launcher_bind_screen(gfx, &gfx->topScreen, true, 0x070914FF);
     launcher_draw_themed_background(gfx, t, W, H, th);
@@ -1615,8 +1597,8 @@ static void launcher_render_grid(LauncherGfx *gfx, int selected, float t, float 
     for (int i = 0; i < g_game_count; i++) {
         int col = i % cols;
         int row = i / cols;
-        float x = gridX + (float)col * gapX;
-        float y = gridY + (float)row * gapY - cam_y;
+        float x = gridX + (float) col * gapX;
+        float y = gridY + (float) row * gapY - cam_y;
         if (y < -tileSize - 12.f || y > H + 12.f) continue;
 
         bool sel = (i == selected);
@@ -1665,37 +1647,27 @@ static void launcher_render_grid(LauncherGfx *gfx, int selected, float t, float 
     launcher_draw_top_chrome(gfx, W, th, t, "BUTTERSCOTCH");
 }
 
-// ---------------------------------------------------------------------------
-// Bottom-screen detail panel
-// ---------------------------------------------------------------------------
-
 static void launcher_draw_bottom_panel(LauncherGfx *gfx, int selected, float t,
                                        const char *footer1, const char *footer2) {
     const LauncherTheme *th = launcher_current_theme();
-    const float W = (float)LAUNCHER_BOT_W;
-    const float H = (float)LAUNCHER_BOT_H;
+    const float W = (float) LAUNCHER_BOT_W;
+    const float H = (float) LAUNCHER_BOT_H;
 
     if (!gfx->bottomScreen.ready) return;
 
     launcher_bind_screen(gfx, &gfx->bottomScreen, true, 0x050711FF);
     launcher_draw_themed_background(gfx, t * 0.7f, W, H, th);
-
-    // Header band
     launcher_rect(gfx, 0, 0, W, 22, 0.04f, 0.035f, 0.085f, 0.92f);
     launcher_rect(gfx, 0, 22, W, 1,
                   th->accent[0], th->accent[1], th->accent[2], 0.85f);
     launcher_rect(gfx, 0, 23, W, 1,
                   th->accent_dim[0], th->accent_dim[1], th->accent_dim[2], 0.55f);
     launcher_draw_text_rgb(gfx, "GAME INFO", 10, 7, 1.20f, th->text_title, 1.f);
-
-    // Footer band
     launcher_rect(gfx, 0, H - 22, W, 22, 0.030f, 0.028f, 0.065f, 0.93f);
     launcher_rect(gfx, 0, H - 23, W, 1,
                   th->accent[0], th->accent[1], th->accent[2], 0.85f);
 
     const LauncherGameEntry *game = (selected >= 0 && selected < g_game_count) ? &g_games[selected] : NULL;
-
-    // Big icon
     float iconSize = 96.f;
     float ix = 16.f;
     float iy = 38.f;
@@ -1706,8 +1678,6 @@ static void launcher_draw_bottom_panel(LauncherGfx *gfx, int selected, float t,
     if (game) {
         launcher_draw_icon_or_placeholder(gfx, game, ix + 6, iy + 6, iconSize - 12, selected);
     }
-
-    // Text column
     float tx = ix + iconSize + 14.f;
     float ty = iy;
     char buf[64];
@@ -1733,60 +1703,89 @@ static void launcher_draw_bottom_panel(LauncherGfx *gfx, int selected, float t,
     launcher_draw_text_rgb(gfx, th->display, tx + 50.f, ty, 1.00f, th->text_main, 1.f);
     ty += 16.f;
     launcher_draw_text_rgb(gfx, g_settings.game_screen == LAUNCHER_GAME_SCREEN_TOP
-                                  ? "PLAY ON: TOP" : "PLAY ON: BOTTOM",
+                                    ? "PLAY ON: TOP"
+                                    : "PLAY ON: BOTTOM",
                            tx, ty, 1.00f, th->text_subtle, 0.80f);
-
-    // Footer hint text
     if (footer1) launcher_draw_text_rgb(gfx, footer1, 6, H - 17, 0.95f, th->text_main, 0.95f);
     if (footer2) launcher_draw_text_rgb(gfx, footer2, 6, H - 9, 0.95f, th->text_subtle, 0.85f);
 }
 
-// ---------------------------------------------------------------------------
-// Settings screen (top + bottom)
-// ---------------------------------------------------------------------------
-
 static void launcher_vk_label(int vk, char *out, size_t size) {
-    if (vk == VK_NOKEY) { snprintf(out, size, "DISABLED"); return; }
-    if (vk == VK_ANYKEY) { snprintf(out, size, "ANYKEY"); return; }
-    if (vk >= 'A' && vk <= 'Z') { snprintf(out, size, "%c", (char)vk); return; }
-    if (vk >= '0' && vk <= '9') { snprintf(out, size, "%c", (char)vk); return; }
-    if (vk >= VK_F1 && vk <= VK_F12) { snprintf(out, size, "F%d", vk - VK_F1 + 1); return; }
+    if (vk == VK_NOKEY) {
+        snprintf(out, size, "DISABLED");
+        return;
+    }
+    if (vk == VK_ANYKEY) {
+        snprintf(out, size, "ANYKEY");
+        return;
+    }
+    if (vk >= 'A' && vk <= 'Z') {
+        snprintf(out, size, "%c", (char) vk);
+        return;
+    }
+    if (vk >= '0' && vk <= '9') {
+        snprintf(out, size, "%c", (char) vk);
+        return;
+    }
+    if (vk >= VK_F1 && vk <= VK_F12) {
+        snprintf(out, size, "F%d", vk - VK_F1 + 1);
+        return;
+    }
 
     switch (vk) {
-        case VK_BACKSPACE: snprintf(out, size, "BACKSPACE"); break;
-        case VK_TAB:       snprintf(out, size, "TAB"); break;
-        case VK_ENTER:     snprintf(out, size, "ENTER"); break;
-        case VK_SHIFT:     snprintf(out, size, "SHIFT"); break;
-        case VK_CONTROL:   snprintf(out, size, "CTRL"); break;
-        case VK_ALT:       snprintf(out, size, "ALT"); break;
-        case VK_ESCAPE:    snprintf(out, size, "ESC"); break;
-        case VK_SPACE:     snprintf(out, size, "SPACE"); break;
-        case VK_PAGEUP:    snprintf(out, size, "PAGEUP"); break;
-        case VK_PAGEDOWN:  snprintf(out, size, "PAGEDOWN"); break;
-        case VK_END:       snprintf(out, size, "END"); break;
-        case VK_HOME:      snprintf(out, size, "HOME"); break;
-        case VK_LEFT:      snprintf(out, size, "LEFT"); break;
-        case VK_UP:        snprintf(out, size, "UP"); break;
-        case VK_RIGHT:     snprintf(out, size, "RIGHT"); break;
-        case VK_DOWN:      snprintf(out, size, "DOWN"); break;
-        case VK_INSERT:    snprintf(out, size, "INSERT"); break;
-        case VK_DELETE:    snprintf(out, size, "DELETE"); break;
-        default:           snprintf(out, size, "VK%03d", vk & 255); break;
+        case VK_BACKSPACE: snprintf(out, size, "BACKSPACE");
+            break;
+        case VK_TAB: snprintf(out, size, "TAB");
+            break;
+        case VK_ENTER: snprintf(out, size, "ENTER");
+            break;
+        case VK_SHIFT: snprintf(out, size, "SHIFT");
+            break;
+        case VK_CONTROL: snprintf(out, size, "CTRL");
+            break;
+        case VK_ALT: snprintf(out, size, "ALT");
+            break;
+        case VK_ESCAPE: snprintf(out, size, "ESC");
+            break;
+        case VK_SPACE: snprintf(out, size, "SPACE");
+            break;
+        case VK_PAGEUP: snprintf(out, size, "PAGEUP");
+            break;
+        case VK_PAGEDOWN: snprintf(out, size, "PAGEDOWN");
+            break;
+        case VK_END: snprintf(out, size, "END");
+            break;
+        case VK_HOME: snprintf(out, size, "HOME");
+            break;
+        case VK_LEFT: snprintf(out, size, "LEFT");
+            break;
+        case VK_UP: snprintf(out, size, "UP");
+            break;
+        case VK_RIGHT: snprintf(out, size, "RIGHT");
+            break;
+        case VK_DOWN: snprintf(out, size, "DOWN");
+            break;
+        case VK_INSERT: snprintf(out, size, "INSERT");
+            break;
+        case VK_DELETE: snprintf(out, size, "DELETE");
+            break;
+        default: snprintf(out, size, "VK%03d", vk & 255);
+            break;
     }
 }
 
 static void launcher_step_control_vk(LauncherControlMap *map, int idx, int delta) {
     if (!map || idx < 0 || idx >= LAUNCHER_CONTROL_COUNT) return;
-    int vk = (int)map->vk[idx] + delta;
+    int vk = (int) map->vk[idx] + delta;
     while (vk < 0) vk += GML_KEY_COUNT;
     while (vk >= GML_KEY_COUNT) vk -= GML_KEY_COUNT;
-    map->vk[idx] = (uint8_t)vk;
+    map->vk[idx] = (uint8_t) vk;
 }
 
 static void controls_draw_top(LauncherGfx *gfx, const LauncherControlMap *map,
                               int selected, const char *title, float t) {
     const LauncherTheme *th = launcher_current_theme();
-    const float W = (float)LAUNCHER_TOP_W;
+    const float W = (float) LAUNCHER_TOP_W;
     const int visible = 8;
     int first = selected - visible / 2;
     if (first < 0) first = 0;
@@ -1806,7 +1805,7 @@ static void controls_draw_top(LauncherGfx *gfx, const LauncherControlMap *map,
         int idx = first + row;
         if (idx >= LAUNCHER_CONTROL_COUNT) break;
         bool selRow = (idx == selected);
-        float y = listY + (float)row * rowH;
+        float y = listY + (float) row * rowH;
         if (selRow) {
             float breath = 0.5f + 0.5f * sinf(t * 3.0f);
             launcher_rect(gfx, listX - 8, y - 3, W - listX * 2 + 16, rowH - 3,
@@ -1817,7 +1816,7 @@ static void controls_draw_top(LauncherGfx *gfx, const LauncherControlMap *map,
         }
 
         launcher_vk_label(map->vk[idx], value, sizeof(value));
-        snprintf(code, sizeof(code), "%03u", (unsigned)map->vk[idx]);
+        snprintf(code, sizeof(code), "%03u", (unsigned) map->vk[idx]);
         launcher_draw_text_rgb(gfx, g_control_defs[idx].label, listX, y, 1.12f,
                                selRow ? th->text_main : th->text_subtle, 1.f);
         float vw = launcher_text_width(value, 1.12f);
@@ -1834,8 +1833,8 @@ static void controls_draw_bottom(LauncherGfx *gfx, const LauncherControlMap *map
                                  int selected, float t) {
     if (!gfx->bottomScreen.ready) return;
     const LauncherTheme *th = launcher_current_theme();
-    const float W = (float)LAUNCHER_BOT_W;
-    const float H = (float)LAUNCHER_BOT_H;
+    const float W = (float) LAUNCHER_BOT_W;
+    const float H = (float) LAUNCHER_BOT_H;
     char vkName[32];
     launcher_vk_label(map->vk[selected], vkName, sizeof(vkName));
 
@@ -1853,7 +1852,7 @@ static void controls_draw_bottom(LauncherGfx *gfx, const LauncherControlMap *map
                                     1.95f, th->text_title, 1.f);
 
     char code[32];
-    snprintf(code, sizeof(code), "VK CODE %03u", (unsigned)map->vk[selected]);
+    snprintf(code, sizeof(code), "VK CODE %03u", (unsigned) map->vk[selected]);
     launcher_draw_centered_text_rgb(gfx, code, W * 0.5f, 126.f,
                                     1.10f, th->text_subtle, 0.92f);
 
@@ -1907,12 +1906,12 @@ static bool launcher_run_control_mapper(LauncherGfx *gfx, LauncherControlMap *ta
 }
 
 typedef struct {
-    int          theme_index;
+    int theme_index;
     LauncherGameScreen game_screen;
-    int          show_side_particles;
-    int          show_side_blur;
+    int show_side_particles;
+    int show_side_blur;
     LauncherBackdropMode backdrop_mode;
-    int          os_type;
+    int os_type;
     LauncherInputMode input_mode;
 } LauncherSettingsDraft;
 
@@ -1930,14 +1929,14 @@ enum {
 
 static const char *settings_option_label(int idx) {
     switch (idx) {
-        case SETTINGS_OPT_THEME:        return "THEME";
-        case SETTINGS_OPT_GAME_SCREEN:  return "GAME SCREEN";
-        case SETTINGS_OPT_BACKDROP:     return "EMPTY SPACE";
-        case SETTINGS_OPT_PARTICLES:    return "SIDE PARTICLES";
-        case SETTINGS_OPT_BLUR:         return "SIDE BLUR";
-        case SETTINGS_OPT_OS_TYPE:      return "OS TYPE";
-        case SETTINGS_OPT_INPUT_MODE:   return "INPUT MODE";
-        case SETTINGS_OPT_CONTROLS:     return "GLOBAL CONTROLS";
+        case SETTINGS_OPT_THEME: return "THEME";
+        case SETTINGS_OPT_GAME_SCREEN: return "GAME SCREEN";
+        case SETTINGS_OPT_BACKDROP: return "EMPTY SPACE";
+        case SETTINGS_OPT_PARTICLES: return "SIDE PARTICLES";
+        case SETTINGS_OPT_BLUR: return "SIDE BLUR";
+        case SETTINGS_OPT_OS_TYPE: return "OS TYPE";
+        case SETTINGS_OPT_INPUT_MODE: return "INPUT MODE";
+        case SETTINGS_OPT_CONTROLS: return "GLOBAL CONTROLS";
         default: return "?";
     }
 }
@@ -1986,7 +1985,8 @@ static void settings_option_step(LauncherSettingsDraft *d, int idx, int dir) {
         }
         case SETTINGS_OPT_GAME_SCREEN:
             d->game_screen = (d->game_screen == LAUNCHER_GAME_SCREEN_TOP)
-                                 ? LAUNCHER_GAME_SCREEN_BOTTOM : LAUNCHER_GAME_SCREEN_TOP;
+                                 ? LAUNCHER_GAME_SCREEN_BOTTOM
+                                 : LAUNCHER_GAME_SCREEN_TOP;
             break;
         case SETTINGS_OPT_BACKDROP:
             d->backdrop_mode = launcher_next_backdrop(d->backdrop_mode, dir);
@@ -2006,9 +2006,9 @@ static void settings_option_step(LauncherSettingsDraft *d, int idx, int dir) {
             break;
         }
         case SETTINGS_OPT_INPUT_MODE: {
-            int next = ((int)d->input_mode + dir + LAUNCHER_INPUT_MODE_COUNT)
+            int next = ((int) d->input_mode + dir + LAUNCHER_INPUT_MODE_COUNT)
                        % LAUNCHER_INPUT_MODE_COUNT;
-            d->input_mode = (LauncherInputMode)next;
+            d->input_mode = (LauncherInputMode) next;
             break;
         }
         case SETTINGS_OPT_CONTROLS:
@@ -2019,8 +2019,8 @@ static void settings_option_step(LauncherSettingsDraft *d, int idx, int dir) {
 
 static void settings_draw_top(LauncherGfx *gfx, const LauncherSettingsDraft *d, int sel, float t) {
     const LauncherTheme *th = launcher_theme_at(d->theme_index);
-    const float W = (float)LAUNCHER_TOP_W;
-    const float H = (float)LAUNCHER_TOP_H;
+    const float W = (float) LAUNCHER_TOP_W;
+    const float H = (float) LAUNCHER_TOP_H;
 
     launcher_bind_screen(gfx, &gfx->topScreen, true, 0x070914FF);
     launcher_draw_themed_background(gfx, t, W, H, th);
@@ -2028,12 +2028,12 @@ static void settings_draw_top(LauncherGfx *gfx, const LauncherSettingsDraft *d, 
 
     float listX = 36.f;
     float listY = 44.f;
-    float rowH  = 22.f;
+    float rowH = 22.f;
 
     char value[48];
     for (int i = 0; i < SETTINGS_OPTION_COUNT; i++) {
         bool selRow = (i == sel);
-        float ry = listY + (float)i * rowH;
+        float ry = listY + (float) i * rowH;
         if (selRow) {
             float breath = 0.5f + 0.5f * sinf(t * 3.0f);
             launcher_rect(gfx, listX - 8, ry - 4, W - listX * 2 + 16, rowH - 4,
@@ -2055,8 +2055,8 @@ static void settings_draw_top(LauncherGfx *gfx, const LauncherSettingsDraft *d, 
 
 static void settings_draw_bottom(LauncherGfx *gfx, const LauncherSettingsDraft *d, float t) {
     const LauncherTheme *th = launcher_theme_at(d->theme_index);
-    const float W = (float)LAUNCHER_BOT_W;
-    const float H = (float)LAUNCHER_BOT_H;
+    const float W = (float) LAUNCHER_BOT_W;
+    const float H = (float) LAUNCHER_BOT_H;
 
     if (!gfx->bottomScreen.ready) return;
 
@@ -2067,8 +2067,6 @@ static void settings_draw_bottom(LauncherGfx *gfx, const LauncherSettingsDraft *
     launcher_rect(gfx, 0, 22, W, 1,
                   th->accent[0], th->accent[1], th->accent[2], 0.85f);
     launcher_draw_text_rgb(gfx, "PREVIEW", 10, 7, 1.20f, th->text_title, 1.f);
-
-    // Theme preview swatches
     float sx = 16.f, sy = 36.f, sw = 22.f, gap = 6.f;
     const float *swatches[5] = {
         th->accent, th->particle_a, th->particle_b, th->particle_c, th->text_main
@@ -2101,18 +2099,18 @@ static void settings_draw_bottom(LauncherGfx *gfx, const LauncherSettingsDraft *
 
     launcher_rect(gfx, 0, H - 22, W, 22, 0.030f, 0.028f, 0.065f, 0.93f);
     launcher_draw_text_rgb(gfx, "DPAD: NAVIGATE  L/R: CHANGE  A: EDIT/SAVE", 6, H - 17, 0.95f, th->text_main, 1.f);
-    launcher_draw_text_rgb(gfx, "B: CANCEL  Y: RESET DEFAULTS",         6, H - 9,  0.95f, th->text_subtle, 0.85f);
+    launcher_draw_text_rgb(gfx, "B: CANCEL  Y: RESET DEFAULTS", 6, H - 9, 0.95f, th->text_subtle, 0.85f);
 }
 
 static bool launcher_run_settings(LauncherGfx *gfx) {
     LauncherSettingsDraft draft = {
-        .theme_index         = g_settings.theme_index,
-        .game_screen         = g_settings.game_screen,
+        .theme_index = g_settings.theme_index,
+        .game_screen = g_settings.game_screen,
         .show_side_particles = g_settings.show_side_particles,
-        .show_side_blur      = g_settings.show_side_blur,
-        .backdrop_mode       = g_settings.backdrop_mode,
-        .os_type             = g_settings.os_type,
-        .input_mode          = g_settings.input_mode,
+        .show_side_blur = g_settings.show_side_blur,
+        .backdrop_mode = g_settings.backdrop_mode,
+        .os_type = g_settings.os_type,
+        .input_mode = g_settings.input_mode,
     };
     int sel = 0;
 
@@ -2120,7 +2118,7 @@ static bool launcher_run_settings(LauncherGfx *gfx) {
         hidScanInput();
         u32 kDown = hidKeysDown();
 
-        if (kDown & KEY_B) return false; // cancelled
+        if (kDown & KEY_B) return false;
         if (kDown & (KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN)) {
             sel = (sel + 1) % SETTINGS_OPTION_COUNT;
         }
@@ -2172,10 +2170,6 @@ static bool launcher_run_settings(LauncherGfx *gfx) {
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// Main launcher menu
-// ---------------------------------------------------------------------------
-
 int launcher_run_menu(LauncherGfx *gfx) {
     launcher_scan_games();
     bool gfx_ready = (gfx && gfx->ready);
@@ -2187,7 +2181,6 @@ int launcher_run_menu(LauncherGfx *gfx) {
             if (kDown & KEY_START) return -1;
             if (kDown & KEY_SELECT) {
                 if (launcher_run_settings(gfx)) {
-                    // settings might allow re-scan on close - nothing else to do
                 }
             }
             if (gfx_ready && launcher_begin_frame(gfx)) {
@@ -2197,7 +2190,8 @@ int launcher_run_menu(LauncherGfx *gfx) {
                 launcher_draw_themed_background(gfx, t, LAUNCHER_TOP_W, LAUNCHER_TOP_H, th);
                 launcher_draw_top_chrome(gfx, LAUNCHER_TOP_W, th, t, "BUTTERSCOTCH");
                 launcher_draw_centered_text_rgb(gfx, "NO GAMES FOUND", 200.f, 98.f, 2.25f, th->text_title, 1.f);
-                launcher_draw_centered_text_rgb(gfx, "SDMC:/3DS/BUTTERSCOTCH", 200.f, 132.f, 1.45f, th->text_subtle, 0.9f);
+                launcher_draw_centered_text_rgb(gfx, "SDMC:/3DS/BUTTERSCOTCH", 200.f, 132.f, 1.45f, th->text_subtle,
+                                                0.9f);
                 launcher_draw_bottom_panel(gfx, -1, t,
                                            "SELECT = SETTINGS    START = QUIT",
                                            "PLACE GAMES IN SDMC:/3DS/BUTTERSCOTCH");
@@ -2214,7 +2208,7 @@ int launcher_run_menu(LauncherGfx *gfx) {
 
     const float tile_gap_y = 92.f;
     const float grid_y = 36.f;
-    const float visible_h = (float)LAUNCHER_TOP_H - grid_y - 28.f;
+    const float visible_h = (float) LAUNCHER_TOP_H - grid_y - 28.f;
     const int cols = 4;
 
     while (aptMainLoop()) {
@@ -2222,23 +2216,41 @@ int launcher_run_menu(LauncherGfx *gfx) {
         u32 kDown = hidKeysDown();
 
         if (kDown & KEY_START) return -1;
-        if (kDown & (KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT)) { selected++; select_anim = 0.f; }
-        if (kDown & (KEY_LEFT  | KEY_DLEFT  | KEY_CPAD_LEFT))  { selected--; select_anim = 0.f; }
-        if (kDown & (KEY_DOWN  | KEY_DDOWN  | KEY_CPAD_DOWN))  { selected += cols; select_anim = 0.f; }
-        if (kDown & (KEY_UP    | KEY_DUP    | KEY_CPAD_UP))    { selected -= cols; select_anim = 0.f; }
-        if (kDown & KEY_R)                                     { selected += cols * 2; select_anim = 0.f; }
-        if (kDown & KEY_L)                                     { selected -= cols * 2; select_anim = 0.f; }
-        if (selected < 0)              selected = 0;
-        if (selected >= g_game_count)  selected = g_game_count - 1;
+        if (kDown & (KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT)) {
+            selected++;
+            select_anim = 0.f;
+        }
+        if (kDown & (KEY_LEFT | KEY_DLEFT | KEY_CPAD_LEFT)) {
+            selected--;
+            select_anim = 0.f;
+        }
+        if (kDown & (KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN)) {
+            selected += cols;
+            select_anim = 0.f;
+        }
+        if (kDown & (KEY_UP | KEY_DUP | KEY_CPAD_UP)) {
+            selected -= cols;
+            select_anim = 0.f;
+        }
+        if (kDown & KEY_R) {
+            selected += cols * 2;
+            select_anim = 0.f;
+        }
+        if (kDown & KEY_L) {
+            selected -= cols * 2;
+            select_anim = 0.f;
+        }
+        if (selected < 0) selected = 0;
+        if (selected >= g_game_count) selected = g_game_count - 1;
         if (kDown & KEY_A) return selected;
         if (kDown & KEY_SELECT) {
             launcher_run_settings(gfx);
         }
 
         int sel_row = selected / cols;
-        float target_y = (float)sel_row * tile_gap_y - visible_h * 0.40f;
+        float target_y = (float) sel_row * tile_gap_y - visible_h * 0.40f;
         int max_rows = (g_game_count + cols - 1) / cols;
-        float max_y = (float)max_rows * tile_gap_y - visible_h;
+        float max_y = (float) max_rows * tile_gap_y - visible_h;
         if (max_y < 0.f) max_y = 0.f;
         if (target_y < 0.f) target_y = 0.f;
         if (target_y > max_y) target_y = max_y;
@@ -2258,15 +2270,11 @@ int launcher_run_menu(LauncherGfx *gfx) {
     return -1;
 }
 
-// ---------------------------------------------------------------------------
-// Loading screen
-// ---------------------------------------------------------------------------
-
 static void loading_draw_top(LauncherGfx *gfx, const char *gameName, const char *stage,
                              int page, int total, float percent, float t) {
     const LauncherTheme *th = launcher_current_theme();
-    const float W = (float)LAUNCHER_TOP_W;
-    const float H = (float)LAUNCHER_TOP_H;
+    const float W = (float) LAUNCHER_TOP_W;
+    const float H = (float) LAUNCHER_TOP_H;
 
     launcher_bind_screen(gfx, &gfx->topScreen, true, 0x070914FF);
     launcher_draw_themed_background(gfx, t, W, H, th);
@@ -2281,7 +2289,7 @@ static void loading_draw_top(LauncherGfx *gfx, const char *gameName, const char 
     launcher_draw_centered_text_rgb(gfx, title, W * 0.5f, 82.f, titleScale, th->text_subtle, 0.95f);
 
     char stageText[64];
-    int dots = ((int)(t * 2.5f)) % 4;
+    int dots = ((int) (t * 2.5f)) % 4;
     snprintf(stageText, sizeof(stageText), "%s%s",
              stage ? stage : "LOADING",
              (dots == 0) ? "" : (dots == 1 ? "." : (dots == 2 ? ".." : "...")));
@@ -2297,9 +2305,9 @@ static void loading_draw_top(LauncherGfx *gfx, const char *gameName, const char 
                       th->accent[0], th->accent[1], th->accent[2], 1.f);
         float shimmerX = barX + fmodf(t * 80.f, fillW + 60.f) - 30.f;
         for (int i = 0; i < 6; i++) {
-            float sx = shimmerX + (float)i * 4.f;
+            float sx = shimmerX + (float) i * 4.f;
             if (sx < barX || sx + 3.f > barX + fillW) continue;
-            float a = 0.30f - (float)i * 0.04f;
+            float a = 0.30f - (float) i * 0.04f;
             launcher_rect(gfx, sx, barY, 3.f, barH,
                           th->text_title[0], th->text_title[1] * 0.96f, th->text_title[2] * 0.74f, a);
         }
@@ -2308,7 +2316,7 @@ static void loading_draw_top(LauncherGfx *gfx, const char *gameName, const char 
     }
 
     char status[48];
-    snprintf(status, sizeof(status), "%d%%", (int)(percent + 0.5f));
+    snprintf(status, sizeof(status), "%d%%", (int) (percent + 0.5f));
     launcher_draw_centered_text_rgb(gfx, status, W * 0.5f, 174.f, 1.7f, th->text_main, 1.f);
 
     if (total > 0) {
@@ -2320,8 +2328,8 @@ static void loading_draw_top(LauncherGfx *gfx, const char *gameName, const char 
 
 static void loading_draw_bottom(LauncherGfx *gfx, const char *gameName, const char *stage, float t) {
     const LauncherTheme *th = launcher_current_theme();
-    const float W = (float)LAUNCHER_BOT_W;
-    const float H = (float)LAUNCHER_BOT_H;
+    const float W = (float) LAUNCHER_BOT_W;
+    const float H = (float) LAUNCHER_BOT_H;
 
     if (!gfx->bottomScreen.ready) return;
 
@@ -2344,7 +2352,7 @@ static void loading_draw_bottom(LauncherGfx *gfx, const char *gameName, const ch
 void launcher_render_loading(LauncherGfx *gfx, const char *gameName, const char *stage,
                              int page, int total, float percent) {
     if (!gfx || !gfx->ready || !launcher_begin_frame(gfx)) return;
-    if (percent < 0.f)   percent = 0.f;
+    if (percent < 0.f) percent = 0.f;
     if (percent > 100.f) percent = 100.f;
 
     float t = launcher_anim_seconds();
@@ -2352,10 +2360,6 @@ void launcher_render_loading(LauncherGfx *gfx, const char *gameName, const char 
     loading_draw_bottom(gfx, gameName, stage, t);
     launcher_end_frame(gfx);
 }
-
-// ---------------------------------------------------------------------------
-// In-game pause overlay
-// ---------------------------------------------------------------------------
 
 #define PAUSE_OPTION_COUNT 8
 
@@ -2448,13 +2452,9 @@ static void pause_draw_overlay(LauncherGfx *gfx, LauncherScreen *scr, int sel, f
 
     launcher_bind_screen(gfx, scr, false, 0);
 
-    float W = (float)scr->logicalW;
-    float H = (float)scr->logicalH;
-
-    // Dim everything underneath
+    float W = (float) scr->logicalW;
+    float H = (float) scr->logicalH;
     launcher_rect(gfx, 0, 0, W, H, 0.0f, 0.0f, 0.0f, 0.55f);
-
-    // Card
     float cardW = W * 0.78f;
     float cardH = H * 0.78f;
     float cardX = (W - cardW) * 0.5f;
@@ -2462,19 +2462,17 @@ static void pause_draw_overlay(LauncherGfx *gfx, LauncherScreen *scr, int sel, f
     launcher_rect(gfx, cardX - 4, cardY - 4, cardW + 8, cardH + 8,
                   th->accent[0], th->accent[1], th->accent[2], 0.85f);
     launcher_rect(gfx, cardX, cardY, cardW, cardH, 0.04f, 0.035f, 0.085f, 0.95f);
-
-    // Header strip
     launcher_rect(gfx, cardX, cardY, cardW, 22.f,
                   th->accent_dim[0] * 0.6f, th->accent_dim[1] * 0.6f, th->accent_dim[2] * 0.6f, 0.95f);
     launcher_draw_text_rgb(gfx, headline, cardX + 10, cardY + 7, 1.20f, th->text_title, 1.f);
 
     float listX = cardX + 14.f;
     float listY = cardY + 32.f;
-    float rowH  = 18.f;
+    float rowH = 18.f;
     char value[48];
 
     for (int i = 0; i < PAUSE_OPTION_COUNT; i++) {
-        float ry = listY + (float)i * rowH;
+        float ry = listY + (float) i * rowH;
         bool selRow = (i == sel);
         if (selRow) {
             float breath = 0.5f + 0.5f * sinf(t * 3.0f);
@@ -2500,8 +2498,6 @@ LauncherPauseAction launcher_run_pause(LauncherGfx *gfx) {
     if (!gfx || !gfx->ready) return LAUNCHER_PAUSE_RESUME;
 
     int sel = 0;
-
-    // Wait for the chord-trigger keys to be released so we don't immediately bounce.
     while (aptMainLoop()) {
         hidScanInput();
         u32 held = hidKeysHeld();
@@ -2549,8 +2545,6 @@ LauncherPauseAction launcher_run_pause(LauncherGfx *gfx) {
 
         if (launcher_begin_frame(gfx)) {
             float t = launcher_anim_seconds();
-            // The companion screen shows a themed banner so the device looks
-            // intentional while the player is fiddling with options.
             LauncherScreen *overlay = (g_settings.game_screen == LAUNCHER_GAME_SCREEN_TOP)
                                           ? &gfx->topScreen
                                           : &gfx->bottomScreen;
@@ -2562,8 +2556,8 @@ LauncherPauseAction launcher_run_pause(LauncherGfx *gfx) {
                 const LauncherTheme *th = launcher_current_theme();
                 launcher_bind_screen(gfx, companion, true, 0x050711FF);
                 launcher_draw_themed_background(gfx, t * 0.7f,
-                                                (float)companion->logicalW,
-                                                (float)companion->logicalH, th);
+                                                (float) companion->logicalW,
+                                                (float) companion->logicalH, th);
                 launcher_draw_centered_text_rgb(gfx, "PAUSED",
                                                 companion->logicalW * 0.5f,
                                                 companion->logicalH * 0.5f - 16.f,

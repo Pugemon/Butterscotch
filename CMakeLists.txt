@@ -37,6 +37,11 @@ if(PLATFORM STREQUAL "")
     message(FATAL_ERROR "PLATFORM is not set! Use -DPLATFORM=glfw (or another supported platform).")
 endif()
 
+option(LOG_ALL "Enable very verbose diagnostic logs in selected subsystems" OFF)
+if(LOG_ALL)
+    add_compile_definitions(LOG_ALL)
+endif()
+
 # To avoid unused code in production builds that are only used for a single game (example: PlayStation 2 target), we can enable/disable specific bytecode versions
 #
 # If only a single bytecode version is enabled, the checks will be collapsed and removed by the compiler during build time, reducing code size and improving
@@ -564,7 +569,7 @@ elseif(PLATFORM STREQUAL "3ds")
         add_compile_definitions(ENABLE_VM_GML_PROFILER)
     endif()
 
-    option(ENABLE_VM_TRACING "Enable Butterscotch VM/interpreter tracing checks" OFF)
+    option(ENABLE_VM_TRACING "Enable Butterscotch VM/interpreter tracing checks" ON)
     if(ENABLE_VM_TRACING)
         add_compile_definitions(ENABLE_VM_TRACING)
     endif()
@@ -574,12 +579,12 @@ elseif(PLATFORM STREQUAL "3ds")
         add_compile_definitions(ENABLE_VM_OPCODE_PROFILER)
     endif()
 
-    option(ENABLE_VM_RESOLVE_LOGS "Log every var read/write that fails to resolve to an instance (very noisy on 3DS)" OFF)
+    option(ENABLE_VM_RESOLVE_LOGS "Log every var read/write that fails to resolve to an instance (very noisy on 3DS)" ON)
     if(ENABLE_VM_RESOLVE_LOGS)
         add_compile_definitions(ENABLE_VM_RESOLVE_LOGS)
     endif()
 
-    option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" OFF)
+    option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" ON)
     if(ENABLE_SPATIAL_GRID_LOGS)
         add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
     endif()
