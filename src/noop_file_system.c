@@ -1,3 +1,12 @@
+// Original Code by MrPowerGamerBR and the Butterscotch contributors.
+// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
+//
+// This file is part of Butterscotch (Nintendo 3DS port).
+//
+// Butterscotch is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 3.
+
 #include "noop_file_system.h"
 #include "utils.h"
 
@@ -9,47 +18,47 @@
 // ===[ In-Memory File Storage ]===
 
 typedef struct {
-    char* key; // file path
-    char* value; // file contents
+    char *key; // file path
+    char *value; // file contents
 } MemoryFileEntry;
 
 typedef struct {
-    uint8_t* data;
+    uint8_t *data;
     int32_t size;
 } MemoryBinaryData;
 
 typedef struct {
-    char* key; // file path
+    char *key; // file path
     MemoryBinaryData value;
 } MemoryBinaryEntry;
 
 typedef struct {
     FileSystem base;
-    MemoryFileEntry* files; // stb_ds string hashmap
-    MemoryBinaryEntry* binaryFiles; // stb_ds string hashmap
+    MemoryFileEntry *files; // stb_ds string hashmap
+    MemoryBinaryEntry *binaryFiles; // stb_ds string hashmap
 } NoopFileSystem;
 
 // ===[ Vtable Implementations ]===
 
-static char* noopResolvePath(MAYBE_UNUSED FileSystem* fs, MAYBE_UNUSED const char* relativePath) {
+static char *noopResolvePath(MAYBE_UNUSED FileSystem *fs, MAYBE_UNUSED const char *relativePath) {
     return safeStrdup("./");
 }
 
-static bool noopFileExists(FileSystem* fs, const char* relativePath) {
-    NoopFileSystem* nfs = (NoopFileSystem*) fs;
+static bool noopFileExists(FileSystem *fs, const char *relativePath) {
+    NoopFileSystem *nfs = (NoopFileSystem *) fs;
     return shgeti(nfs->files, relativePath) >= 0;
 }
 
-static char* noopReadFileText(FileSystem* fs, const char* relativePath) {
-    NoopFileSystem* nfs = (NoopFileSystem*) fs;
+static char *noopReadFileText(FileSystem *fs, const char *relativePath) {
+    NoopFileSystem *nfs = (NoopFileSystem *) fs;
     ptrdiff_t idx = shgeti(nfs->files, relativePath);
     if (0 > idx)
         return nullptr;
     return safeStrdup(nfs->files[idx].value);
 }
 
-static bool noopWriteFileText(FileSystem* fs, const char* relativePath, const char* contents) {
-    NoopFileSystem* nfs = (NoopFileSystem*) fs;
+static bool noopWriteFileText(FileSystem *fs, const char *relativePath, const char *contents) {
+    NoopFileSystem *nfs = (NoopFileSystem *) fs;
 
     // If the key already exists, free the old value before overwriting
     ptrdiff_t idx = shgeti(nfs->files, relativePath);
@@ -63,8 +72,8 @@ static bool noopWriteFileText(FileSystem* fs, const char* relativePath, const ch
     return true;
 }
 
-static bool noopDeleteFile(FileSystem* fs, const char* relativePath) {
-    NoopFileSystem* nfs = (NoopFileSystem*) fs;
+static bool noopDeleteFile(FileSystem *fs, const char *relativePath) {
+    NoopFileSystem *nfs = (NoopFileSystem *) fs;
     ptrdiff_t idx = shgeti(nfs->files, relativePath);
     if (0 > idx)
         return false;
@@ -74,34 +83,34 @@ static bool noopDeleteFile(FileSystem* fs, const char* relativePath) {
     return true;
 }
 
-static bool noopReadFileBinary(FileSystem* fs, const char* relativePath, uint8_t** outData, int32_t* outSize) {
-    NoopFileSystem* nfs = (NoopFileSystem*) fs;
+static bool noopReadFileBinary(FileSystem *fs, const char *relativePath, uint8_t **outData, int32_t *outSize) {
+    NoopFileSystem *nfs = (NoopFileSystem *) fs;
     ptrdiff_t idx = shgeti(nfs->binaryFiles, relativePath);
     if (0 > idx)
         return false;
 
-    MemoryBinaryData* entry = &nfs->binaryFiles[idx].value;
-    uint8_t* copy = safeMalloc((size_t) entry->size);
+    MemoryBinaryData *entry = &nfs->binaryFiles[idx].value;
+    uint8_t *copy = safeMalloc((size_t) entry->size);
     memcpy(copy, entry->data, (size_t) entry->size);
     *outData = copy;
     *outSize = entry->size;
     return true;
 }
 
-static bool noopWriteFileBinary(FileSystem* fs, const char* relativePath, const uint8_t* data, int32_t size) {
-    NoopFileSystem* nfs = (NoopFileSystem*) fs;
+static bool noopWriteFileBinary(FileSystem *fs, const char *relativePath, const uint8_t *data, int32_t size) {
+    NoopFileSystem *nfs = (NoopFileSystem *) fs;
 
     ptrdiff_t idx = shgeti(nfs->binaryFiles, relativePath);
     if (idx >= 0) {
         free(nfs->binaryFiles[idx].value.data);
-        uint8_t* copy = safeMalloc((size_t) size);
+        uint8_t *copy = safeMalloc((size_t) size);
         memcpy(copy, data, (size_t) size);
         nfs->binaryFiles[idx].value.data = copy;
         nfs->binaryFiles[idx].value.size = size;
     } else {
-        uint8_t* copy = safeMalloc((size_t) size);
+        uint8_t *copy = safeMalloc((size_t) size);
         memcpy(copy, data, (size_t) size);
-        MemoryBinaryData binaryData = { .data = copy, .size = size };
+        MemoryBinaryData binaryData = {.data = copy, .size = size};
         shput(nfs->binaryFiles, relativePath, binaryData);
     }
 
@@ -122,18 +131,18 @@ static FileSystemVtable noopFileSystemVtable = {
 
 // ===[ Lifecycle ]===
 
-FileSystem* NoopFileSystem_create(void) {
-    NoopFileSystem* nfs = safeCalloc(1, sizeof(NoopFileSystem));
+FileSystem *NoopFileSystem_create(void) {
+    NoopFileSystem *nfs = safeCalloc(1, sizeof(NoopFileSystem));
     nfs->base.vtable = &noopFileSystemVtable;
     nfs->files = nullptr;
     sh_new_strdup(nfs->files);
     nfs->binaryFiles = nullptr;
     sh_new_strdup(nfs->binaryFiles);
-    return (FileSystem*) nfs;
+    return (FileSystem *) nfs;
 }
 
-void NoopFileSystem_destroy(FileSystem* fs) {
-    NoopFileSystem* nfs = (NoopFileSystem*) fs;
+void NoopFileSystem_destroy(FileSystem *fs) {
+    NoopFileSystem *nfs = (NoopFileSystem *) fs;
     repeat(shlen(nfs->files), i) {
         free(nfs->files[i].value);
     }

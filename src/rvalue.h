@@ -1,3 +1,12 @@
+// Original Code by MrPowerGamerBR and the Butterscotch contributors.
+// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
+//
+// This file is part of Butterscotch (Nintendo 3DS port).
+//
+// Butterscotch is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 3.
+
 #pragma once
 #include <stdint.h>
 #include "common.h"
@@ -36,12 +45,12 @@ uint32_t Instance_getInstanceId(struct Instance* inst);
 
 // ===[ RValue - Tagged Union ]===
 typedef enum {
-    RVALUE_UNDEFINED = 0,
+    RVALUE_REAL = 0,
     RVALUE_STRING = 1,
     RVALUE_INT32 = 2,
     RVALUE_INT64 = 3,
     RVALUE_BOOL = 4,
-    RVALUE_REAL = 5,
+    RVALUE_UNDEFINED = 5,
     RVALUE_ARRAY = 6,
     RVALUE_METHOD = 7,
     RVALUE_STRUCT = 8,

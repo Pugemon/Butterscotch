@@ -1,3 +1,12 @@
+// Original Code by MrPowerGamerBR and the Butterscotch contributors.
+// Modifications Copyright (c) 2026 Efim Andreev and Vyacheslav Ivanov.
+//
+// This file is part of Butterscotch (Nintendo 3DS port).
+//
+// Butterscotch is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 3.
+
 #pragma once
 
 #include "common.h"
@@ -9,7 +18,6 @@
 #include "instance.h"
 #include "renderer.h"
 #include "runner_keyboard.h"
-#include "runner_mouse.h"
 #include "spatial_grid.h"
 #include "runner_gamepad.h"
 #include "vm.h"
@@ -159,17 +167,13 @@ typedef struct {
 typedef enum {
     RuntimeLayerElementType_Background = 1,
     RuntimeLayerElementType_Sprite = 4,
-    RuntimeLayerElementType_Tile = 7,
 } RuntimeLayerElementType;
 
 typedef struct {
     uint32_t id;
     RuntimeLayerElementType type;
-    bool visible;
-    float alpha;
     RuntimeBackgroundElement* backgroundElement; // owned; nullptr if type != Background
     RuntimeSpriteElement* spriteElement; // owned; nullptr if type != Sprite
-    RoomTile* tileElement; // borrowed, points into RoomLayerAssetsData->legacyTiles; nullptr if type != Tile
 } RuntimeLayerElement;
 
 // Runtime-mutable state for a GMS2 room layer. Parsed layers are populated at room load from RoomLayer and share IDs with the parsed data.
@@ -295,18 +299,6 @@ typedef struct {
     RuntimeView views[MAX_VIEWS];
 } SavedRoomState;
 
-// One flattened collision event entry. Mirrors ObjectEvent but adds the resolved codeId and ownerObjectIndex (the ancestor that actually defines the event) so dispatch needs no event-table lookup.
-typedef struct {
-    uint32_t targetObjectIndex; // partner-side object index this handler matches against (eventSubtype in the GML object file)
-    int32_t codeId; // resolved bytecode id for this handler
-    int32_t ownerObjectIndex; // object that actually defines the handler (i for own events, ancestor index for inherited)
-} FlattenedCollisionEvent;
-
-typedef struct {
-    uint32_t eventCount;
-    FlattenedCollisionEvent* events;
-} FlattenedCollisionEventList;
-
 typedef struct Runner {
     DataWin* dataWin;
     VMContext* vmContext;
@@ -333,13 +325,6 @@ typedef struct Runner {
     // For each event type, the deduplicated list of object indices that respond to ANY subtype of that event (including via inheritance). Derived from the event table; used by collision dispatch to skip non-collision objects in the outer loop.
     // Length = OBJT_EVENT_TYPE_COUNT.
     int32_t** objectsWithAnyEventOfType;
-    // Per-object flattened collision event list (one FlattenedCollisionEventList per objectIndex, length = dataWin->objt.count).
-    // Flattens parent-chain collision inheritance: each child's list contains its own collision events plus
-    // every ancestor target the child does not override, deduplicated. Each entry stores the resolved codeId
-    // and the ownerObjectIndex (the ancestor that actually defines the event), so collision dispatch needs
-    // no parent-chain walk and no resolved-event-table lookup. Owned by the Runner; dataWin->objt is left
-    // untouched so the parsed file remains the source of truth.
-    FlattenedCollisionEventList* flattenedCollisionEvents;
     // Reusable scratch array for Runner_executeEventForAll. Pre-grown to avoid stb_ds arrput overhead and repeated allocations on the per-frame dispatch path. Owned via stb_ds; truncated at the start of each call.
     Instance** eventDispatchInstances;
     // LIFO arena used to snapshot per-object instance lists before iteration.
@@ -353,7 +338,6 @@ typedef struct Runner {
     int frameCount;
     uint32_t nextInstanceId;
     RunnerKeyboardState* keyboard;
-    RunnerMouseState* mouse;
     RuntimeView views[MAX_VIEWS];
     RunnerGamepadState* gamepads;
     RuntimeBackground backgrounds[8];
@@ -447,7 +431,6 @@ void Runner_drawBackgrounds(Runner* runner, bool foreground);
 void Runner_computeViewDisplayScale(Runner* runner, int32_t gameW, int32_t gameH, float* outScaleX, float* outScaleY);
 void Runner_drawViews(Runner* runner, int32_t gameW, int32_t gameH, float displayScaleX, float displayScaleY, bool debugShowCollisionMasks);
 void Runner_scrollBackgrounds(Runner* runner);
-void Runner_drawTileLayer(Runner* runner, RoomLayerTilesData* data, float layerOffsetX, float layerOffsetY);
 Instance* Runner_createInstance(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex);
 Instance* Runner_createInstanceWithDepth(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t depth);
 Instance* Runner_createInstanceWithLayer(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t layerId);
